@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import Anthropic from "@anthropic-ai/sdk";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { MarkName } from "../../shared/marks.ts";
-import { routeWithHaiku, setClient, setLogger, solveWithOpus } from "./claude.ts";
+import { generateFillers, routeWithHaiku, setClient, setLogger, solveWithOpus } from "./claude.ts";
 
 interface Captured { body: Record<string, any>; headers: IncomingMessage["headers"] }
 type Responder = (req: Captured, res: ServerResponse) => void;
@@ -64,34 +64,43 @@ const marks = () => {
 };
 
 describe("adapter over the real SDK client (local SSE server)", () => {
-  it("Haiku forced: eager tool JSON streams the ack; body has the §4 settings", async () => {
+  it("Haiku: eager `route` JSON streams decision then say; body has the §4 settings", async () => {
     setClient(new Anthropic({ apiKey: "test-key", baseURL }));
-    const input = JSON.stringify({ ack: "Sure, checking the \"grid\" now.", question: "Why grid at demo.html:34?" });
+    const input = JSON.stringify({ intent: "question", estimate_seconds: 9, say: "Sure, checking the \"grid\" now.", question: "Why grid at demo.html:34?" });
     const deltas = [];
     for (let i = 0; i < input.length; i += 6) {
       deltas.push({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: input.slice(i, i + 6) } });
     }
     queue.push(sse([
       msgStart("claude-haiku-5-5"),
-      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "ask_opus", input: {} } },
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "route", input: {} } },
       ...deltas,
       { type: "content_block_stop", index: 0 },
       ...msgEnd("tool_use"),
     ]));
     const m = marks();
     const spoken: string[] = [];
-    const res = await routeWithHaiku({ mark: m.mark, transcript: "Why is this a grid?", pointing: [], mode: "forced", onSpokenDelta: (d) => spoken.push(d) });
+    const order: string[] = [];
+    const res = await routeWithHaiku({
+      mark: m.mark, transcript: "Why is this a grid?", pointing: [], mode: "auto",
+      onDecision: (d) => order.push(`decision:${d.intent}:${d.estimateS}`),
+      onSpokenDelta: (d, kind) => { spoken.push(d); order.push(`say:${kind}`); },
+      onSpokenEnd: (kind) => order.push(`end:${kind}`),
+    });
 
     expect(spoken.join("")).toBe('Sure, checking the "grid" now.');
     expect(spoken.length).toBeGreaterThan(2);
-    expect(res.delegate).toEqual({ question: "Why grid at demo.html:34?" });
+    expect(order[0]).toBe("decision:question:9");
+    expect(order.at(-1)).toBe("end:ack");
+    expect(res.delegate).toEqual({ question: "Why grid at demo.html:34?", intent: "question", estimateS: 9 });
+    expect(res.decision).toEqual({ intent: "question", estimateS: 9 });
     expect(m.list).toEqual(["llm.request", "llm.toolCall", "llm.firstToken"]);
 
     const { body, headers } = captured[0]!;
     expect(body.stream).toBe(true);
     expect(body.model).toBe("claude-haiku-5-5");
     expect(body.output_config).toEqual({ effort: "low" });
-    expect(body.tool_choice).toEqual({ type: "tool", name: "ask_opus", disable_parallel_tool_use: true });
+    expect(body.tool_choice).toEqual({ type: "tool", name: "route", disable_parallel_tool_use: true }); // forced in auto mode too
     expect(body.tools[0].eager_input_streaming).toBe(true);
     expect(body.system[0].cache_control).toEqual({ type: "ephemeral" });
     expect(body).not.toHaveProperty("temperature");
@@ -132,6 +141,27 @@ describe("adapter over the real SDK client (local SSE server)", () => {
     expect(lines).toEqual(["Grid aligns both axes."]);
     expect((res.usage as { cache_read_input_tokens: number }).cache_read_input_tokens).toBe(3000);
     expect(m.list).toEqual(["opus.request", "opus.request", "opus.firstToken", "opus.spokenReady", "opus.done"]);
+  });
+
+  it("fillers: non-streaming forced `progress` call over the real SDK; HTTP errors give empty lines", async () => {
+    setClient(new Anthropic({ apiKey: "test-key", baseURL, maxRetries: 0 }));
+    queue.push((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "msg_f", type: "message", role: "assistant", model: "claude-haiku-5-5", stop_reason: "tool_use", stop_sequence: null, usage,
+        content: [{ type: "tool_use", id: "toolu_f", name: "progress", input: { lines: ["Opening that grid's stylesheet.", "Now reading the design notes.", "Checking how the cards wrap."] } }],
+      }));
+    });
+    const args = { transcript: "Why is this a grid?", question: "Why grid?", intent: "question" as const, pointing: [] };
+    const res = await generateFillers(args);
+    expect(res.lines).toEqual(["Opening that grid's stylesheet.", "Now reading the design notes.", "Checking how the cards wrap."]);
+    const { body } = captured[0]!;
+    expect(body.stream).toBeUndefined();
+    expect(body.tool_choice).toEqual({ type: "tool", name: "progress", disable_parallel_tool_use: true });
+    expect(body.output_config).toEqual({ effort: "low" });
+
+    queue.push(status(529, "overloaded_error"));
+    await expect(generateFillers(args)).resolves.toEqual({ lines: [], usage: null });
   });
 
   it("Opus refusal stop_reason surfaces as an error", async () => {

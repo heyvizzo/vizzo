@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JsonStringFieldExtractor, SpokenLineParser } from "./claudeParse.ts";
+import { JsonStringFieldExtractor, JsonTopLevelStream, parseEstimate, RouteInputStream, SpokenLineParser, type RouteIntentName } from "./claudeParse.ts";
 
 function feedAll(chunks: string[], field = "ack"): { out: string[]; ex: JsonStringFieldExtractor } {
   const ex = new JsonStringFieldExtractor(field);
@@ -157,5 +157,98 @@ describe("SpokenLineParser", () => {
     const { lines, parser } = run([full, "\nSPOKEN: again\n"]);
     parser.end();
     expect(lines.length).toBe(1);
+  });
+});
+
+describe("JsonTopLevelStream", () => {
+  function collect(json: string, chunk: number) {
+    const events: string[] = [];
+    const strings: Record<string, string> = {};
+    const p = new JsonTopLevelStream({
+      onKey: (k) => events.push(`key:${k}`),
+      onStringDelta: (k, c) => { strings[k] = (strings[k] ?? "") + c; },
+      onValue: (k, v) => events.push(`value:${k}=${JSON.stringify(v)}`),
+    });
+    for (let i = 0; i < json.length; i += chunk) p.feed(json.slice(i, i + chunk));
+    return { events, strings };
+  }
+  const json = `{ "intent" : "task", "estimate_seconds": 120 ,"nested":{"say":"no","n":1},"list":[1,"x"],"ok":true,"say":"Hi \\"you\\" \\ud83d\\ude80","none":null}`;
+
+  for (const chunk of [1, 3, 1000]) {
+    it(`reports top-level keys, strings and primitives only (chunk ${chunk})`, () => {
+      const { events, strings } = collect(json, chunk);
+      expect(events).toEqual([
+        "key:intent", `value:intent="task"`,
+        "key:estimate_seconds", "value:estimate_seconds=120",
+        "key:nested", "key:list",
+        "key:ok", "value:ok=true",
+        "key:say", `value:say="Hi \\"you\\" 🚀"`,
+        "key:none", "value:none=null",
+      ]);
+      expect(strings).toEqual({ intent: "task", say: `Hi "you" 🚀` });
+    });
+  }
+
+  it("a number at the end of the object completes on the closing brace", () => {
+    expect(collect(`{"a":7}`, 1).events).toEqual(["key:a", "value:a=7"]);
+  });
+});
+
+describe("RouteInputStream", () => {
+  function make(allowed: RouteIntentName[] = ["question", "task", "clarify", "answer"], fallback: RouteIntentName = "answer") {
+    const events: string[] = [];
+    const s = new RouteInputStream({
+      onDecision: (d) => events.push(`decision:${d.intent}:${d.estimateS}`),
+      onSay: (d, k) => events.push(`say:${k}:${d}`),
+      onSayEnd: (k) => events.push(`end:${k}`),
+    }, allowed, fallback);
+    return { s, events, feedChars: (j: string) => { for (const c of j) s.feed(c); } };
+  }
+
+  it("in-order fields: decision once the estimate completes, then say char by char, end at the quote", () => {
+    const { events, feedChars } = make();
+    feedChars(`{"intent":"question","estimate_seconds":8`);
+    expect(events).toEqual([]); // 8 could still be 80
+    feedChars(`,"say":"Ok`);
+    expect(events).toEqual(["decision:question:8", "say:ack:O", "say:ack:k"]);
+    feedChars(`.","question":"q"}`);
+    expect(events.slice(-2)).toEqual(["say:ack:.", "end:ack"]);
+  });
+
+  it("clarify decides right at the intent, without waiting for an estimate", () => {
+    const { events, feedChars } = make();
+    feedChars(`{"intent":"clarify"`);
+    expect(events).toEqual(["decision:clarify:null"]);
+  });
+
+  it("disallowed intent counts as missing; finish() infers from the question", () => {
+    const { s, events, feedChars } = make(["question", "task", "clarify"], "clarify");
+    feedChars(`{"intent":"answer","say":"Sure.","question":"Why?"}`);
+    expect(events).toEqual([]);
+    s.finish();
+    expect(events).toEqual(["decision:question:null", "say:ack:Sure.", "end:ack"]);
+  });
+
+  it("finish() without a question uses the fallback intent", () => {
+    const { s, events, feedChars } = make(["question", "task", "clarify"], "clarify");
+    feedChars(`{"say":"Which one?"}`);
+    s.finish();
+    expect(events).toEqual(["decision:clarify:null", "say:answer:Which one?", "end:answer"]);
+  });
+
+  it("finish(final) speaks text that didn't stream, once", () => {
+    const { s, events } = make();
+    s.finish({ intent: "task", estimate_seconds: "200", say: "This will take a few minutes.", question: "q" });
+    s.finish({ say: "This will take a few minutes." });
+    expect(events).toEqual(["decision:task:200", "say:ack:This will take a few minutes.", "end:ack"]);
+  });
+
+  it("parseEstimate", () => {
+    expect(parseEstimate(12)).toBe(12);
+    expect(parseEstimate(7.6)).toBe(8);
+    expect(parseEstimate("45")).toBe(45);
+    expect(parseEstimate(0)).toBeNull();
+    expect(parseEstimate("soon")).toBeNull();
+    expect(parseEstimate(null)).toBeNull();
   });
 });

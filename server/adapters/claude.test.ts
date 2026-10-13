@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CursorSample, PointingTarget } from "../../shared/protocol.ts";
 import type { MarkName } from "../../shared/marks.ts";
 import {
-  ClaudeRefusalError, ROUTER_TOOL, type ClaudeClient, formatPointingForPrompt, loadFixtureContext,
-  routeWithHaiku, setClient, setLogger, solveWithOpus,
+  ClaudeRefusalError, DEFAULT_LONG_TASK_SECONDS, type ClaudeClient, formatPointingForPrompt, generateFillers, loadFixtureContext,
+  routeWithHaiku, routerTool, setClient, setLogger, solveWithOpus, validateRouterInput,
 } from "./claude.ts";
 
 // ── Mock SDK stream ────────────────────────────────────────────────────────
@@ -32,19 +32,26 @@ const usage = (o: Partial<Record<string, unknown>> = {}): Record<string, unknown
 const textDelta = (index: number, text: string): Ev => ({ type: "content_block_delta", index, delta: { type: "text_delta", text } });
 const jsonDelta = (index: number, partial_json: string): Ev => ({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json } });
 
-function mockClient(opts: { messages?: FakeStream[]; beta?: FakeStream[] }) {
+function mockClient(opts: { messages?: FakeStream[]; beta?: FakeStream[]; create?: unknown[] }) {
   const messagesStream = vi.fn((_params: unknown, _o?: unknown) => {
     const s = opts.messages?.shift();
     if (!s) throw new Error("unexpected messages.stream call");
     return s;
+  });
+  /** messages.create: each queued item resolves, or rejects if it's an Error. */
+  const messagesCreate = vi.fn(async (_params: unknown, _o?: unknown) => {
+    if (!opts.create?.length) throw new Error("unexpected messages.create call");
+    const r = opts.create.shift();
+    if (r instanceof Error) throw r;
+    return r;
   });
   const betaStream = vi.fn((_params: unknown, _o?: unknown) => {
     const s = opts.beta?.shift();
     if (!s) throw new Error("unexpected beta.messages.stream call");
     return s;
   });
-  const client = { messages: { stream: messagesStream }, beta: { messages: { stream: betaStream } } } as unknown as ClaudeClient;
-  return { client, messagesStream, betaStream };
+  const client = { messages: { stream: messagesStream, create: messagesCreate }, beta: { messages: { stream: betaStream } } } as unknown as ClaudeClient;
+  return { client, messagesStream, messagesCreate, betaStream };
 }
 
 function recorder() {
@@ -86,9 +93,11 @@ describe("formatPointingForPrompt", () => {
 // ── routeWithHaiku ─────────────────────────────────────────────────────────
 
 describe("routeWithHaiku", () => {
-  const toolStart: Ev = { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "ask_opus", input: {} } };
-  const input = { ack: "Good question, checking that grid.", question: "Why is the Feature card grid (web/cursor/demo/demo.html:34) built with CSS grid instead of flexbox?" };
-  const inputJson = JSON.stringify(input);
+  const toolStart: Ev = { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "route", input: {} } };
+  const Q_INPUT = {
+    intent: "question", estimate_seconds: 12, say: "Let me check that card grid.",
+    question: "Why is the Feature card grid (web/cursor/demo/demo.html:34) built with CSS grid instead of flexbox?",
+  };
 
   function toolEvents(json: string, chunk = 5): Ev[] {
     const evs: Ev[] = [{ type: "message_start", message: {} }, toolStart];
@@ -96,100 +105,218 @@ describe("routeWithHaiku", () => {
     evs.push({ type: "content_block_stop", index: 0 }, { type: "message_stop" });
     return evs;
   }
+  const finalFor = (input: unknown, o: Record<string, unknown> = {}) => ({ stop_reason: "tool_use", content: [{ type: "tool_use", name: "route", input }], usage: usage(), ...o });
 
-  it("forced mode: request shape follows ARCHITECTURE §4", async () => {
-    const final = { stop_reason: "tool_use", content: [{ type: "tool_use", name: "ask_opus", input }], usage: usage() };
-    const { client, messagesStream, betaStream } = mockClient({ messages: [fakeStream(toolEvents(inputJson), final)] });
-    setClient(client);
-    await routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: GRID_TARGETS, mode: "forced", onSpokenDelta: () => {} });
-
-    expect(betaStream).not.toHaveBeenCalled();
-    const p = messagesStream.mock.calls[0]![0] as Record<string, any>;
-    expect(p.model).toBe("claude-haiku-5-5");
-    expect(p.output_config).toEqual({ effort: "low" });
-    expect(p.tool_choice).toMatchObject({ type: "tool", name: "ask_opus" });
-    for (const k of ["temperature", "top_p", "top_k", "thinking", "fallbacks", "betas", "speed"]) expect(p).not.toHaveProperty(k);
-    expect(p.tools).toEqual([ROUTER_TOOL]);
-    expect(p.tools[0].eager_input_streaming).toBe(true);
-    expect(Object.keys(p.tools[0].input_schema.properties)).toEqual(["ack", "question"]);
-    expect(p.system[0].cache_control).toEqual({ type: "ephemeral" });
-    expect(p.messages[0].content).toContain(U3);
-    expect(p.messages[0].content).toContain("[data-source=web/cursor/demo/demo.html:34]");
-  });
-
-  it("forced mode: streams the ack while JSON arrives, then returns the question", async () => {
-    const final = { stop_reason: "tool_use", content: [{ type: "tool_use", name: "ask_opus", input }], usage: usage({ cache_read_input_tokens: 600 }) };
-    const { client } = mockClient({ messages: [fakeStream(toolEvents(inputJson, 3), final)] });
+  /** Runs the router on a streamed JSON string and records every callback in order. */
+  async function run(json: string, opts: { mode?: "forced" | "auto"; transcript?: string; pointing?: PointingTarget[]; chunk?: number; final?: Record<string, unknown> } = {}) {
+    let parsed: unknown = null;
+    try { parsed = JSON.parse(json); } catch { /* truncated */ }
+    const { client, messagesStream } = mockClient({ messages: [fakeStream(toolEvents(json, opts.chunk ?? 4), opts.final ?? finalFor(parsed))] });
     setClient(client);
     const r = recorder();
-    const spoken: string[] = [];
-    const kinds = new Set<string>();
     const events: string[] = [];
+    const spoken: string[] = [];
+    const decisions: unknown[] = [];
     const res = await routeWithHaiku({
-      mark: r.mark, transcript: U3, pointing: GRID_TARGETS, mode: "forced",
-      onSpokenDelta: (d, kind) => { spoken.push(d); kinds.add(kind); events.push("delta"); },
+      mark: r.mark, transcript: opts.transcript ?? U3, pointing: opts.pointing ?? GRID_TARGETS, mode: opts.mode ?? "forced",
+      onDecision: (d) => { decisions.push(d); events.push(`decision:${d.intent}`); },
+      onSpokenDelta: (d, kind) => { spoken.push(d); events.push(`say:${kind}`); },
       onSpokenEnd: (kind) => events.push(`end:${kind}`),
     });
+    return { res, r, events, spoken, said: spoken.join(""), decisions, params: messagesStream.mock.calls[0]![0] as Record<string, any> };
+  }
 
-    expect([...kinds]).toEqual(["ack"]);
-    expect(events.filter((e) => e.startsWith("end"))).toEqual(["end:ack"]);
-    expect(events[events.length - 1]).toBe("end:ack");
+  it("request shape: one forced `route` tool in both modes, §4 settings, cached system prompt", async () => {
+    for (const mode of ["forced", "auto"] as const) {
+      const { params: p } = await run(JSON.stringify(Q_INPUT), { mode });
+      expect(p.model).toBe("claude-haiku-5-5");
+      expect(p.output_config).toEqual({ effort: "low" });
+      expect(p.tool_choice).toEqual({ type: "tool", name: "route", disable_parallel_tool_use: true });
+      for (const k of ["temperature", "top_p", "top_k", "thinking", "fallbacks", "betas", "speed"]) expect(p).not.toHaveProperty(k);
+      expect(p.tools).toEqual([routerTool(mode)]);
+      expect(p.tools[0].eager_input_streaming).toBe(true);
+      expect(Object.keys(p.tools[0].input_schema.properties)).toEqual(["intent", "estimate_seconds", "say", "question"]);
+      expect(p.tools[0].input_schema.properties.intent.enum).toEqual(
+        mode === "forced" ? ["question", "task", "clarify"] : ["question", "task", "clarify", "answer"],
+      );
+      expect(p.system[0].cache_control).toEqual({ type: "ephemeral" });
+      expect(p.system[0].text).toContain(`${DEFAULT_LONG_TASK_SECONDS} seconds`);
+      expect(p.system[0].text).not.toContain("{{");
+      expect(p.messages.at(-1).content).toContain(U3);
+      expect(p.messages.at(-1).content).toContain("[data-source=web/cursor/demo/demo.html:34]");
+      expect(p.messages.at(-1).content).toMatch(mode === "forced" ? /Never answer yourself/ : /You may use answer/);
+    }
+  });
+
+  it("question: decision fires before any say delta, say streams as ack, returns the delegate", async () => {
+    const { res, r, events, spoken, said, decisions } = await run(JSON.stringify(Q_INPUT), { chunk: 3 });
+    expect(decisions).toEqual([{ intent: "question", estimateS: 12 }]);
+    expect(events[0]).toBe("decision:question");
+    expect(events.filter((e) => e.startsWith("say:")).every((e) => e === "say:ack")).toBe(true);
+    expect(events.at(-1)).toBe("end:ack");
+    expect(events.filter((e) => e.startsWith("end:"))).toHaveLength(1);
     expect(spoken.length).toBeGreaterThan(3); // incremental, not one burst
-    expect(spoken.join("")).toBe(input.ack);
-    expect(res.delegate).toEqual({ question: input.question });
-    expect(res.usage).toEqual(final.usage);
+    expect(said).toBe(Q_INPUT.say);
+    expect(res.delegate).toEqual({ question: Q_INPUT.question, intent: "question", estimateS: 12 });
+    expect(res.decision).toEqual({ intent: "question", estimateS: 12 });
     expect(r.names()).toEqual(["llm.request", "llm.toolCall", "llm.firstToken"]);
-    expect(logs.some((l) => l.includes("cache_read=600"))).toBe(true);
   });
 
-  it("auto mode: a direct text answer is spoken and nothing is delegated", async () => {
-    const evs: Ev[] = [
-      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
-      { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
-      textDelta(1, "Yes, "), textDelta(1, "I can hear you."),
-    ];
-    const final = { stop_reason: "end_turn", content: [{ type: "text", text: "Yes, I can hear you." }], usage: usage() };
-    const { client, messagesStream } = mockClient({ messages: [fakeStream(evs, final)] });
+  it("onSpokenEnd fires at say's closing quote, before the question streams", async () => {
+    const json = JSON.stringify(Q_INPUT);
+    let fed = 0;
+    const evs = toolEvents(json, 1);
+    const stream: FakeStream = {
+      async *[Symbol.asyncIterator]() {
+        for (const e of evs) {
+          await Promise.resolve();
+          if ((e.delta as { type?: string } | undefined)?.type === "input_json_delta") fed++;
+          yield e;
+        }
+      },
+      finalMessage: () => Promise.resolve(finalFor(Q_INPUT)),
+    };
+    const { client } = mockClient({ messages: [stream] });
     setClient(client);
-    const r = recorder();
-    const spoken: string[] = [];
-    const kinds: string[] = [];
-    const res = await routeWithHaiku({ mark: r.mark, transcript: "Can you hear me?", pointing: [], mode: "auto", onSpokenDelta: (d, k) => { spoken.push(d); kinds.push(k); } });
-    expect(spoken).toEqual(["Yes, ", "I can hear you."]);
-    expect(kinds).toEqual(["answer", "answer"]);
-    expect(res.delegate).toBeNull();
-    expect(r.names()).toEqual(["llm.request", "llm.firstToken"]);
-    expect((messagesStream.mock.calls[0]![0] as any).tool_choice).toMatchObject({ type: "auto" });
+    let fedAtEnd = -1;
+    await routeWithHaiku({ mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "forced", onSpokenDelta: () => {}, onSpokenEnd: () => { fedAtEnd = fed; } });
+    expect(fedAtEnd).toBe(json.indexOf(`","question"`) + 1); // right at the closing quote
   });
 
-  it("auto mode: text preamble plus a tool call speaks both and delegates", async () => {
-    const evs: Ev[] = [textDelta(0, "Hmm. "), { ...toolStart, index: 1 }, jsonDelta(1, inputJson)];
-    const final = { stop_reason: "tool_use", content: [], usage: usage() };
-    const { client } = mockClient({ messages: [fakeStream(evs, final)] });
-    setClient(client);
-    const spoken: string[] = [];
-    const res = await routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: GRID_TARGETS, mode: "auto", onSpokenDelta: (d) => spoken.push(d) });
-    expect(spoken.join("")).toBe("Hmm. " + input.ack);
-    expect(res.delegate?.question).toBe(input.question);
+  it("long task: decision carries the estimate; the 'take a while' line is spoken as ack", async () => {
+    const input = {
+      intent: "task", estimate_seconds: 120, say: "On it. That'll take a couple of minutes, I'll let you know when it's done.",
+      question: "Make the Get started button (web/cursor/demo/demo.html:20) bigger.",
+    };
+    const { res, events, said, decisions } = await run(JSON.stringify(input));
+    expect(decisions).toEqual([{ intent: "task", estimateS: 120 }]);
+    expect(events[0]).toBe("decision:task");
+    expect(said).toBe(input.say);
+    expect(events.at(-1)).toBe("end:ack");
+    expect(res.delegate).toEqual({ question: input.question, intent: "task", estimateS: 120 });
   });
 
-  it("invalid / truncated tool input: delegates the raw transcript instead", async () => {
-    const truncated = inputJson.slice(0, 50); // cut off mid-question
-    const final = { stop_reason: "max_tokens", content: [], usage: usage() };
-    const { client } = mockClient({ messages: [fakeStream(toolEvents(truncated), final)] });
+  it("clarify: no delegate, say is the whole reply (kind answer)", async () => {
+    const input = { intent: "clarify", say: "Which part do you want changed?" };
+    const { res, events, said, decisions } = await run(JSON.stringify(input), { transcript: "Change it", pointing: [] });
+    expect(decisions).toEqual([{ intent: "clarify", estimateS: null }]);
+    expect(events[0]).toBe("decision:clarify");
+    expect(events.slice(1, -1).every((e) => e === "say:answer")).toBe(true);
+    expect(events.at(-1)).toBe("end:answer");
+    expect(said).toBe(input.say);
+    expect(res).toMatchObject({ delegate: null, decision: { intent: "clarify", estimateS: null } });
+  });
+
+  it("clarify ignores a stray estimate", async () => {
+    const { res, decisions } = await run(JSON.stringify({ intent: "clarify", estimate_seconds: 30, say: "Which one?" }));
+    expect(decisions).toEqual([{ intent: "clarify", estimateS: null }]);
+    expect(res.decision.estimateS).toBeNull();
+  });
+
+  it("auto mode: answer is spoken as the whole reply, nothing delegated", async () => {
+    const { res, events, said } = await run(JSON.stringify({ intent: "answer", say: "Yes, I can hear you." }), { mode: "auto", transcript: "Can you hear me?", pointing: [] });
+    expect(said).toBe("Yes, I can hear you.");
+    expect(events).toEqual(expect.arrayContaining(["decision:answer", "end:answer"]));
+    expect(events[0]).toBe("decision:answer");
+    expect(res).toMatchObject({ delegate: null, decision: { intent: "answer", estimateS: null } });
+  });
+
+  it("forced mode: `answer` is not allowed; with a transcript it degrades to delegating", async () => {
+    const { res } = await run(JSON.stringify({ intent: "answer", say: "Sure." }), { mode: "forced" });
+    expect(res.delegate?.question).toContain(U3);
+    expect(res.decision.intent).toBe("question");
+  });
+
+  it("say before intent (model ignored the order): say is buffered until the decision", async () => {
+    const json = `{"say":"Checking that grid now.","intent":"question","estimate_seconds":8,"question":"Why grid?"}`;
+    const { res, events, said, decisions } = await run(json, { chunk: 3 });
+    expect(events[0]).toBe("decision:question");
+    expect(decisions).toEqual([{ intent: "question", estimateS: 8 }]);
+    expect(said).toBe("Checking that grid now.");
+    expect(events.filter((e) => e.startsWith("say:"))).toEqual(["say:ack"]); // released in one piece
+    expect(res.delegate).toEqual({ question: "Why grid?", intent: "question", estimateS: 8 });
+  });
+
+  it("say before estimate: say is held until its end, then the decision fires (estimate null); the return value has the late estimate", async () => {
+    const json = `{"intent":"task","say":"Give me a couple of minutes.","estimate_seconds":90,"question":"Make it bigger."}`;
+    const { res, events, decisions } = await run(json, { chunk: 2 });
+    expect(decisions).toEqual([{ intent: "task", estimateS: null }]);
+    expect(events).toEqual(["decision:task", "say:ack", "end:ack"]);
+    expect(res.decision).toEqual({ intent: "task", estimateS: 90 });
+    expect(logs.some((l) => l.includes("differs from final"))).toBe(true);
+  });
+
+  it("no intent at all: buffered say is released at the end, intent inferred from the question", async () => {
+    const json = `{"say":"One sec.","question":"Why grid?"}`;
+    const { res, events, said } = await run(json);
+    expect(events).toEqual(["decision:question", "say:ack", "end:ack"]);
+    expect(said).toBe("One sec.");
+    expect(res.decision).toEqual({ intent: "question", estimateS: null });
+    expect(res.delegate?.question).toContain(U3); // input was invalid (no intent): raw transcript fallback
+  });
+
+  it("missing estimate: decision fires at the end of say with estimateS null", async () => {
+    const json = `{"intent":"question","say":"Looking now.","question":"Why grid?"}`;
+    const { res, events } = await run(json);
+    expect(events[0]).toBe("decision:question");
+    expect(res.decision).toEqual({ intent: "question", estimateS: null });
+    expect(res.delegate).toEqual({ question: "Why grid?", intent: "question", estimateS: null });
+  });
+
+  it("non-eager fallback: no JSON deltas, the input comes only in finalMessage()", async () => {
+    const evs: Ev[] = [{ type: "message_start", message: {} }, toolStart, { type: "content_block_stop", index: 0 }];
+    const { client } = mockClient({ messages: [fakeStream(evs, finalFor(Q_INPUT))] });
     setClient(client);
-    const res = await routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: GRID_TARGETS, mode: "forced", onSpokenDelta: () => {} });
+    const events: string[] = [];
+    const res = await routeWithHaiku({
+      mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "forced",
+      onDecision: (d) => events.push(`decision:${d.intent}:${d.estimateS}`),
+      onSpokenDelta: (d, k) => events.push(`say:${k}:${d}`),
+      onSpokenEnd: (k) => events.push(`end:${k}`),
+    });
+    expect(events).toEqual(["decision:question:12", `say:ack:${Q_INPUT.say}`, "end:ack"]);
+    expect(res.delegate?.estimateS).toBe(12);
+  });
+
+  it("truncated input: delegates the raw transcript + pointing, keeping the announced decision", async () => {
+    const truncated = JSON.stringify({ ...Q_INPUT, intent: "task", estimate_seconds: 90 }).slice(0, 90); // cut off mid-question
+    const { res, decisions } = await run(truncated, { final: { stop_reason: "max_tokens", content: [], usage: usage() } });
+    expect(decisions).toEqual([{ intent: "task", estimateS: 90 }]);
     expect(res.delegate?.question).toContain(U3);
     expect(res.delegate?.question).toContain("demo.html:34");
+    expect(res.delegate).toMatchObject({ intent: "task", estimateS: 90 });
     expect(logs.some((l) => l.includes("input invalid"))).toBe(true);
   });
 
-  it("schema-invalid input (missing question) is rejected", async () => {
-    const final = { stop_reason: "tool_use", content: [], usage: usage() };
-    const { client } = mockClient({ messages: [fakeStream(toolEvents(`{"ack":"ok"}`), final)] });
+  it("schema-invalid input (question intent without a question): question fallback, estimate null", async () => {
+    const { res, decisions } = await run(`{"intent":"question","say":"ok"}`, { pointing: [] });
+    expect(decisions).toEqual([{ intent: "question", estimateS: null }]);
+    expect(res.delegate).toEqual({ question: `${U3}\n${formatPointingForPrompt([])}`, intent: "question", estimateS: null });
+    expect(res.decision).toEqual({ intent: "question", estimateS: null });
+  });
+
+  it("truncated after a complete clarify: keeps the clarify (it was already spoken)", async () => {
+    const json = `{"intent":"clarify","say":"Which button do you mean?","question":"x`;
+    const { res, said } = await run(json, { final: { stop_reason: "max_tokens", content: [], usage: usage() } });
+    expect(said).toBe("Which button do you mean?");
+    expect(res).toMatchObject({ delegate: null, decision: { intent: "clarify", estimateS: null } });
+  });
+
+  it("invalid input with an empty transcript: nothing to delegate", async () => {
+    const { res, decisions } = await run(`{"say":"`, { transcript: "  ", pointing: [], final: { stop_reason: "max_tokens", content: [], usage: usage() } });
+    expect(res.delegate).toBeNull();
+    expect(decisions).toHaveLength(1);
+  });
+
+  it("history is threaded as prior messages (follow-up to a clarifying question)", async () => {
+    const history = [{ turnId: "t1", approach: "pipeline" as const, user: "Make this button bigger", assistant: "Which button, the Get started one or Sign up?", detail: "" }];
+    const { client, messagesStream } = mockClient({ messages: [fakeStream(toolEvents(JSON.stringify(Q_INPUT)), finalFor(Q_INPUT))] });
     setClient(client);
-    const res = await routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: [], mode: "forced", onSpokenDelta: () => {} });
-    expect(res.delegate?.question).toContain(U3);
+    await routeWithHaiku({ mark: () => {}, transcript: "the first one", pointing: [], mode: "forced", history, onSpokenDelta: () => {} });
+    const msgs = (messagesStream.mock.calls[0]![0] as any).messages;
+    expect(msgs.map((m: any) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(msgs[1].content).toBe("Which button, the Get started one or Sign up?");
+    expect(msgs[2].content).toContain('"the first one"');
   });
 
   it("refusal: throws (no fallback for Haiku)", async () => {
@@ -205,6 +332,62 @@ describe("routeWithHaiku", () => {
     const { client } = mockClient({ messages: [fakeStream([], {}, err)] });
     setClient(client);
     await expect(routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: [], mode: "forced", onSpokenDelta: () => {} })).rejects.toBe(err);
+  });
+
+  it("validateRouterInput", () => {
+    expect(validateRouterInput({ intent: "task", estimate_seconds: "45", say: " ok ", question: " q " })).toEqual({ intent: "task", estimateS: 45, say: "ok", question: "q" });
+    expect(validateRouterInput({ intent: "question", estimate_seconds: -3, say: "", question: "q" })?.estimateS).toBeNull();
+    expect(validateRouterInput({ intent: "clarify", say: "" })).toBeNull();
+    expect(validateRouterInput({ intent: "answer", say: "hi" }, "forced")).toBeNull();
+    expect(validateRouterInput({ intent: "nope", say: "hi" })).toBeNull();
+    expect(validateRouterInput(null)).toBeNull();
+  });
+});
+
+// ── generateFillers ────────────────────────────────────────────────────────
+
+describe("generateFillers", () => {
+  const args = { transcript: U3, question: "Why is the grid a grid?", intent: "question" as const, pointing: GRID_TARGETS };
+
+  it("forced non-streaming `progress` call, Haiku effort low, cached system prompt; trims and caps lines", async () => {
+    const msg = {
+      stop_reason: "tool_use", usage: usage(),
+      content: [{ type: "tool_use", name: "progress", input: { lines: [" Opening the stylesheet for that grid. ", "", "Now checking the design notes.", "Looking at the card layout.", "Extra line."] } }],
+    };
+    const { client, messagesCreate } = mockClient({ create: [msg] });
+    setClient(client);
+    const res = await generateFillers(args);
+    expect(res.lines).toEqual(["Opening the stylesheet for that grid.", "Now checking the design notes.", "Looking at the card layout."]);
+    expect(res.usage).toEqual(msg.usage);
+    const p = messagesCreate.mock.calls[0]![0] as Record<string, any>;
+    expect(p.model).toBe("claude-haiku-5-5");
+    expect(p.output_config).toEqual({ effort: "low" });
+    expect(p).not.toHaveProperty("stream");
+    expect(p.tool_choice).toEqual({ type: "tool", name: "progress", disable_parallel_tool_use: true });
+    expect(p.tools[0].input_schema.properties.lines.type).toBe("array");
+    expect(p.system[0].cache_control).toEqual({ type: "ephemeral" });
+    expect(p.messages[0].content).toContain("Intent: question");
+    expect(p.messages[0].content).toContain("demo.html:34");
+  });
+
+  it("task intent is passed through", async () => {
+    const { client, messagesCreate } = mockClient({ create: [{ stop_reason: "tool_use", usage: usage(), content: [{ type: "tool_use", name: "progress", input: { lines: ["a b c d"] } }] }] });
+    setClient(client);
+    await generateFillers({ ...args, intent: "task" });
+    expect((messagesCreate.mock.calls[0]![0] as any).messages[0].content).toContain("Intent: task");
+  });
+
+  it("API failure: empty lines, never throws, logs", async () => {
+    const { client } = mockClient({ create: [new Anthropic.InternalServerError(500, undefined, "boom", new Headers())] });
+    setClient(client);
+    await expect(generateFillers(args)).resolves.toEqual({ lines: [], usage: null });
+    expect(logs.some((l) => l.includes("fillers failed"))).toBe(true);
+  });
+
+  it("malformed tool input: empty lines", async () => {
+    const { client } = mockClient({ create: [{ stop_reason: "tool_use", usage: usage(), content: [{ type: "tool_use", name: "progress", input: { lines: "nope" } }] }] });
+    setClient(client);
+    expect((await generateFillers(args)).lines).toEqual([]);
   });
 });
 
@@ -243,6 +426,23 @@ describe("solveWithOpus", () => {
     expect(p.messages[0].content).toContain(U3);
     expect(p.messages[0].content).toContain("[data-source=web/cursor/demo/demo.html:34]");
     expect(reqOpts).toBeUndefined();
+  });
+
+  it("task intent: the user message frames a change request; system blocks stay byte-identical", async () => {
+    const { client, betaStream } = mockClient({ beta: [fakeStream(opusEvents(answer), finalOk()), fakeStream(opusEvents(answer), finalOk())] });
+    setClient(client);
+    const r = recorder();
+    await solveWithOpus({ mark: r.mark, question: "Make the Get started button bigger.", pointing: GRID_TARGETS, fast: false, intent: "task", onSpokenLine: () => {}, onDelta: () => {} });
+    await solveWithOpus({ mark: recorder().mark, question: U3, pointing: GRID_TARGETS, fast: false, onSpokenLine: () => {}, onDelta: () => {} });
+    const [task, question] = betaStream.mock.calls.map((c) => c[0] as Record<string, any>);
+    expect(task!.messages.at(-1).content).toMatch(/^Request type: TASK\. This is a change request/);
+    expect(task!.messages.at(-1).content).toContain("Task: Make the Get started button bigger.");
+    expect(task!.messages.at(-1).content).toContain("[data-source=web/cursor/demo/demo.html:34]");
+    expect(question!.messages.at(-1).content).toMatch(/^Question: /);
+    expect(question!.messages.at(-1).content).not.toContain("TASK");
+    expect(JSON.stringify(task!.system)).toBe(JSON.stringify(question!.system));
+    expect(task!.system[0].text).toContain("Request type: TASK");
+    expect(r.marks.find((m) => m.name === "opus.request")?.meta).toMatchObject({ intent: "task" });
   });
 
   it("system blocks are byte-identical across calls (cache prefix stability)", async () => {
