@@ -25,18 +25,37 @@ const ws = new WebSocket(`ws://localhost:${server.port}/ws`);
 await new Promise((r) => ws.once("open", r));
 const listeners = new Set<(m: ServerMsg) => void>();
 ws.on("message", (d, bin) => { if (!bin) for (const l of listeners) l(JSON.parse(d.toString())); });
+// Background jobs and notices arrive outside turns.
+const jobs = new Map<string, string>();
+let noticeBytes = 0, inNotice = false, noticesDone = 0;
+ws.on("message", (d, bin) => { if (bin && inNotice) noticeBytes += (d as Buffer).length; });
+listeners.add((m) => {
+  if (m.type === "job") {
+    jobs.set(m.job.jobId, m.job.state);
+    if (m.job.state === "running") console.log(`  [job] started: "${m.job.question.slice(0, 90)}…" (est ${m.job.estimateS} s)`);
+    else console.log(`  [job] ${m.job.state} after ${((m.job.elapsedMs ?? 0) / 1000).toFixed(1)} s: ${m.job.spoken ?? m.job.error}`);
+  }
+  if (m.type === "notice") {
+    inNotice = m.state === "start";
+    if (m.state === "end") { noticesDone++; console.log(`  [notice] spoken (${(noticeBytes / 48000).toFixed(1)} s of audio)`); }
+    if (m.state === "start") noticeBytes = 0;
+  }
+});
 
 for (const [i, file] of files.entries()) {
   const approach = ORDER[i % ORDER.length]!;
   const wav = parseWav(readFileSync(file));
   const turnId = `chat-${i}`;
-  let voice = "", transcript = "";
+  let voice = "", transcript = "", decision = "";
+  const segs: string[] = [];
   const played = new Set<string>();
   const done = new Promise<Extract<ServerMsg, { type: "turn.done" }>>((resolve) => {
     const l = (m: ServerMsg) => {
       if (!("turnId" in m) || m.turnId !== turnId) return;
       if (m.type === "voice.text") voice += m.delta;
       if (m.type === "stt.final") transcript = m.text;
+      if (m.type === "decision") decision = `${m.intent}${m.estimateS !== null ? ` ~${m.estimateS} s` : ""}${m.background ? " → background" : ""}`;
+      if (m.type === "audio.segment" && m.state === "start") segs.push(m.segment);
       if (m.type === "audio.segment" && m.state === "start" && !played.has(m.segment)) {
         played.add(m.segment);
         ws.send(JSON.stringify({ type: "audio.played", turnId, segment: m.segment, tPlayed: performance.now() }));
@@ -47,7 +66,7 @@ for (const [i, file] of files.entries()) {
     listeners.add(l);
   });
   const t0 = performance.now();
-  ws.send(JSON.stringify({ type: "turn.start", turnId, config: { ...DEFAULT_CONFIG, approach, memory: true, routerMode: "auto" }, tPress: t0 }));
+  ws.send(JSON.stringify({ type: "turn.start", turnId, config: { ...DEFAULT_CONFIG, approach, memory: true, routerMode: "auto", fillers: true, backgroundLongTasks: true }, tPress: t0 }));
   ws.send(JSON.stringify({ type: "turn.audioStart", turnId, tAudioStart: t0 }));
   const frame = 960;
   for (let off = 0, k = 0; off < wav.data.length; off += frame, k++) {
@@ -59,10 +78,19 @@ for (const [i, file] of files.entries()) {
   const { run } = await done;
   console.log(`\n── turn ${i + 1} · ${approach}`);
   console.log(`  you:  ${transcript || run.transcript || "(no transcript)"}`);
+  console.log(`  decision: ${decision || "(none)"} · segments: ${segs.join(" → ") || "(none)"}`);
   console.log(`  bot:  ${voice.trim()}`);
   console.log(`  ttfa ${Math.round(run.metrics.ttfa ?? NaN)} ms · tta ${Math.round(run.metrics.tta ?? NaN)} ms · $${run.costUsd.toFixed(4)}` +
     (run.markMeta?.["llm.request"]?.historyRecapTurns !== undefined ? ` · recap of ${run.markMeta["llm.request"].historyRecapTurns} turn(s)` : "") +
     (run.error ? ` · ERROR ${run.error}` : ""));
 }
+// Wait for background jobs to finish and be announced.
+const t0 = Date.now();
+const doneJobs = () => [...jobs.values()].filter((s) => s === "done").length;
+while ([...jobs.values()].some((s) => s === "running") || inNotice || noticesDone < doneJobs()) {
+  if (Date.now() - t0 > 240_000) { console.log("  (gave up waiting for jobs)"); break; }
+  await sleep(500);
+}
+await sleep(2000);
 ws.close();
 await server.close();
