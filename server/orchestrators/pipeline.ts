@@ -158,6 +158,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       };
       const route = await tag("haiku", deps.routeWithHaiku({
         mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history, pageContext,
+        longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined,
         onDecision: (d) => decide(d.intent, d.estimateS),
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;

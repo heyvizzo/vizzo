@@ -17,6 +17,7 @@ import { realDeps } from "./deps.ts";
 import { acquireRealtime, LazyScribe, type RealtimeLease, type RealtimeListener } from "./shared.ts";
 import { formatHistoryRecap, getConversation } from "../conversation.ts";
 import { FillerScheduler } from "./fillers.ts";
+import { DEFAULT_LONG_TASK_SECONDS } from "../adapters/claude.ts";
 import { startJob } from "./jobs.ts";
 import type { Intent, RouteIntent } from "../../shared/protocol.ts";
 import { errMessage, sleep, TurnBase, type SegmentWriter } from "./turnBase.ts";
@@ -220,6 +221,11 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       // Clicks / highlighted text (no word timestamps needed, so A gets them too).
       const page = base.pageContext();
       if (page) context = context ? `${context}\n${page}` : page;
+      // The instructions say 20 s; tell the model when the user picked another long-task threshold.
+      if (cfg.backgroundLongTasks && cfg.longTaskSeconds !== DEFAULT_LONG_TASK_SECONDS) {
+        const line = `(Long-task threshold for this conversation: ${cfg.longTaskSeconds} seconds, use it instead of ${DEFAULT_LONG_TASK_SECONDS}.)`;
+        context = context ? `${context}\n${line}` : line;
+      }
       if (cfg.memory) {
         // Turns this session didn't hear (handled by B, or before a reopen) go in as a text recap.
         const unseen = getConversation(ctx.connection).filter((t) => !l.seenTurns.has(t.turnId));

@@ -88,3 +88,19 @@ describe("chat memory", () => {
     expect(formatHistoryRecap([])).toBe("");
   });
 });
+
+describe("router/Opus per-turn context", () => {
+  it("page context and a non-default long-task threshold go into the user message, not the cached system prompt", async () => {
+    const { buildRouterParams, buildOpusParams } = await import("../adapters/claude.ts");
+    const page = 'Clicked: <th> "Price / month" in "Pricing table" [data-source=web/cursor/demo/demo.html:63]';
+    const p = buildRouterParams("what is this", [], "forced", [], { pageContext: page, longTaskSeconds: 45 });
+    const last = p.messages[p.messages.length - 1]!.content as string;
+    expect(last).toContain(page);
+    expect(last).toContain("45 seconds");
+    expect(JSON.stringify(p.system)).not.toContain(page);
+    const d = buildRouterParams("what is this", [], "forced", [], { longTaskSeconds: 20 });
+    expect(d.messages[0]!.content as string).not.toContain("threshold");
+    const o = buildOpusParams("q", [], false, [], "question", page);
+    expect(JSON.stringify(o.messages)).toContain(page);
+  });
+});

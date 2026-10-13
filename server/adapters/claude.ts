@@ -235,7 +235,14 @@ const MODE_LINE: Record<RouterMode, string> = {
 
 export function buildRouterParams(
   transcript: string, pointing: PointingTarget[], mode: RouterMode, history: ChatTurn[] = [],
+  extra: { pageContext?: string; longTaskSeconds?: number } = {},
 ): Anthropic.MessageStreamParams {
+  // Per-turn context goes in the user message so the cached system prompt stays byte-identical.
+  const lines = [`${MODE_LINE[mode]}`, `Transcript: "${transcript}"`, formatPointingForPrompt(pointing)];
+  if (extra.pageContext) lines.push(extra.pageContext);
+  if (extra.longTaskSeconds !== undefined && extra.longTaskSeconds !== DEFAULT_LONG_TASK_SECONDS) {
+    lines.push(`Long-task threshold for this conversation: ${extra.longTaskSeconds} seconds (use it instead of ${DEFAULT_LONG_TASK_SECONDS}).`);
+  }
   const tool = routerTool(mode);
   return {
     model: modelId(MODELS.haiku),
@@ -248,13 +255,15 @@ export function buildRouterParams(
     tool_choice: { type: "tool", name: tool.name, disable_parallel_tool_use: true },
     messages: [...historyMessages(history, false), {
       role: "user",
-      content: `${MODE_LINE[mode]}\nTranscript: "${transcript}"\n${formatPointingForPrompt(pointing)}`,
+      content: lines.join("\n"),
     }],
   };
 }
 
-export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointing, mode, history, onDecision, onSpokenDelta, onSpokenEnd }) => {
-  const params = buildRouterParams(transcript, pointing, mode, history);
+export const routeWithHaiku: RouteWithHaiku = async ({
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, onDecision, onSpokenDelta, onSpokenEnd,
+}) => {
+  const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds });
   const route = new RouteInputStream(
     {
       onDecision: (d) => onDecision?.(d),
@@ -406,8 +415,8 @@ const FAST_BETA = "fast-mode-2026-02-01";
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 /** The last user message for Opus. Tasks are framed as change requests here, so the system blocks never change (cache). */
-export function opusUserMessage(question: string, pointing: PointingTarget[], intent: Intent = "question"): string {
-  const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}`;
+export function opusUserMessage(question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string): string {
+  const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}${pageContext ? `\n${pageContext}` : ""}`;
   if (intent === "task") {
     return `Request type: TASK. This is a change request: the user wants something changed. You can't edit files in this session, so describe the change you would make, using the task format.\n\nTask: ${question}\n\n${pointed}`;
   }
@@ -416,6 +425,7 @@ export function opusUserMessage(question: string, pointing: PointingTarget[], in
 
 export function buildOpusParams(
   question: string, pointing: PointingTarget[], fast: boolean, history: ChatTurn[] = [], intent: Intent = "question",
+  pageContext?: string,
 ): BetaMessageStreamParams {
   const p = prompts();
   return {
@@ -428,7 +438,7 @@ export function buildOpusParams(
     ],
     messages: [...historyMessages(history, true), {
       role: "user",
-      content: opusUserMessage(question, pointing, intent),
+      content: opusUserMessage(question, pointing, intent, pageContext),
     }],
     // OpenRouter rejects `fallbacks: "default"` (400), so the refusal fallback is Anthropic-direct only.
     // It accepts `speed: "fast"` but serves standard speed (usage.speed === "standard"); cost follows usage.speed.
@@ -439,7 +449,7 @@ export function buildOpusParams(
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta }) => {
+export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext }) => {
   let text = "";
   let firstToken = false;
   let spokenReady = false;
@@ -452,7 +462,7 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
   });
 
   const run = async (useFast: boolean): Promise<Anthropic.Beta.Messages.BetaMessage> => {
-    const params = buildOpusParams(question, pointing, useFast, history, intent);
+    const params = buildOpusParams(question, pointing, useFast, history, intent, pageContext);
     mark("opus.request", { model: params.model, fast: useFast, ...(intent === "task" ? { intent } : {}), ...(fastFellBack ? { fastFallback: true } : {}) });
     // Fast mode: no SDK retries, so a 429 falls back to standard speed right away.
     const stream = getClient().beta.messages.stream(params, useFast ? { maxRetries: 0 } : undefined);

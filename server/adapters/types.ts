@@ -104,6 +104,8 @@ export interface RouteWithHaikuOpts {
   history?: ChatTurn[];
   /** Clicks / highlighted text from the turn, preformatted (shared/pointing.ts formatPageContext). */
   pageContext?: string;
+  /** Long-task threshold in seconds when it differs from the prompt's default (RunConfig.longTaskSeconds). */
+  longTaskSeconds?: number;
   /**
    * Fires once, as soon as the router's `intent` (and `estimate_seconds`, if given) are parsed, i.e. before
    * `say` streams, so the caller knows whether the spoken text is an ack or the whole reply.
