@@ -1,9 +1,10 @@
 // Timeline (PRD FR11): cursor speed over time, word spans, shaded pointing-word windows, picked samples,
 // and the turn's page events: click events (a tick per click, bracketed per event with its kind) and
-// highlights (bars from start to finish; the pre-existing one as a marker).
-import { isPointingWord, sampleSpeeds, wordWindow, type WindowOpts } from "../../shared/pointing.ts";
-import type { ClickKind, CursorSample, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
-import { CLICK_COLOR, colorFor, HIGHLIGHT_COLOR, LABEL_COLOR, PRESELECTED_COLOR } from "./colors.ts";
+// highlights (bars from start to finish; the pre-existing one as a marker), and cursor rests (a lane of
+// "@n" spans, lightly shaded down through the plot).
+import { isPointingWord, POINTING_LANGUAGES, sampleSpeeds, wordWindow, type PointingLanguage, type WindowOpts } from "../../shared/pointing.ts";
+import type { ClickKind, CursorRest, CursorSample, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
+import { CLICK_COLOR, colorFor, HIGHLIGHT_COLOR, LABEL_COLOR, PRESELECTED_COLOR, REST_COLOR } from "./colors.ts";
 
 export interface TimelineModel {
   /** ms relative to tAudioStart */
@@ -20,6 +21,14 @@ export interface TimelineModel {
   highlights: { n: number; from: number; to: number }[];
   /** When the pre-existing highlight was snapshotted (the recording start), if any. */
   preselected: number | null;
+  /** Cursor rests (@ref), from first to last still sample. */
+  rests: { ref: number; from: number; to: number; whole: boolean }[];
+}
+
+export interface TimelineExtras {
+  rests?: readonly CursorRest[];
+  /** Pointing word lists that count (default: all). */
+  languages?: readonly PointingLanguage[];
 }
 
 /** "1×", "2×", … — the badge used for a click event everywhere in the lab. */
@@ -28,8 +37,10 @@ export const clickBadge = (count: number): string => `${count}×`;
 /** Everything in ms relative to tAudioStart (pass tAudioStart = 0 for relative samples). */
 export function buildTimelineModel(
   samples: readonly CursorSample[], words: readonly Word[], targets: readonly PointingTarget[], opts: WindowOpts, tAudioStart = 0,
-  page: Partial<PageEvents> = {},
+  page: Partial<PageEvents> = {}, extras: TimelineExtras = {},
 ): TimelineModel {
+  const languages = extras.languages ?? POINTING_LANGUAGES;
+  const rests = (extras.rests ?? []).map((r) => ({ ref: r.ref, from: r.tStart - tAudioStart, to: r.tEnd - tAudioStart, whole: r.whole }));
   const clicks = [...(page.clicks ?? [])].sort((a, b) => a.t - b.t).map((c, i) => {
     const times = (c.times?.length ? c.times : [c.t]).map((t) => t - tAudioStart);
     return { n: i + 1, kind: c.kind, count: c.count, from: times[0]!, to: times[times.length - 1]!, times };
@@ -40,7 +51,7 @@ export function buildTimelineModel(
   const sp = sampleSpeeds(sorted);
   const speed = sorted.flatMap((s, i) => (Number.isNaN(sp[i]) ? [] : [{ t: s.t - tAudioStart, v: sp[i]! * 1000 }]));
   const ws = words.map((w) => {
-    const pointing = isPointingWord(w.text);
+    const pointing = isPointingWord(w.text, languages);
     const win = wordWindow(w, 0, opts);
     return { text: w.text, from: w.start * 1000, to: w.end * 1000, pointing, win: pointing ? ([win.from, win.to] as [number, number]) : null };
   });
@@ -52,14 +63,14 @@ export function buildTimelineModel(
   const picks = targets.flatMap((p) => (p.sample ? [{ t: p.sample.t - tAudioStart, v: speedAt(p.sample.t - tAudioStart), algorithm: p.algorithm, word: p.word }] : []));
   const times = [
     ...speed.map((p) => p.t), ...ws.flatMap((w) => [w.win?.[0] ?? w.from, w.win?.[1] ?? w.to]), 0,
-    ...clicks.flatMap((c) => c.times), ...highlights.flatMap((h) => [h.from, h.to]), ...(preselected === null ? [] : [preselected]),
+    ...clicks.flatMap((c) => c.times), ...highlights.flatMap((h) => [h.from, h.to]), ...rests.flatMap((r) => [r.from, r.to]), ...(preselected === null ? [] : [preselected]),
   ];
   const t0 = Math.min(...times);
   const t1 = Math.max(...times, t0 + 1);
   // Robust y scale: 98th percentile so a single jump doesn't flatten the line.
   const vs = speed.map((p) => p.v).sort((a, b) => a - b);
   const vmax = Math.max(200, (vs[Math.floor(vs.length * 0.98)] ?? 0) * 1.1);
-  return { t0, t1, speed, vmax, words: ws, picks, clicks, highlights, preselected };
+  return { t0, t1, speed, vmax, words: ws, picks, clicks, highlights, preselected, rests };
 }
 
 /** Draws the model (null = placeholder text). Only algorithms in `visible` get pick markers. */
@@ -78,8 +89,8 @@ export function drawTimeline(canvas: HTMLCanvasElement, m: TimelineModel | null,
     g.fillText("Hold to talk while pointing at the demo page; the timeline appears after the transcript.", 12, H / 2);
     return;
   }
-  // Two event lanes on top (clicks, highlights), then the speed plot, then word spans, then the axis.
-  const L = 44, R = 10, LANE_H = 15, CLICK_H = 22, CLICK_Y = 2, HL_Y = CLICK_Y + CLICK_H + 2, TOP = HL_Y + LANE_H + 4, WORDS_H = 34, AXIS_H = 16;
+  // Three event lanes on top (clicks, highlights, rests), then the speed plot, then word spans, then the axis.
+  const L = 44, R = 10, LANE_H = 15, CLICK_H = 22, CLICK_Y = 2, HL_Y = CLICK_Y + CLICK_H + 2, REST_Y = HL_Y + LANE_H + 2, TOP = REST_Y + LANE_H + 4, WORDS_H = 34, AXIS_H = 16;
   const plotH = H - TOP - WORDS_H - AXIS_H;
   const x = (t: number) => L + ((t - m.t0) / (m.t1 - m.t0)) * (W - L - R);
   const y = (v: number) => TOP + plotH - (Math.min(v, m.vmax) / m.vmax) * plotH;
@@ -103,9 +114,11 @@ export function drawTimeline(canvas: HTMLCanvasElement, m: TimelineModel | null,
   g.fillText("0", L - 12, TOP + plotH);
   g.fillText("clicks", 4, CLICK_Y + 15);
   g.fillText("highl.", 4, HL_Y + 11);
+  g.fillText("rests", 4, REST_Y + 11);
   g.fillStyle = "rgba(138,147,166,0.08)";
   g.fillRect(L, CLICK_Y, W - L - R, CLICK_H);
   g.fillRect(L, HL_Y, W - L - R, LANE_H);
+  g.fillRect(L, REST_Y, W - L - R, LANE_H);
   g.fillStyle = "#8a93a6";
   const step = niceStep(m.t1 - m.t0);
   for (let t = Math.ceil(m.t0 / step) * step; t <= m.t1; t += step) {
@@ -144,6 +157,23 @@ export function drawTimeline(canvas: HTMLCanvasElement, m: TimelineModel | null,
     g.lineTo(px, HL_Y + 8);
     g.fill();
     g.fillText("pre", px + 10, HL_Y + 11);
+  }
+
+  // Cursor rests: a dashed-edged span "@n" in the rest lane, lightly shaded down through the plot.
+  for (const r of m.rests) {
+    const x0 = x(r.from), w = Math.max(3, x(r.to) - x0);
+    g.fillStyle = "rgba(244,114,182,0.10)";
+    g.fillRect(x0, TOP, w, plotH);
+    g.fillStyle = "rgba(244,114,182,0.45)";
+    g.fillRect(x0, REST_Y + 2, w, LANE_H - 4);
+    g.strokeStyle = REST_COLOR;
+    g.setLineDash([3, 2]);
+    g.strokeRect(x0 + 0.5, REST_Y + 2.5, w - 1, LANE_H - 5);
+    g.setLineDash([]);
+    const label = `@${r.ref}${r.whole ? " whole" : ""}`;
+    g.fillStyle = "#fff";
+    if (g.measureText(label).width + 4 <= w) g.fillText(label, x0 + 3, REST_Y + 11);
+    else { g.fillStyle = REST_COLOR; g.fillText(label, x0 + w + 2, REST_Y + 11); }
   }
 
   // Speed line

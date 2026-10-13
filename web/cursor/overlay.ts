@@ -1,8 +1,8 @@
 // Highlights each algorithm's pick (and the labeled target) on top of the demo page, the turn's
-// click events and highlights, and (separately, live) the element under the pointer.
-import type { CursorSample, PageEvents, PointingTarget } from "../../shared/protocol.ts";
+// cursor rests (@1, @2…), click events and highlights, and (separately, live) the element under the pointer.
+import type { CursorRest, CursorSample, PageEvents, PointingTarget } from "../../shared/protocol.ts";
 import { ALGORITHMS, clickVerb } from "../../shared/pointing.ts";
-import { CLICK_COLOR, colorFor, HIGHLIGHT_COLOR, HOVER_COLOR, LABEL_COLOR, PRESELECTED_COLOR } from "./colors.ts";
+import { CLICK_COLOR, colorFor, HIGHLIGHT_COLOR, HOVER_COLOR, LABEL_COLOR, PRESELECTED_COLOR, REST_COLOR } from "./colors.ts";
 import type { LabelTarget, PointingLabel } from "./session.ts";
 
 export function findPath(path: string | null): Element | null {
@@ -40,10 +40,11 @@ export interface PageMarks extends PageEvents {
 /**
  * `layer` is an absolutely positioned, pointer-events:none child of `scroller` (position:relative),
  * so content coordinates = viewport rect − scroller rect + scroll offset.
+ * `rests` get a dashed pink outline tagged "@n" (below the element, so pick tags above stay readable).
  */
 export function renderOverlay(
   layer: HTMLElement, scroller: HTMLElement, targets: PointingTarget[], labels: PointingLabel[], visible: Set<string>,
-  page: PageMarks | null = null,
+  page: PageMarks | null = null, rests: readonly CursorRest[] = [],
 ): void {
   layer.replaceChildren();
   const { sr, ox, oy } = origin(scroller);
@@ -93,6 +94,22 @@ export function renderOverlay(
     });
     dot.title = `${t.algorithm} "${t.word}"`;
     layer.append(dot);
+  }
+
+  // Cursor rests: dashed outline + "@n" tag (several rests on one element stack outwards).
+  const perRest = new Map<Element, number>();
+  for (const r of rests) {
+    const el = findPath(r.sample.elementPath);
+    if (!el) continue;
+    const n = perRest.get(el) ?? 0;
+    perRest.set(el, n + 1);
+    const d = box(el, REST_COLOR, 4 + n * 4, `@${r.ref}${r.whole ? " · whole time" : ""}`, "dashed");
+    d.classList.add("ov-rest");
+    const tag = d.querySelector<HTMLElement>(".ov-tag")!;
+    tag.style.top = "auto";
+    tag.style.bottom = `${-16 - n * 16}px`;
+    tag.style.left = "auto";
+    tag.style.right = "-2px";
   }
 
   if (!page) return;

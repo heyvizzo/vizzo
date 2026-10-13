@@ -1,17 +1,18 @@
 // Cursor lab (TASKS T9, PRD FR7–FR13).
 import "./cursor.css";
 import { connectWithStatus } from "../common.ts";
-import { DEFAULT_CONFIG, type RunConfig } from "../../shared/config.ts";
+import { DEFAULT_CONFIG, type RunConfig, type SpeechLanguage } from "../../shared/config.ts";
 import {
-  ALGORITHMS, formatPageContext, formatPointingContext, relTime, resolvePointing, sortClicks, tagFromPath, truncateText, wordNear,
-  type WindowOpts,
+  ALGORITHMS, annotateTranscript, computeRests, formatPageContext, formatPointingContext, formatRests, pointingLanguage, POINTING_LANGUAGES,
+  relTime, resolvePointing, sortClicks, tagFromPath, truncateText, wordNear,
+  type PointingLanguage, type WindowOpts,
 } from "../../shared/pointing.ts";
-import type { CursorSample, PageEvents, PointingTarget, ServerMsg, Word } from "../../shared/protocol.ts";
+import type { CursorRest, CursorSample, PageEvents, PointingTarget, ServerMsg, Word } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { bindPushToTalk } from "../audio/ptt.ts";
 import { createWavRecorder, type WavRecorder } from "../audio/record.ts";
 import { startReplay, type ReplayHandle } from "../audio/replay.ts";
-import { colorFor } from "./colors.ts";
+import { colorFor, REST_COLOR } from "./colors.ts";
 import { mountDemo } from "./demoLoader.ts";
 import { describeElement } from "./dom.ts";
 import { cannedSession, hoverElement } from "./devDemo.ts";
@@ -28,6 +29,14 @@ import { buildTimelineModel, clickBadge, drawTimeline } from "./timeline.ts";
 const PRE_ROLL_MS = 500; // cursor history sent/saved from before the press
 const POST_ROLL_MS = 300; // and kept after the release
 const BATCH_MS = 100;
+/** The algorithm the server puts in the LLM context (and whose picks suppress overlapping rests). */
+const CONTEXT_ALGORITHM = "dwellMode";
+const LANG_KEY = "cursor.language.v1";
+const LANGUAGES: { id: SpeechLanguage; label: string }[] = [
+  { id: "auto", label: "Auto (en/ro)" }, { id: "en", label: "English" }, { id: "ro", label: "Română" },
+];
+/** Pointing word lists for a language setting: Auto = all. */
+const languagesFor = (l: SpeechLanguage): readonly PointingLanguage[] => (l === "auto" ? POINTING_LANGUAGES : [l]);
 
 const app = document.getElementById("app")!;
 app.classList.add("cursor-lab");
@@ -42,6 +51,9 @@ app.innerHTML = `
     <div class="row">
       <button id="ptt" class="ptt">Hold to talk <span class="muted">(or Space)</span></button>
       <span id="turn-status" class="muted"></span>
+      <span class="spacer"></span>
+      <label class="small muted" title="Spoken language for Scribe and the pointing word lists (Auto: English and Romanian)">Language
+        <select id="language">${LANGUAGES.map((l) => `<option value="${l.id}">${l.label}</option>`).join("")}</select></label>
     </div>
     <p id="transcript" class="transcript muted">Point at something on the page and say e.g. “move this over there”. Clicks and highlighted text count too.</p>
     <p id="latency" class="muted mono small"></p>
@@ -59,6 +71,8 @@ app.innerHTML = `
   <section class="panel">
     <h3>Picks <span id="active-id" class="muted"></span></h3>
     <div id="picks"></div>
+    <h4>Cursor rests <span class="muted">(any language: where the pointer stayed ≥ 250 ms while you spoke)</span></h4>
+    <div id="rests" class="page-ctx"></div>
     <h4>Clicks &amp; highlights <span id="page-ctx-note" class="muted"></span></h4>
     <div id="page-ctx" class="page-ctx"></div>
     <h4>LLM context <span class="muted">(dwellMode, as the server formats it)</span></h4>
@@ -97,7 +111,12 @@ const state = {
   sessions: [] as LabSession[],
   active: null as LabSession | null,
   labeling: null as number | null, // wordIndex being labeled
+  language: "auto" as SpeechLanguage,
 };
+try {
+  const saved = localStorage.getItem(LANG_KEY);
+  if (LANGUAGES.some((l) => l.id === saved)) state.language = saved as SpeechLanguage;
+} catch { /* storage unavailable */ }
 
 interface Turn {
   turnId: string;
@@ -145,12 +164,12 @@ void mountDemo(demoRoot).then(async (info) => {
     // Let the demo's layout settle before taking element positions for the canned trail.
     await document.fonts.ready;
     await new Promise((r) => setTimeout(r, 300));
-    const s = cannedSession(demoRoot, scroller);
+    const s = cannedSession(demoRoot, scroller, demo === "ro" ? "ro" : "en");
     if (s) {
       upsertSession(s);
       state.active = s;
-      // ?demo=title hovers a card title; anything else a table heading.
-      hoverElement(demoRoot.querySelector(demo === "title" ? ".card:nth-of-type(3) h3" : ".pricing-table th:nth-of-type(3)"));
+      // ?demo=title hovers a card title; ?demo=ro the hero button; anything else a table heading.
+      hoverElement(demoRoot.querySelector(demo === "title" ? ".card:nth-of-type(3) h3" : demo === "ro" ? ".cta" : ".pricing-table th:nth-of-type(3)"));
     }
     (window as unknown as { cursorLab?: unknown }).cursorLab = { dryStart, dryStop };
   }
@@ -193,7 +212,7 @@ function dryStop(): PageEvents | null {
 
 // ── turn flow ──────────────────────────────────────
 function config(): RunConfig {
-  return { ...DEFAULT_CONFIG, approach: "cursor-only", preMs: state.opts.preMs, postMs: state.opts.postMs };
+  return { ...DEFAULT_CONFIG, approach: "cursor-only", preMs: state.opts.preMs, postMs: state.opts.postMs, language: state.language };
 }
 
 function newTurn(extra: Partial<Turn> = {}): Turn {
@@ -351,6 +370,7 @@ sock.on((msg: ServerMsg) => {
         labels: labelsFor(msg.words, t.replayOf?.labels ?? []),
         viewport: { width: scroller.clientWidth, height: scroller.clientHeight },
         ...shiftEvents(t.events ?? sessionEvents({}), -t.tAudioStart),
+        ...(msg.language ? { language: msg.language } : t.replayOf?.language ? { language: t.replayOf.language } : {}),
       };
       try {
         if (t.recorder && !t.replayOf) sess.wav = t.recorder.toWav();
@@ -371,7 +391,12 @@ sock.on((msg: ServerMsg) => {
       return;
     }
     case "pointing.resolved":
-      if (state.active) state.active.serverTargets = msg.targets;
+      if (state.active) {
+        state.active.serverTargets = msg.targets;
+        // Server rests are on the client clock; the session's samples are relative to tAudioStart.
+        const ta = t.tAudioStart ?? 0;
+        state.active.serverRests = (msg.rests ?? []).map((r) => ({ ...r, tStart: r.tStart - ta, tEnd: r.tEnd - ta, sample: { ...r.sample, t: r.sample.t - ta } }));
+      }
       renderAll();
       return;
     case "turn.done":
@@ -399,6 +424,14 @@ try {
 }
 
 // ── controls ───────────────────────────────────────
+const langSelect = $<HTMLSelectElement>("language");
+langSelect.value = state.language;
+langSelect.addEventListener("change", () => {
+  state.language = langSelect.value as SpeechLanguage;
+  try { localStorage.setItem(LANG_KEY, state.language); } catch { /* ignore */ }
+  renderAll();
+});
+
 const pre = $<HTMLInputElement>("pre");
 const post = $<HTMLInputElement>("post");
 pre.value = String(state.opts.preMs);
@@ -507,6 +540,7 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const short = (s: CursorSample | null) => (s ? s.label ?? s.dataSource ?? s.elementPath ?? "?" : "—");
 
 let targets: PointingTarget[] = [];
+let rests: CursorRest[] = [];
 
 function renderOverlayNow(): void {
   const a = state.active;
@@ -516,7 +550,7 @@ function renderOverlayNow(): void {
     return;
   }
   renderOverlay(layer, scroller, targets, a?.labels ?? [], state.visible,
-    a ? { ...sessionEvents(a), samples: a.samples, outlineHighlights: a !== paintedSession } : null);
+    a ? { ...sessionEvents(a), samples: a.samples, outlineHighlights: a !== paintedSession } : null, rests);
 }
 
 /** `<h3> "Live queries"` with the container muted, for the side panels. */
@@ -583,6 +617,18 @@ function pageEventsHtml(ev: PageEvents, words: Word[], t0: number, emptyText: st
     ${hls.join("") || `<li class="empty">No highlights made during the turn.</li>`}</ul>`;
 }
 
+/** One row per cursor rest: @n, element, time range (s from audio start), the word being said, "whole time". */
+function restsHtml(rs: readonly CursorRest[], words: Word[]): string {
+  if (!rs.length) return `<p class="muted small">No rests: the pointer didn't stay on one element (apart from the pointing words' picks).</p>`;
+  return `<ul class="pc-list">${rs.map((r) => {
+    const a = relTime(r.tStart, 0) ?? "?", b = relTime(r.tEnd, 0) ?? "?";
+    const w = r.wordIndex !== null ? words[r.wordIndex] : undefined;
+    return `<li><span class="kbadge rest" style="background:${REST_COLOR}">@${r.ref}<small>rest</small></span>
+      <span class="what">${refHtml(r.sample)}</span>
+      <span class="meta"><b class="times">${a.replace(" s", "")}–${b}</b> · ${((r.tEnd - r.tStart) / 1000).toFixed(2)} s${w ? ` · while saying <span class="quote">“${esc(w.text.trim())}”</span>` : ""}${r.whole ? ` · <b>whole time</b>` : ""}</span></li>`;
+  }).join("")}</ul>`;
+}
+
 function renderPageContext(a: LabSession | null): void {
   if (live) {
     const t0 = live.t.tAudioStart ?? live.t.tPress;
@@ -594,16 +640,26 @@ function renderPageContext(a: LabSession | null): void {
   const ev = a ? sessionEvents(a) : null;
   $("page-ctx").innerHTML = a && ev ? pageEventsHtml(ev, a.words, 0, "No clicks or highlighted text in this turn.") : `<p class="muted small">—</p>`;
 
-  const ctx = a ? [formatPointingContext(targets), formatPageContext(ev, a.words, 0)].filter(Boolean).join("\n") : "";
-  let text = ctx || (a ? "(nothing: no pointing words, clicks or highlights)" : "Record a turn to see the context the LLM gets.");
-  const server = a?.serverTargets?.length ? formatPointingContext(a.serverTargets) : "";
-  if (server && !ctx.startsWith(server)) text += `\n\nserver sent (preMs/postMs at record time):\n${server}`;
+  const ctxTargets = targets.filter((t) => t.algorithm === CONTEXT_ALGORITHM);
+  const marked = a ? annotateTranscript(a.words, ctxTargets, rests) : null;
+  const ctx = a ? [
+    marked ? `Transcript with references: "${marked}"` : "",
+    formatPointingContext(targets, CONTEXT_ALGORITHM),
+    formatRests(rests, a.words, 0),
+    formatPageContext(ev, a.words, 0, ctxTargets),
+  ].filter(Boolean).join("\n") : "";
+  let text = ctx || (a ? "(nothing: no pointing words, cursor rests, clicks or highlights)" : "Record a turn to see the context the LLM gets.");
+  const server = a?.serverTargets?.length || a?.serverRests?.length
+    ? [formatPointingContext(a.serverTargets ?? [], CONTEXT_ALGORITHM), formatRests(a.serverRests ?? [], a.words, 0)].filter(Boolean).join("\n") : "";
+  if (server && !ctx.includes(server)) text += `\n\nserver sent (preMs/postMs and language at record time):\n${server}`;
   $("server-ctx").textContent = text;
 }
 
 function renderAll(): void {
   const a = state.active;
-  targets = a ? resolvePointing(a.words, 0, a.samples, state.opts) : [];
+  const langs = languagesFor(state.language);
+  targets = a ? resolvePointing(a.words, 0, a.samples, state.opts, langs) : [];
+  rests = a ? computeRests(a.words, 0, a.samples, targets.filter((t) => t.algorithm === CONTEXT_ALGORITHM)) : [];
   $("pre-v").textContent = `${state.opts.preMs}`;
   $("post-v").textContent = `${state.opts.postMs}`;
   demoRoot.classList.toggle("labeling", state.labeling !== null);
@@ -613,22 +669,28 @@ function renderAll(): void {
       <i style="background:${colorFor(al)}"></i>${al}</label>`).join("") +
     `<label><i class="label-swatch"></i>labeled target</label>`;
 
-  $("active-id").textContent = a ? `· ${a.id}` : "";
+  $("active-id").textContent = a ? `· ${a.id}${a.language ? ` · heard ${a.language}` : ""}` : "";
+  // Labels cover every language's pointing words; the table shows those in the selected language(s).
+  const shownLabels = a ? a.labels.filter((l) => pointingLanguage(a.words[l.wordIndex]?.text ?? l.word, langs)) : [];
+  const hidden = a ? a.labels.length - shownLabels.length : 0;
+  const hiddenNote = hidden ? `<p class="muted small">${hidden} pointing word${hidden === 1 ? "" : "s"} in another language hidden (Language: ${esc(langSelect.selectedOptions[0]?.textContent ?? state.language)}).</p>` : "";
   if (!a) $("picks").innerHTML = `<p class="muted small">No session yet.</p>`;
-  else if (!a.labels.length) $("picks").innerHTML = `<p class="muted small">No pointing words in “${esc(a.transcript)}”.</p>`;
+  else if (!shownLabels.length) $("picks").innerHTML = `<p class="muted small">No pointing words in “${esc(a.transcript)}”.</p>${hiddenNote}`;
   else {
-    const rows = a.labels.map((l, n) => {
+    const rows = shownLabels.map((l) => {
       const cells = ALGORITHMS.map((al) => {
         const t = targets.find((x) => x.algorithm === al && x.wordStart === a.words[l.wordIndex]!.start && x.word === l.word);
         const ok = l.target && t ? targetMatches(t.sample, l.target) : null;
         return `<td style="border-left:3px solid ${colorFor(al)}" class="${ok === null ? "" : ok ? "ok" : "bad"}">${esc(short(t?.sample ?? null))}</td>`;
       }).join("");
       const armed = state.labeling === l.wordIndex;
-      return `<tr><th><span class="muted">[${n + 1}]</span> “${esc(l.word)}” <span class="muted">${l.start.toFixed(2)}s</span></th>${cells}
+      const ref = targets.find((x) => x.wordIndex === l.wordIndex)?.ref;
+      return `<tr><th><span class="muted">[${ref ?? "?"}]</span> “${esc(l.word)}” <span class="muted">${l.start.toFixed(2)}s</span></th>${cells}
         <td><button data-label-word="${l.wordIndex}" class="${armed ? "armed" : ""}">${armed ? "click target…" : l.target ? esc(l.target.label ?? "labeled") : "Label"}</button></td></tr>`;
     }).join("");
-    $("picks").innerHTML = `<table class="grid"><tr><th></th>${ALGORITHMS.map((al) => `<th>${al}</th>`).join("")}<th>label</th></tr>${rows}</table>`;
+    $("picks").innerHTML = `<table class="grid"><tr><th></th>${ALGORITHMS.map((al) => `<th>${al}</th>`).join("")}<th>label</th></tr>${rows}</table>${hiddenNote}`;
   }
+  $("rests").innerHTML = a ? restsHtml(rests, a.words) : `<p class="muted small">—</p>`;
   renderPageContext(a);
 
   $("sessions").innerHTML = state.sessions.length
@@ -653,5 +715,5 @@ function renderAll(): void {
     : `<p class="muted small">Label pointing words (Picks → Label, then click the element) to score.</p>`;
 
   renderOverlayNow();
-  drawTimeline(canvas, a ? buildTimelineModel(a.samples, a.words, targets, state.opts, 0, sessionEvents(a)) : null, state.visible);
+  drawTimeline(canvas, a ? buildTimelineModel(a.samples, a.words, targets, state.opts, 0, sessionEvents(a), { rests, languages: langs }) : null, state.visible);
 }

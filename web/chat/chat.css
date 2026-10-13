@@ -100,3 +100,11 @@ details.psys > summary { cursor: pointer; font: 11px ui-monospace, monospace; co
 .pmsg.role-system { border-left-color: #6b5a2f; }
 .pmsg-head { font: 10.5px ui-monospace, monospace; color: var(--muted); text-transform: none; margin-bottom: 2px; }
 details.pcall pre, details.psys pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.45 ui-monospace, monospace; color: #cfd6e4; max-height: 320px; overflow: auto; }
+
+/* Language tag, annotated transcript and cursor-rest chips */
+.bubble.user .lang { display: inline-block; margin-left: 8px; padding: 0 5px; border-radius: 4px; font: 600 10px/15px ui-monospace, monospace; text-transform: uppercase; color: #c7d2fe; background: #1c2334; border: 1px solid #3b4a6b; vertical-align: 1px; font-style: normal; }
+.annot { align-self: flex-end; max-width: 92%; font: 11.5px/1.4 ui-monospace, monospace; color: var(--muted); text-align: right; overflow-wrap: anywhere; }
+.annot[hidden] { display: none; }
+.chip.rest { border-style: dashed; border-color: #9d3f72; }
+.chip.rest b { color: #f472b6; }
+.chip.rest .whole { color: #f9a8d4; }

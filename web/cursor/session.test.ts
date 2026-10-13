@@ -200,3 +200,33 @@ describe("timeline model", () => {
     expect(m.t1).toBe(1700);
   });
 });
+
+describe("languages and cursor rests", () => {
+  const ro: Word[] = [
+    { text: "Mută", start: 0, end: 0.2 }, { text: "ăsta", start: 0.25, end: 0.4 }, { text: "acolo.", start: 0.8, end: 1.0 },
+  ];
+
+  it("labelsFor finds Romanian pointing words by default and can be limited to one language", () => {
+    expect(labelsFor(ro).map((l) => [l.wordIndex, l.word])).toEqual([[1, "ăsta"], [2, "acolo"]]);
+    expect(labelsFor(ro, [], ["en"])).toEqual([]);
+    expect(labelsFor(words, [], ["ro"])).toEqual([]);
+  });
+
+  it("keeps a detected language through the cursor file (and leaves it out when unknown)", () => {
+    const s = { ...session(), language: "ro" };
+    expect(parseCursorFile(JSON.stringify(toCursorFile(s))).language).toBe("ro");
+    expect("language" in toCursorFile(session())).toBe(false);
+    const { sessions } = sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(toCursorFile(s)) }]);
+    expect(sessions[0]!.language).toBe("ro");
+  });
+
+  it("timeline: rest spans in ms from audio start, and pointing words per selected language", () => {
+    const opts = { preMs: 300, postMs: 200 };
+    const m = buildTimelineModel(samples, ro, [], opts, 0, {}, {
+      rests: [{ ref: 1, tStart: 700, tEnd: 1300, sample: samples[0]!, wordIndex: 2, whole: false }], languages: ["en"],
+    });
+    expect(m.rests).toEqual([{ ref: 1, from: 700, to: 1300, whole: false }]);
+    expect(m.words.filter((w) => w.pointing)).toEqual([]);
+    expect(buildTimelineModel(samples, ro, [], opts).words.filter((w) => w.pointing).map((w) => w.text)).toEqual(["ăsta", "acolo."]);
+  });
+});

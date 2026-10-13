@@ -90,3 +90,6 @@ button.armed { background: var(--warn); color: #000; }
 .kbadge.pre { background: #fbbf24; }
 .pc-list .times { font-family: ui-monospace, monospace; }
 .ctx-block { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: #cfd5e1; }
+.row .spacer { flex: 1; }
+.row select { font-size: 12px; padding: 3px 5px; }
+.kbadge.rest { color: #000; }
