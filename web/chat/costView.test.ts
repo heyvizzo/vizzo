@@ -16,3 +16,14 @@ describe("costView", () => {
       .toBe("cost $0.0052+ · turn $0.0052 + background task $0 so far");
   });
 });
+
+describe("subscription savings", () => {
+  it("headline shows billed cost and what claude -p saved", async () => {
+    const { costHeadline } = await import("./costView.ts");
+    const { priceText } = await import("./promptView.ts");
+    const c = { items: [{ label: "Opus (claude -p · subscription)", usd: 0, savedUsd: 0.0161 }, { label: "ElevenLabs TTS", usd: 0.013 }], total: 0.013, jobs: [] };
+    expect(costHeadline(c)).toBe("cost $0.013 · $0.016 saved (subscription)");
+    expect(priceText({ costUsd: 0, savedUsd: 0.04 })).toBe("$0.040 saved");
+    expect(priceText({ costUsd: 0.0123 })).toBe("$0.012");
+  });
+});

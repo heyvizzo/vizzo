@@ -118,14 +118,21 @@ export interface LlmResponse {
   /** The final message / response.done payload as received. */
   raw?: unknown;
   error?: string;
-  /** What this call cost, from its usage and the prices in docs/API-NOTES.md. */
+  /** What this call cost, from its usage and the prices in docs/API-NOTES.md (0 when billed to the subscription). */
   costUsd?: number;
+  /** "subscription": routed through `claude -p` (Claude Code login), not billed per call. */
+  billing?: "api" | "subscription";
+  /** Subscription calls: what the call would have cost at API prices. */
+  savedUsd?: number;
 }
 
 /** One line of a turn's (or background job's) cost. */
 export interface CostItem {
   label: string;
+  /** Billed cost (0 for calls routed through the subscription). */
   usd: number;
+  /** Subscription calls: the API-price cost that wasn't billed. */
+  savedUsd?: number;
   /** e.g. "ack 34 · filler 41 · answer 180 chars" */
   detail?: string;
 }

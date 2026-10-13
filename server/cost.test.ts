@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type RunConfig } from "../shared/config.ts";
 import { callCost, computeCost, costBreakdown, costItems, haikuCost, opusCost, realtimeCost, realtimeResponseCost } from "./cost.ts";
 
-const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...DEFAULT_CONFIG, ...o });
+/** Claude over the API (billed); DEFAULT_CONFIG uses claude -p (subscription). */
+const API: RunConfig = { ...DEFAULT_CONFIG, claudeBackend: "api" };
+const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...API, ...o });
 
 describe("cost", () => {
   it("Haiku: input, output, cache read/write", () => {
@@ -58,7 +60,7 @@ describe("cost", () => {
 describe("progress lines", () => {
   it("the Haiku call that writes them is billed with the router", () => {
     const fillers = { input_tokens: 346, output_tokens: 85, cache_creation_input_tokens: 809, cache_read_input_tokens: 0 };
-    const b = costBreakdown(DEFAULT_CONFIG, { anthropic: { fillers } });
+    const b = costBreakdown(API, { anthropic: { fillers } });
     // 346 × $0.10 + 809 × $0.125 (cache write) + 85 × $0.50, per million
     expect(b.haiku).toBeCloseTo((346 * 0.1 + 809 * 0.125 + 85 * 0.5) / 1e6, 10);
   });
@@ -75,9 +77,9 @@ describe("itemized and per-call costs", () => {
       elevenChars: 260, elevenSegments: [{ label: "ack", chars: 40 }, { label: "filler", chars: 41 }, { label: "answer", chars: 179 }],
       scribeSeconds: 2.2,
     };
-    const items = costItems(DEFAULT_CONFIG, usage);
+    const items = costItems(API, usage);
     expect(items.map((i) => i.label)).toEqual(["Haiku router", "Haiku progress lines", "Opus", "ElevenLabs TTS (eleven_v4_turbo)", "Scribe STT"]);
-    expect(items.reduce((n, i) => n + i.usd, 0)).toBeCloseTo(computeCost(DEFAULT_CONFIG, usage), 12);
+    expect(items.reduce((n, i) => n + i.usd, 0)).toBeCloseTo(computeCost(API, usage), 12);
     expect(items[3]!.detail).toBe("ack 40 · filler 41 · answer 179 chars");
   });
 
@@ -88,5 +90,21 @@ describe("itemized and per-call costs", () => {
     expect(realtimeResponseCost(raw, "gpt-realtime-2.1")).toBeCloseTo(expected, 12);
     expect(callCost("realtime", raw, "gpt-realtime-2.1")).toBeCloseTo(expected, 12);
     expect(callCost("router", null, "gpt-realtime-2.1")).toBe(0);
+  });
+});
+
+describe("claude -p (subscription)", () => {
+  const usage = {
+    anthropic: { haiku: { input_tokens: 300, output_tokens: 170 }, opus: { input_tokens: 134, output_tokens: 769, cache_read_input_tokens: 10_214, speed: "standard" } },
+    elevenChars: 100, scribeSeconds: 2,
+  };
+  it("Claude calls cost $0 in the total and show what they saved; other vendors are still billed", () => {
+    const sub = { ...DEFAULT_CONFIG, claudeBackend: "cli" as const };
+    const items = costItems(sub, usage);
+    const claude = items.filter((i) => /claude -p · subscription/.test(i.label));
+    expect(claude.map((i) => i.usd)).toEqual([0, 0]);
+    expect(claude[1]!.savedUsd).toBeCloseTo(opusCost(usage.anthropic.opus, false), 12);
+    expect(computeCost(sub, usage)).toBeCloseTo(100 * 0.04 / 1000 + 2 * 0.39 / 3600, 12);
+    expect(computeCost(API, usage)).toBeGreaterThan(computeCost(sub, usage) + 0.01);
   });
 });

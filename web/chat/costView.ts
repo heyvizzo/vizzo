@@ -19,13 +19,25 @@ export interface TurnCost {
   jobs: { label: string; items: CostItem[]; total: number; running: boolean }[];
 }
 
-/** One line: "cost $0.031" or "cost $0.045 · turn $0.031 + background task $0.014 (running…)". */
+const savedOf = (items: CostItem[]) => items.reduce((n, i) => n + (i.savedUsd ?? 0), 0);
+
+/** Everything routed through the claude -p subscription in this turn and its background tasks. */
+export function totalSaved(c: TurnCost): number {
+  return savedOf(c.items) + c.jobs.reduce((n, j) => n + savedOf(j.items), 0);
+}
+
+/**
+ * One line: "cost $0.031", "cost $0.045 · turn $0.031 + background task $0.014 (running…)", plus
+ * "· $0.017 saved" when Claude calls went through the claude -p subscription (not billed).
+ */
 export function costHeadline(c: TurnCost): string {
   const jobsTotal = c.jobs.reduce((n, j) => n + j.total, 0);
   const running = c.jobs.some((j) => j.running);
-  if (!c.jobs.length) return `cost ${fmtUsd(c.total)}`;
+  const saved = totalSaved(c);
+  const savedPart = saved > 0 ? ` · ${fmtUsd(saved)} saved (subscription)` : "";
+  if (!c.jobs.length) return `cost ${fmtUsd(c.total)}${savedPart}`;
   const parts = c.jobs.map((j) => `${j.label} ${fmtUsd(j.total)}${j.running ? " so far" : ""}`);
-  return `cost ${fmtUsd(c.total + jobsTotal)}${running ? "+" : ""} · turn ${fmtUsd(c.total)} + ${parts.join(" + ")}`;
+  return `cost ${fmtUsd(c.total + jobsTotal)}${running ? "+" : ""} · turn ${fmtUsd(c.total)} + ${parts.join(" + ")}${savedPart}`;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -45,7 +57,8 @@ function rows(table: HTMLTableElement, items: CostItem[], group?: string): void 
   }
   for (const i of items) {
     const tr = el("tr");
-    tr.append(el("td", undefined, i.label), el("td", "cdetail", i.detail ?? ""), el("td", "cusd", fmtUsd(i.usd)));
+    const sub = i.savedUsd !== undefined && i.usd === 0;
+    tr.append(el("td", undefined, i.label), el("td", "cdetail", i.detail ?? ""), el("td", sub ? "cusd saved" : "cusd", sub ? `${fmtUsd(i.savedUsd!)} saved` : fmtUsd(i.usd)));
     table.append(tr);
   }
 }
@@ -62,8 +75,14 @@ export function renderTurnCost(box: HTMLElement, c: TurnCost): void {
   for (const j of c.jobs) rows(table, j.items, `${j.label}${j.running ? " (running…)" : ""}`);
   const total = el("tr", "ctotal");
   const jobsTotal = c.jobs.reduce((n, j) => n + j.total, 0);
-  total.append(el("td", undefined, "total"), el("td"), el("td", "cusd", fmtUsd(c.total + jobsTotal)));
+  total.append(el("td", undefined, "total billed"), el("td"), el("td", "cusd", fmtUsd(c.total + jobsTotal)));
   table.append(total);
+  const saved = totalSaved(c);
+  if (saved > 0) {
+    const tr = el("tr", "ctotal");
+    tr.append(el("td", undefined, "saved via claude -p (subscription)"), el("td"), el("td", "cusd saved", fmtUsd(saved)));
+    table.append(tr);
+  }
   d.append(table);
   box.append(d);
 }

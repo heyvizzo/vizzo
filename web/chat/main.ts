@@ -501,7 +501,12 @@ function renderJob(c: JobCard): void {
   const detail = j.state === "done" && j.detail ? detailOf(j.detail) : "";
   c.detailPre.textContent = detail;
   c.detail.hidden = !detail;
-  c.sub.textContent += j.costUsd !== undefined ? ` · cost ${fmtUsd(j.costUsd)}${j.costItems?.length ? ` (${j.costItems.map((i) => `${i.label.replace(/ \(.*\)$/, "")} ${fmtUsd(i.usd)}`).join(", ")})` : ""}` : "";
+  if (j.costUsd !== undefined) {
+    const items = j.costItems ?? [];
+    const saved = items.reduce((n, i) => n + (i.savedUsd ?? 0), 0);
+    const parts = items.map((i) => `${i.label.replace(/ \(.*\)$/, "")} ${i.savedUsd !== undefined && i.usd === 0 ? `${fmtUsd(i.savedUsd)} saved` : fmtUsd(i.usd)}`);
+    c.sub.textContent += ` · cost ${fmtUsd(j.costUsd)}${saved > 0 ? ` · ${fmtUsd(saved)} saved` : ""}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+  }
   c.err.textContent = j.state === "failed" ? j.error || "The task failed." : "";
   c.err.hidden = j.state !== "failed";
 }

@@ -67,12 +67,16 @@ export function realtimeCost(u: unknown, model: RunConfig["realtimeModel"]): num
   ) * PER_M;
 }
 
+/** Claude calls routed through `claude -p` run on the subscription: not billed per call. */
+export const claudeBilled = (config: RunConfig): boolean => config.claudeBackend !== "cli";
+
 export function costBreakdown(config: RunConfig, usage: Usage): CostBreakdown {
   const a = obj(usage.anthropic);
+  const billed = claudeBilled(config) ? 1 : 0;
   const b = {
     // Router + the progress-lines call (both Haiku).
-    haiku: (a.haiku ? haikuCost(a.haiku) : 0) + (a.fillers ? haikuCost(a.fillers) : 0),
-    opus: a.opus ? opusCost(a.opus, config.opusFast) : 0,
+    haiku: billed * ((a.haiku ? haikuCost(a.haiku) : 0) + (a.fillers ? haikuCost(a.fillers) : 0)),
+    opus: billed * (a.opus ? opusCost(a.opus, config.opusFast) : 0),
     openai: usage.openai ? realtimeCost(usage.openai, config.realtimeModel) : 0,
     tts: num(usage.elevenChars) * PRICES.elevenPerChar,
     stt: num(usage.scribeSeconds) * PRICES.scribePerSecond,
@@ -119,9 +123,13 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
     const read = num(x.cache_read_input_tokens), write = num(x.cache_creation_input_tokens);
     return `in ${num(x.input_tokens)}${read ? ` + ${read} cached` : ""}${write ? ` + ${write} cache write` : ""} · out ${num(x.output_tokens)}`;
   };
-  if (a.haiku) items.push({ label: "Haiku router", usd: haikuCost(a.haiku), detail: tokens(a.haiku) });
-  if (a.fillers) items.push({ label: "Haiku progress lines", usd: haikuCost(a.fillers), detail: tokens(a.fillers) });
-  if (a.opus) items.push({ label: "Opus", usd: opusCost(a.opus, config.opusFast), detail: tokens(a.opus) });
+  // claude -p: billed to the subscription, so 0 here, with the API-price cost as "saved".
+  const claude = (label: string, usd: number, u: unknown): CostItem => claudeBilled(config)
+    ? { label, usd, detail: tokens(u) }
+    : { label: `${label} (claude -p · subscription)`, usd: 0, savedUsd: usd, detail: tokens(u) };
+  if (a.haiku) items.push(claude("Haiku router", haikuCost(a.haiku), a.haiku));
+  if (a.fillers) items.push(claude("Haiku progress lines", haikuCost(a.fillers), a.fillers));
+  if (a.opus) items.push(claude("Opus", opusCost(a.opus, config.opusFast), a.opus));
   if (usage.openai) {
     const u = obj(usage.openai);
     const n = Array.isArray(u.responses) ? u.responses.length : 0;
@@ -141,5 +149,5 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
   }
   const secs = num(usage.scribeSeconds);
   if (secs) items.push({ label: "Scribe STT", usd: secs * PRICES.scribePerSecond, detail: fmtSecs(secs) });
-  return items.filter((i) => i.usd > 0);
+  return items.filter((i) => i.usd > 0 || (i.savedUsd ?? 0) > 0);
 }

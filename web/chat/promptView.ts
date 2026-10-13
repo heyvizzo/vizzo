@@ -109,11 +109,17 @@ export function usageSummary(usage: unknown): string {
   return parts.join(" · ");
 }
 
+/** "$0.016" for a billed call, "$0.016 saved" for one routed through the claude -p subscription. */
+export function priceText(r: Pick<LlmResponse, "costUsd" | "savedUsd">): string {
+  if (r.savedUsd !== undefined) return `${fmtUsd(r.savedUsd)} saved`;
+  return r.costUsd !== undefined ? fmtUsd(r.costUsd) : "";
+}
+
 /** One line: "↳ answer · completed · in 1,069 (cache read 1,069) · out 187 · 1.4 s", or the error. */
 export function responseSummary(r: LlmResponse): string {
   const time = r.durationMs !== undefined ? `${(r.durationMs / 1000).toFixed(1)} s` : "";
   if (r.error) return ["↳ error", r.label, r.error, time].filter(Boolean).join(" · ");
-  return ["↳ response", r.label, r.stopReason ? `stop: ${r.stopReason}` : "", usageSummary(r.usage), time, r.costUsd !== undefined ? fmtUsd(r.costUsd) : ""].filter(Boolean).join(" · ");
+  return ["↳ response", r.label, r.stopReason ? `stop: ${r.stopReason}` : "", usageSummary(r.usage), time, priceText(r)].filter(Boolean).join(" · ");
 }
 
 /** A collapsible block with the raw payload as JSON. */
@@ -128,7 +134,8 @@ export function renderResponse(r: LlmResponse): HTMLDetailsElement {
 export function responseBadge(r: LlmResponse): string {
   if (r.error) return "✕ error";
   const time = r.durationMs !== undefined ? ` ${(r.durationMs / 1000).toFixed(1)} s` : "";
-  return `✓${r.label ? ` ${r.label}` : ""}${r.stopReason ? ` ${r.stopReason}` : ""}${time}${r.costUsd !== undefined ? ` · ${fmtUsd(r.costUsd)}` : ""}`;
+  const price = priceText(r);
+  return `✓${r.label ? ` ${r.label}` : ""}${r.stopReason ? ` ${r.stopReason}` : ""}${time}${price ? ` · ${price}` : ""}`;
 }
 
 /** Attach a response to a rendered call (Realtime calls get several: ack, filler, answer…). */
@@ -139,8 +146,11 @@ export function addResponse(call: HTMLDetailsElement, r: LlmResponse): void {
   const n = [...box.querySelectorAll<HTMLElement>(":scope > details > summary")].length;
   // A call's cost is the sum of its responses (Realtime has several: ack, fillers, answer).
   const total = (Number(call.dataset.costUsd) || 0) + (r.costUsd ?? 0);
+  const saved = (Number(call.dataset.savedUsd) || 0) + (r.savedUsd ?? 0);
   call.dataset.costUsd = String(total);
+  call.dataset.savedUsd = String(saved);
+  const sum = saved > 0 && total === 0 ? `${fmtUsd(saved)} saved` : fmtUsd(total);
   const badge = call.querySelector<HTMLElement>(":scope > summary > .pbadge");
-  if (badge) badge.textContent = n > 1 ? ` · ${n} responses · ${fmtUsd(total)} · last ${responseBadge(r)}` : ` · ${responseBadge(r)}`;
+  if (badge) badge.textContent = n > 1 ? ` · ${n} responses · ${sum} · last ${responseBadge(r)}` : ` · ${responseBadge(r)}`;
   if (r.error) call.classList.add("err");
 }

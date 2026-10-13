@@ -75,9 +75,13 @@ export function startJob(
       if (reg.cancelled) return;
       text = r.text || text;
       const opusUsd = opusCost(r.usage, false);
+      const subscription = spec.config.claudeBackend === "cli";
       Object.assign(job, {
         state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0),
-        costUsd: opusUsd, costItems: [{ label: "Opus (background task)", usd: opusUsd }],
+        costUsd: subscription ? 0 : opusUsd,
+        costItems: [subscription
+          ? { label: "Opus (background task · claude -p · subscription)", usd: 0, savedUsd: opusUsd }
+          : { label: "Opus (background task)", usd: opusUsd }],
       });
       channel.send({ type: "job", job: { ...job } });
       getConversation(conn).push({

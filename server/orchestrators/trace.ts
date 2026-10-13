@@ -9,7 +9,9 @@ import { callCost } from "../cost.ts";
 export function priced(r: LlmResponse): LlmResponse {
   if (r.error || !r.usage) return r;
   const model = (r.target === "realtime" && r.model ? r.model : "gpt-realtime-2.1") as RealtimeModel;
-  return { ...r, costUsd: callCost(r.target, r.usage, model) };
+  const usd = callCost(r.target, r.usage, model);
+  // claude -p calls run on the Claude Code subscription: nothing billed per call, show what was saved.
+  return r.billing === "subscription" ? { ...r, costUsd: 0, savedUsd: usd } : { ...r, costUsd: usd };
 }
 
 export interface CallTrace {

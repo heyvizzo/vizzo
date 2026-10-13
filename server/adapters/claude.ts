@@ -135,7 +135,7 @@ export function cliPromptInfo(target: "router" | "fillers" | "opus", params: Any
 
 export function cliResponseInfo(target: LlmPrompt["target"], t0: number, r: CliResult): LlmResponse {
   return {
-    target, model: r.model, stopReason: r.stopReason, usage: r.usage,
+    target, model: r.model, stopReason: r.stopReason, usage: r.usage, billing: "subscription",
     durationMs: Math.round(performance.now() - t0),
     raw: { ...r.raw, warmAgent: r.warm, cliCostUsd: r.cliCostUsd, cliDurationMs: r.durationMs, cliDurationApiMs: r.durationApiMs },
   };

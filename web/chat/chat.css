@@ -126,3 +126,5 @@ table.ctable .cdetail { color: var(--muted); }
 table.ctable .cusd { text-align: right; white-space: nowrap; color: #e5c07b; }
 table.ctable tr.cgroup th { color: var(--muted); font-weight: 600; padding-top: 6px; }
 table.ctable tr.ctotal td { font-weight: 700; border-bottom: 0; }
+
+table.ctable .cusd.saved { color: var(--ok); }
