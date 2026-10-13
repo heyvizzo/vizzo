@@ -1,6 +1,7 @@
 // Cursor-lab sessions and their fixture files (ARCHITECTURE §6.1): Uxx.wav, Uxx.cursor.json, Uxx.labels.json.
 import { isPointingWord, normalizeWord } from "../../shared/pointing.ts";
-import type { CursorSample, PageClick, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
+import type { CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
+import { clickKind } from "./pageContext.ts";
 
 export interface LabelTarget { elementPath: string | null; dataSource: string | null; label: string | null }
 
@@ -28,10 +29,15 @@ export interface CursorFile {
   samples: CursorSample[];
   /** Window size + demo scroller size at record time, for reference. */
   viewport?: { width: number; height: number };
-  /** Clicks during the turn (t relative to tAudioStart, like samples). Optional: older files lack it. */
+  /**
+   * Click events during the turn (single/double/triple/multi; t, tEnd and times[] relative to tAudioStart,
+   * like samples). Optional: older files lack it, and their clicks have no kind (loaded as single clicks).
+   */
   clicks?: PageClick[];
-  /** Text highlighted during the turn (t relative to tAudioStart). Optional. */
-  selection?: PageSelection | null;
+  /** Text already highlighted when the recording started (t relative to tAudioStart). Optional. */
+  preselected?: PageSelection | null;
+  /** Highlights made during the recording, in order (tStart / t relative to tAudioStart). Optional. */
+  highlights?: PageHighlight[];
 }
 
 /** Uxx.labels.json */
@@ -54,9 +60,24 @@ export interface LabSession {
   /** What the server's resolver sent (live turns only). */
   serverTargets?: PointingTarget[];
   viewport?: { width: number; height: number };
-  /** Clicks / selection during the turn, t relative to tAudioStart. */
+  /** What the user clicked / highlighted during the turn (PageEvents), times relative to tAudioStart. */
   clicks?: PageClick[];
-  selection?: PageSelection | null;
+  preselected?: PageSelection | null;
+  highlights?: PageHighlight[];
+}
+
+/** The session's page events (empty lists / null when missing). */
+export function sessionEvents(s: Pick<LabSession, "clicks" | "preselected" | "highlights">): PageEvents {
+  return { clicks: s.clicks ?? [], preselected: s.preselected ?? null, highlights: s.highlights ?? [] };
+}
+
+/** Page events with every time shifted by `dt` ms (absolute <-> relative to tAudioStart). Copies. */
+export function shiftEvents(ev: PageEvents, dt: number): PageEvents {
+  return {
+    clicks: ev.clicks.map((c) => ({ ...c, t: c.t + dt, tEnd: c.tEnd + dt, times: c.times.map((x) => x + dt) })),
+    preselected: ev.preselected ? { ...ev.preselected, t: ev.preselected.t + dt } : null,
+    highlights: ev.highlights.map((h) => ({ ...h, tStart: h.tStart + dt, t: h.t + dt })),
+  };
 }
 
 /** Shift absolute client-time samples to be relative to tAudioStart, keeping those in [from, to] (absolute). */
@@ -80,7 +101,8 @@ export function toCursorFile(s: LabSession): CursorFile {
   return {
     version: 1, kind: "cursor", id: s.id, createdAt: s.createdAt, transcript: s.transcript,
     words: s.words, samples: s.samples, ...(s.viewport ? { viewport: s.viewport } : {}),
-    ...(s.clicks?.length ? { clicks: s.clicks } : {}), ...(s.selection ? { selection: s.selection } : {}),
+    ...(s.clicks?.length ? { clicks: s.clicks } : {}), ...(s.preselected ? { preselected: s.preselected } : {}),
+    ...(s.highlights?.length ? { highlights: s.highlights } : {}),
   };
 }
 
@@ -104,11 +126,33 @@ function isTarget(v: unknown): v is LabelTarget {
 }
 const optStrOrNull = (v: unknown) => v === undefined || strOrNull(v);
 const isRef = (v: unknown): v is Record<string, unknown> => isObj(v) && isTarget(v) && optStrOrNull(v.container);
-function isClick(v: unknown): v is PageClick {
-  return isRef(v) && isNum(v.t) && isNum(v.x) && isNum(v.y);
+const refOf = (v: Record<string, unknown>) => ({
+  elementPath: v.elementPath as string | null, dataSource: v.dataSource as string | null, label: v.label as string | null,
+  ...(v.container !== undefined ? { container: v.container as string | null } : {}),
+});
+/** A click event; old files' clicks (no kind/count/times) become single clicks. Null when malformed. */
+export function toClick(v: unknown): PageClick | null {
+  if (!isRef(v) || !isNum(v.t) || !isNum(v.x) || !isNum(v.y)) return null;
+  const times = Array.isArray(v.times) && v.times.length && v.times.every(isNum) ? [...(v.times as number[])] : [v.t];
+  const count = times.length;
+  const tEnd = isNum(v.tEnd) ? v.tEnd : times[count - 1]!;
+  return { ...refOf(v), kind: clickKind(count), count, t: v.t, tEnd, times, x: v.x, y: v.y };
 }
-function isSelection(v: unknown): v is PageSelection {
-  return isRef(v) && isNum(v.t) && typeof v.text === "string";
+function toSelection(v: unknown): PageSelection | null {
+  return isRef(v) && isNum(v.t) && typeof v.text === "string" ? { ...refOf(v), t: v.t, text: v.text } : null;
+}
+type HighlightVia = NonNullable<PageHighlight["via"]>;
+const VIAS: readonly HighlightVia[] = ["drag", "double-click", "triple-click", "multi-click", "shift-click", "keyboard"];
+function toHighlight(v: unknown): PageHighlight | null {
+  if (!isRef(v) || !isNum(v.t) || typeof v.text !== "string") return null;
+  const via = typeof v.via === "string" && (VIAS as readonly string[]).includes(v.via) ? (v.via as HighlightVia) : undefined;
+  return { ...refOf(v), text: v.text, tStart: isNum(v.tStart) ? v.tStart : v.t, t: v.t, ...(via ? { via } : {}) };
+}
+/** Every element converted, or null when it isn't an array or any element is malformed. */
+function every<T>(xs: unknown, f: (v: unknown) => T | null): T[] | null {
+  if (!Array.isArray(xs)) return null;
+  const out = xs.map(f);
+  return out.every((x) => x !== null) ? (out as T[]) : null;
 }
 
 /** Throws with a readable message on a malformed file. */
@@ -124,8 +168,24 @@ export function parseCursorFile(text: string): CursorFile {
     words: v.words, samples: v.samples,
     ...(isObj(v.viewport) && isNum(v.viewport.width) && isNum(v.viewport.height)
       ? { viewport: { width: v.viewport.width, height: v.viewport.height } } : {}),
-    ...(Array.isArray(v.clicks) && v.clicks.every(isClick) ? { clicks: v.clicks } : {}),
-    ...(isSelection(v.selection) ? { selection: v.selection } : {}),
+    ...pageFields(v),
+  };
+}
+
+/**
+ * clicks / preselected / highlights from a cursor file object (a malformed list is dropped). Old files: a
+ * `selection` (the turn's last highlighted text) becomes the one highlight, with tStart = t.
+ */
+function pageFields(v: Record<string, unknown>): Pick<CursorFile, "clicks" | "preselected" | "highlights"> {
+  const clicks = every(v.clicks, toClick);
+  const preselected = toSelection(v.preselected);
+  let highlights = every(v.highlights, toHighlight);
+  if (v.highlights === undefined) {
+    const old = toHighlight(v.selection);
+    if (old) highlights = [old];
+  }
+  return {
+    ...(clicks?.length ? { clicks } : {}), ...(preselected ? { preselected } : {}), ...(highlights?.length ? { highlights } : {}),
   };
 }
 
@@ -177,7 +237,7 @@ export function sessionsFromFiles(files: readonly LoadedFile[]): { sessions: Lab
       sessions.push({
         id, createdAt: c.createdAt, transcript: c.transcript, words: c.words, samples: c.samples,
         labels: labelsFor(c.words, lab), wav: g.wav?.blob, viewport: c.viewport,
-        clicks: c.clicks ?? [], selection: c.selection ?? null,
+        ...sessionEvents(c),
       });
     } catch (e) {
       errors.push(`${id}: ${(e as Error).message}`);
