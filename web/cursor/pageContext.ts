@@ -58,6 +58,8 @@ export function cleanSelection(text: string | null | undefined, max = SELECTION_
   return t ? t.slice(0, max) : null;
 }
 
+const squash = (s: string) => s.replace(/\s+/g, " ").trim();
+
 /** Offsets of a range in document order, for overlap checks without a DOM in tests. */
 export interface Span { start: number; end: number }
 export const overlaps = (a: Span, b: Span): boolean => a.start < b.end && b.start < a.end;
@@ -71,7 +73,11 @@ export function addHighlight(
   list: { h: PageHighlight; span: Span }[], h: PageHighlight, span: Span, mergeMs = HIGHLIGHT_MERGE_MS,
 ): "added" | "replaced" | "ignored" {
   const last = list[list.length - 1];
-  if (last && last.span.start === span.start && last.span.end === span.end) return "ignored";
+  if (last && last.span.start === span.start && last.span.end === span.end) {
+    // Same range again, e.g. the word of a double click seen by both clicks: keep the more specific "via".
+    if (h.via && h.via !== "drag" && last.h.via !== h.via) { last.h = { ...last.h, via: h.via }; return "replaced"; }
+    return "ignored";
+  }
   if (last && overlaps(last.span, span) && h.tStart - last.h.t <= mergeMs) {
     list[list.length - 1] = { h: { ...h, tStart: Math.min(h.tStart, last.h.tStart) }, span };
     return "replaced";
@@ -163,8 +169,23 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
     const text = cleanSelection(sel.toString());
     if (!text) return null;
     const range = sel.getRangeAt(0).cloneRange();
-    return { text, range, info: describe(elementOf(range.commonAncestorContainer as unknown as NodeLike)) };
+    return { text, range, info: describe(selectionElement(range, text)) };
   };
+
+  /**
+   * The smallest element containing the selected text: from the range start, walk up until the element's
+   * text includes it (a triple-clicked paragraph's range spills into the next element, so the common
+   * ancestor would be the whole card grid).
+   */
+  function selectionElement(range: Range, text: string): Element | null {
+    const want = squash(text);
+    let el = elementOf(range.startContainer as unknown as NodeLike) as unknown as Element | null;
+    while (el && el !== root) {
+      if (squash(el.textContent ?? "").includes(want)) return el;
+      el = el.parentElement;
+    }
+    return elementOf(range.commonAncestorContainer as unknown as NodeLike) as unknown as Element | null;
+  }
 
   function repaint(): void {
     const reg = registry()!;
@@ -174,7 +195,7 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
     if (preselected) reg.set(HL_PRE, new HighlightCtor!(preselected.range));
   }
 
-  const commitHighlight = (tStart: number, t: number) => {
+  const commitHighlight = (tStart: number, t: number, via: NonNullable<PageHighlight["via"]>) => {
     if (!active) return;
     const s = readSelection();
     if (!s) return;
@@ -185,7 +206,7 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
       if (p.start === span.start && p.end === span.end) return;
     }
     const list = highlights.map(({ h, span: sp }) => ({ h, span: sp }));
-    const r = addHighlight(list, { text: s.text, tStart: Math.max(tStart, tFrom), t, ...s.info }, span);
+    const r = addHighlight(list, { text: s.text, tStart: Math.max(tStart, tFrom), t, via, ...s.info }, span);
     if (r === "ignored") return;
     if (r === "replaced") highlights[highlights.length - 1] = { ...list[list.length - 1]!, range: s.range };
     else highlights.push({ ...list[list.length - 1]!, range: s.range });
@@ -201,13 +222,18 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
     down = null;
     if (!d || !active) return;
     const tUp = performance.now();
-    if (!isDrag(d, { x: e.clientX, y: e.clientY }) && d.t >= tFrom && inside(d.target)) {
+    const drag = isDrag(d, { x: e.clientX, y: e.clientY });
+    let count = 0;
+    if (!drag && d.t >= tFrom && inside(d.target)) {
       const info = describe(d.target);
-      if (info.elementPath) { addClick(clicks, { t: d.t, tUp, x: d.x, y: d.y, ...info }); changed(); }
+      if (info.elementPath) { addClick(clicks, { t: d.t, tUp, x: d.x, y: d.y, ...info }); count = clicks[clicks.length - 1]!.count; changed(); }
     }
     // The selection is final once the button is up (drag, or the word/paragraph of a double/triple click).
+    const via = drag ? "drag" : count >= 4 ? "multi-click" : count === 3 ? "triple-click" : count === 2 ? "double-click" : e.shiftKey ? "shift-click" : null;
+    // A plain single click doesn't make a highlight (with fast clicks it could otherwise see the next click's selection).
+    if (!via) return;
     const tStart = d.t;
-    setTimeout(() => commitHighlight(tStart, tUp), 0);
+    setTimeout(() => commitHighlight(tStart, tUp, via), 0);
   };
   // Keyboard activation (Enter/Space on a button or link) fires click with detail 0 and no pointer events.
   const onClick = (e: MouseEvent) => {
@@ -225,7 +251,7 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
     if (e.key !== "Shift" || keySelectStart === null) return;
     const t0 = keySelectStart;
     keySelectStart = null;
-    commitHighlight(t0, performance.now());
+    commitHighlight(t0, performance.now(), "keyboard");
   };
 
   root.addEventListener("pointerdown", onDown, true);

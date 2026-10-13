@@ -277,7 +277,7 @@ export function formatPageContext(ev: PageEvents | null | undefined, words: Word
     const span = relTime(h.tStart, tAudioStart);
     const made = span ? `made${when(h.tStart, h.t, tAudioStart)}` : "";
     const w = wordNear(h.t, words, tAudioStart);
-    const meta = [made, w ? `while saying ${JSON.stringify(w.text.trim())}` : ""].filter(Boolean).join(", ");
+    const meta = [h.via ? `by ${h.via}` : "", made, w ? `while saying ${JSON.stringify(w.text.trim())}` : ""].filter(Boolean).join(", ");
     lines.push(`Highlight ${i + 1}${meta ? ` (${meta.trim()})` : ""}: ${describeText(truncateText(h.text), h)}`);
   });
   return lines.join("\n");
