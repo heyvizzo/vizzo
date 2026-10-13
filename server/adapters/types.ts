@@ -81,8 +81,17 @@ export type OpenRealtime = (opts: OpenRealtimeOpts) => Promise<RealtimeSession>;
 
 export interface RouteWithHaikuOpts {
   mark: Mark; transcript: string; pointing: PointingTarget[]; mode: RouterMode;
-  /** Text to speak right away (ack, or a direct answer in auto mode). */
-  onSpokenDelta: (d: string) => void;
+  /**
+   * Text to speak right away. `kind` (T7 addition) says what it is: "ack" = the `ack` field of an
+   * ask_opus call (delegation follows), "answer" = a direct text answer (auto mode only).
+   */
+  onSpokenDelta: (d: string, kind: "ack" | "answer") => void;
+  /**
+   * T7 addition, optional: fires once the spoken ack is complete (the `ack` field's closing quote),
+   * before Haiku finishes writing `question`, so TTS can be flushed early. Not fired for direct answers
+   * (those end when routeWithHaiku resolves).
+   */
+  onSpokenEnd?: (kind: "ack") => void;
 }
 export type RouteWithHaiku = (opts: RouteWithHaikuOpts) => Promise<{ delegate: null | { question: string }; usage: unknown }>;
 

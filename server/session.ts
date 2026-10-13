@@ -13,8 +13,9 @@ import { hybridOrchestrator } from "./orchestrators/hybrid.ts";
 import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
 import { computeCost } from "./cost.ts";
+import { ConnectionState } from "./connection.ts";
 
-const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
+export const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
   realtime: realtimeOrchestrator,
   pipeline: pipelineOrchestrator,
   hybrid: hybridOrchestrator,
@@ -39,14 +40,33 @@ interface Turn {
   handlers?: TurnHandlers;
 }
 
+export interface SessionOpts {
+  orchestrators?: Partial<Record<RunConfig["approach"], Orchestrator>>;
+  persist?: boolean;
+}
+
 export class Session {
   private turn: Turn | null = null;
   private clock = { rttMs: 0, offsetMs: 0 };
   private echo = false;
+  /** Per-connection state that outlives turns (e.g. the reused Realtime session). */
+  private connection = new ConnectionState();
 
-  constructor(private ws: WebSocket) {
+  private orchestrators: Partial<Record<RunConfig["approach"], Orchestrator>>;
+  private persist: boolean;
+
+  /**
+   * `orchestrators` overrides the routing table and `persist: false` skips appending runs to results/
+   * (both used by `smoke:e2e --fake`).
+   */
+  constructor(private ws: WebSocket, opts: SessionOpts = {}) {
+    this.orchestrators = opts.orchestrators ?? ORCHESTRATORS;
+    this.persist = opts.persist ?? true;
     ws.on("message", (data, isBinary) => (isBinary ? this.onBinary(data) : this.onText(data.toString())));
-    ws.on("close", () => this.turn?.handlers?.cancel());
+    ws.on("close", () => {
+      this.turn?.handlers?.cancel();
+      this.connection.disposeAll();
+    });
   }
 
   send(msg: ServerMsg): void {
@@ -135,7 +155,7 @@ export class Session {
       this.send({ type: "mark", turnId, name, serverNow: now, meta });
     };
 
-    const orchestrator = ORCHESTRATORS[config.approach];
+    const orchestrator = this.orchestrators[config.approach];
     if (!orchestrator) {
       this.send({ type: "error", turnId, source: "session", message: `no orchestrator for ${config.approach}` });
       return;
@@ -151,6 +171,7 @@ export class Session {
         sendAudio: (pcm) => this.turn === turn && this.sendAudio(pcm),
         cursorSamples: () => turn.samples,
         tAudioStart: () => turn.tAudioStart,
+        connection: this.connection,
       });
     } catch (e) {
       this.send({ type: "error", turnId, source: "orchestrator", message: String(e) });
@@ -172,6 +193,7 @@ export class Session {
       setTimeout(resolve, PLAYED_GRACE_MS);
     });
     if (this.turn !== turn) return;
+    if (result.ackIsAnswer) relabelAckAsAnswer(turn);
     const usage = result.usage;
     const run: RunRecord = {
       runId: randomUUID(), turnId: turn.turnId, approach: turn.config.approach, config: turn.config,
@@ -181,6 +203,18 @@ export class Session {
     };
     this.send({ type: "turn.done", turnId: turn.turnId, run });
     this.turn = null;
-    appendRun(run).catch((e) => console.error("[results] append failed", e));
+    if (this.persist) appendRun(run).catch((e) => console.error("[results] append failed", e));
+  }
+}
+
+/** Realtime/hybrid turn with no ask_opus call: the "ack" audio was the answer (see TurnResult.ackIsAnswer). */
+function relabelAckAsAnswer(turn: Turn): void {
+  const pairs = [["ack.ttsFirstByte", "answer.ttsFirstByte"], ["ack.played", "answer.played"]] as const;
+  for (const [from, to] of pairs) {
+    if (turn.marks[from] === undefined || turn.marks[to] !== undefined) continue;
+    turn.marks[to] = turn.marks[from];
+    turn.markMeta[to] = { ...turn.markMeta[from], relabeledFrom: from };
+    delete turn.marks[from];
+    delete turn.markMeta[from];
   }
 }

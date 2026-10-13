@@ -121,6 +121,13 @@ Implementation notes (T2, no signature changes): one shared `AudioContext` at th
 
 The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `SttStream` exposes `seconds` (audio seconds sent, feeds `usage.scribeSeconds`); `RealtimeSession` exposes `usage` (typed `RealtimeUsage`) plus T4's `beginTurn`, `setMark`, `onError`, `currentSegment`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
 
+**T7 additions (additive):**
+- `routeWithHaiku`'s `onSpokenDelta(d, kind)` gets `kind: "ack" | "answer"` ("ack" = the `ack` field of an `ask_opus` call, "answer" = a direct text answer in auto mode), and an optional `onSpokenEnd("ack")` fires as soon as the ack field is complete (before `question` is written), so the pipeline flushes the ack TTS early.
+- `TurnContext.connection: ConnectionCache` (`get/set(key, value, dispose?)/delete`): per-browser-connection state, disposed when the WebSocket closes. Used for the reusable Realtime session.
+- `TurnResult.ackIsAnswer?: boolean`: see §7 A. The Session then renames `ack.ttsFirstByte`/`ack.played` to `answer.*` in the RunRecord (`markMeta[...].relabeledFrom`).
+- Each orchestrator module exports a factory `createXOrchestrator(deps: OrchestratorDeps)` (deps = the five adapter functions + `voiceId?`, `turnTimeoutMs?`, `hybridLateWaitMs?`); the default export uses the real adapters (`server/orchestrators/deps.ts`). Fakes with the same marks live in `server/orchestrators/fakes.ts` (tests, `smoke:e2e --fake`).
+- `new Session(ws, {orchestrators?, persist?})` and `startServer(port, {orchestrators?, persist?, quiet?})` exported from `server/index.ts` (port 0 = random); `tsx server/index.ts` still listens on `PORT`/8787.
+
 Orchestrators depend **only** on these interfaces, so each adapter can be built and smoke-tested on its own. Each adapter emits marks through the injected `mark()` function.
 
 ```ts
@@ -222,6 +229,8 @@ function solveWithOpus(opts: {
 
 `RunRecord` = `{ runId, turnId, approach, config, fixtureId?, marks: Record<MarkName, number>, metrics, transcript, pointing, voiceText, opusText, usage: {anthropic?, openai?, elevenChars?, scribeSeconds?}, costUsd, clock: {rttMs, offsetMs}, error? }`.
 
+Usage shapes written by the orchestrators (T7): `anthropic: {haiku?, opus?}` = the raw Anthropic `usage` objects (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `speed`); `openai` = `RealtimeUsage` for **this turn only** (diffed against the reused session's cumulative counters); `elevenChars` = characters sent to TTS; `scribeSeconds` = audio seconds sent to Scribe. `server/cost.ts` documents the price assumptions where API-NOTES lists none (cache writes 1.25× input, Haiku cache reads 0.1×, fast-mode cache reads 2×, one cached rate for Realtime text and audio).
+
 ## 6. Pointing resolution (shared between both labs)
 
 Implement it in `shared/pointing.ts`, as pure functions so they can be unit tested on saved fixtures.
@@ -291,6 +300,18 @@ The cursor lab saves (and loads, by file name) three files per session; `Uxx` is
 **cursor-only (`cursorOnly.ts`, T9).** For the cursor lab: `turn.start` → `openScribe` → stream audio → `release` → `commit()` → `final()` → `stt.final` → `resolvePointing` → mark `pointing.resolved`, send `pointing.resolved` → mark `turn.end`. No LLM, no TTS. Usage records `scribeSeconds`.
 
 **Pre-warming.** Open the vendor sockets on `turn.start` (or keep them alive per connection) so connection setup isn't counted in latency. Record cold-vs-warm as a config flag.
+
+### As built (T7)
+
+- **Segments.** `audio.segment start` goes out right before a segment's first audio byte and `end` after its last; segments are serialized (later audio is held until the earlier segment ends); a segment that never gets audio sends nothing, so the Session never waits for an `audio.played` that can't come.
+- **A/C labelling.** The first Realtime response of a turn is `"ack"` on the wire, the post-tool response `"answer"` (the adapter's `currentSegment`). Whether a tool call follows is only known after audio has started, so if the turn ends **without** `ask_opus`, the orchestrator returns `ackIsAnswer: true` and the RunRecord's ack marks become answer marks (PRD §7: TTA = TTFA for easy questions). The live UI sees the wire label; the stored RunRecord is canonical.
+- **A/C tool result.** `sendToolResult(callId, spokenLine + "\n\n" + note)` the moment `onSpokenLine` fires (the note says the detailed answer is on screen); `opus.text` keeps streaming until Opus is done. Prompt: `server/prompts/realtime.md`.
+- **Realtime session reuse.** One session per connection in `ctx.connection` (shared by A and C), opened on the first warm turn's `turn.start`, reused with `beginTurn()` + `setMark()`, reopened when it errored/closed or the model changed. Any Realtime error drops it. The adapter has no `response.cancel`, so cancelling (or failing) a turn while a response is in flight closes and drops the session. Note: a reused session keeps its conversation history across turns.
+- **B labelling.** Forced mode: the router's speech is the `ack`. Auto mode: the first delta's `kind` decides (`ack` if it called `ask_opus`, `answer` if it answered directly). The pre-warmed first TTS socket is opened as "ack"; its `*.ttsFirstByte` mark is renamed to the final label. The ack socket is flushed on `onSpokenEnd` (or when the router returns). The answer socket opens when Opus is requested (warm) or when the spoken line is ready (cold). Rare auto-mode "text, then tool call" turns are flagged `turn.end.meta.labelConflict`.
+- **C pointing.** After release: commit Scribe, wait up to `hybridWaitMs` for its final (0 = don't wait), then `commitAndRespond(formatPointingContext(...) || undefined)`. `llm.request.meta` = `{pointingInjected, pointingMissed}`. A final that arrives after the response started is still resolved and recorded with `pointing.resolved.meta = {pointingMissed: true, late: true}`; one that never arrives (bounded by `hybridLateWaitMs`, 2 s after the reply) gets `{pointingMissed: true, arrived: false}`. A Scribe failure in C is non-fatal (`error {source:"scribe"}` + RunRecord.error, the voice reply still runs).
+- **Cold (`prewarm: false`).** Sockets open on release (Scribe, Realtime) or when first needed (TTS), so setup is inside the measured latency; `llm.request.meta.cold = true` (also on `turn.end`). Cold Realtime sessions are closed after the turn.
+- **Errors / cancel.** Any adapter failure → `error {source: scribe|openai|tts|haiku|opus|timeout}` and `done` resolves with `error` set. Overall turn timeout 60 s from `turn.start`. `cancel()` closes every socket opened for the turn (and the reusable Realtime session only if a response was in flight).
+- **Headless check.** `npm run smoke:e2e` (real keys; SKIPs per approach) and `npm run smoke:e2e -- --fake` (fake adapters over the real `/ws`) print one RunRecord per approach with marks relative to release.
 
 ## 8. Decisions and alternatives
 

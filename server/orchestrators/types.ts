@@ -1,6 +1,20 @@
 import type { RunConfig } from "../../shared/config.ts";
-import type { CursorSample, ServerMsg } from "../../shared/protocol.ts";
+import type { CursorSample, PointingTarget, ServerMsg, Usage } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
+import type { OpenRealtime, OpenScribe, OpenTts, RouteWithHaiku, SolveWithOpus } from "../adapters/types.ts";
+
+/**
+ * Per-browser-connection cache (T7 addition). Lives as long as the Session's WebSocket; every entry's
+ * `dispose` runs when the connection closes (or when the entry is replaced/deleted). Used to keep one
+ * pre-warmed OpenAI Realtime session per connection and reuse it across turns (ARCHITECTURE §7).
+ */
+export interface ConnectionCache {
+  get<T>(key: string): T | undefined;
+  /** Replaces (and disposes) any previous entry under `key`. */
+  set<T>(key: string, value: T, dispose?: (value: T) => void): void;
+  /** Disposes and removes the entry, if any. */
+  delete(key: string): void;
+}
 
 /** What a Session gives an orchestrator for one turn. */
 export interface TurnContext {
@@ -13,6 +27,8 @@ export interface TurnContext {
   cursorSamples: () => CursorSample[];
   /** Client time of the first captured audio sample, once known. */
   tAudioStart: () => number | undefined;
+  /** T7 addition: state that outlives the turn (one per browser connection). */
+  connection: ConnectionCache;
 }
 
 /** Handlers for one turn. Created on turn.start. */
@@ -26,11 +42,33 @@ export interface TurnHandlers {
 
 export interface TurnResult {
   transcript: string;
-  pointing: import("../../shared/protocol.ts").PointingTarget[];
+  pointing: PointingTarget[];
   voiceText: string;
   opusText: string;
-  usage: import("../../shared/protocol.ts").Usage;
+  usage: Usage;
   error?: string;
+  /**
+   * T7 addition. Realtime/hybrid label the model's first response "ack" on the wire because it is
+   * only known after the audio has started whether a tool call follows. When no ask_opus call
+   * happened, that audio WAS the answer (PRD §7: TTA = TTFA for easy questions), so the Session
+   * renames the `ack.ttsFirstByte` / `ack.played` marks to `answer.*` in the RunRecord.
+   */
+  ackIsAnswer?: boolean;
 }
 
 export type Orchestrator = (ctx: TurnContext) => TurnHandlers;
+
+/** Adapters an orchestrator uses. Injected so tests and `smoke:e2e --fake` can swap in fakes. */
+export interface OrchestratorDeps {
+  openScribe: OpenScribe;
+  openRealtime: OpenRealtime;
+  openTts: OpenTts;
+  routeWithHaiku: RouteWithHaiku;
+  solveWithOpus: SolveWithOpus;
+  /** ElevenLabs voice id (default: process.env.ELEVENLABS_VOICE_ID). */
+  voiceId?: string;
+  /** Overall per-turn timeout from turn.start (default 60 s). */
+  turnTimeoutMs?: number;
+  /** Hybrid: after the voice reply finishes, how long to still wait for a late Scribe final (default 2 s). */
+  hybridLateWaitMs?: number;
+}

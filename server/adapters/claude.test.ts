@@ -123,8 +123,17 @@ describe("routeWithHaiku", () => {
     setClient(client);
     const r = recorder();
     const spoken: string[] = [];
-    const res = await routeWithHaiku({ mark: r.mark, transcript: U3, pointing: GRID_TARGETS, mode: "forced", onSpokenDelta: (d) => spoken.push(d) });
+    const kinds = new Set<string>();
+    const events: string[] = [];
+    const res = await routeWithHaiku({
+      mark: r.mark, transcript: U3, pointing: GRID_TARGETS, mode: "forced",
+      onSpokenDelta: (d, kind) => { spoken.push(d); kinds.add(kind); events.push("delta"); },
+      onSpokenEnd: (kind) => events.push(`end:${kind}`),
+    });
 
+    expect([...kinds]).toEqual(["ack"]);
+    expect(events.filter((e) => e.startsWith("end"))).toEqual(["end:ack"]);
+    expect(events[events.length - 1]).toBe("end:ack");
     expect(spoken.length).toBeGreaterThan(3); // incremental, not one burst
     expect(spoken.join("")).toBe(input.ack);
     expect(res.delegate).toEqual({ question: input.question });
@@ -144,8 +153,10 @@ describe("routeWithHaiku", () => {
     setClient(client);
     const r = recorder();
     const spoken: string[] = [];
-    const res = await routeWithHaiku({ mark: r.mark, transcript: "Can you hear me?", pointing: [], mode: "auto", onSpokenDelta: (d) => spoken.push(d) });
+    const kinds: string[] = [];
+    const res = await routeWithHaiku({ mark: r.mark, transcript: "Can you hear me?", pointing: [], mode: "auto", onSpokenDelta: (d, k) => { spoken.push(d); kinds.push(k); } });
     expect(spoken).toEqual(["Yes, ", "I can hear you."]);
+    expect(kinds).toEqual(["answer", "answer"]);
     expect(res.delegate).toBeNull();
     expect(r.names()).toEqual(["llm.request", "llm.firstToken"]);
     expect((messagesStream.mock.calls[0]![0] as any).tool_choice).toMatchObject({ type: "auto" });
