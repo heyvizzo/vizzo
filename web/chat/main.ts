@@ -9,7 +9,7 @@ import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type TtsModel } from "../../shared/config.ts";
-import type { JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
+import type { PageClick, PageSelection, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -17,6 +17,7 @@ import { bindPushToTalk } from "../audio/ptt.ts";
 import { mountDemo } from "../cursor/demoLoader.ts";
 import { renderOverlay } from "../cursor/overlay.ts";
 import { Sampler } from "../cursor/sampler.ts";
+import { createPageContextRecorder } from "../cursor/pageContext.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
@@ -237,6 +238,24 @@ function renderChips(v: TurnView, targets: PointingTarget[], approach: ChatAppro
   if (approach === "realtime" && v.chips.childElementCount) v.chips.append(el("span", "chip", "not sent to A"));
 }
 
+/** What was clicked / highlighted during the turn, under the pointing chips. */
+function renderPageChips(v: TurnView, clicks: PageClick[], selection: PageSelection | null): void {
+  if (!clicks.length && !selection) return;
+  const row = el("div", "chips");
+  for (const c of clicks) {
+    const chip = el("span", "chip");
+    chip.append(el("b", undefined, "clicked"), ` ${c.label ?? "(element)"}${c.container ? ` · ${c.container}` : ""}`);
+    row.append(chip);
+  }
+  if (selection) {
+    const chip = el("span", "chip");
+    const text = selection.text.length > 60 ? `${selection.text.slice(0, 60)}…` : selection.text;
+    chip.append(el("b", undefined, "selected"), ` “${text}”`);
+    row.append(chip);
+  }
+  v.chips.after(row);
+}
+
 function fmtMs(v: number | null | undefined): string {
   return v == null ? "–" : v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`;
 }
@@ -335,6 +354,8 @@ function renderJobsPill(): void {
 // ── audio + cursor ─────────────────────────────────
 const sock = connectWithStatus();
 const sampler = new Sampler(demoRoot, scroller);
+/** Clicks and highlighted text on the demo page during a turn (sent as turn.context before release). */
+const pageRec = createPageContextRecorder(demoRoot);
 let player: Player | null = null;
 let lastTargets: PointingTarget[] = [];
 /** Rough "is something audible" estimate from bytes pushed vs time. */
@@ -481,6 +502,7 @@ function press(): void {
   lastTargets = [];
   drawOverlay();
   sock.send({ type: "turn.start", turnId, config: config(), tPress: now });
+  pageRec.start(now - PRE_ROLL_MS);
   t.batchTimer = setInterval(() => flushSamples(t), BATCH_MS);
   $("ptt").classList.add("live");
   setStatus("Listening… release to send.");
@@ -506,6 +528,9 @@ async function release(): Promise<void> {
   if (turn !== t || t.finished) return;
   flushSamples(t);
   clearInterval(t.batchTimer);
+  const page = pageRec.stop();
+  sock.send({ type: "turn.context", turnId: t.turnId, clicks: page.clicks, selection: page.selection });
+  renderPageChips(t.view, page.clicks, page.selection);
   sock.send({ type: "turn.release", turnId: t.turnId, tRelease: t.tRelease });
   setStatus("Thinking…");
   refreshBusy();

@@ -19,7 +19,7 @@ npm run dev                 # server :8787 + Vite :5173 → http://localhost:517
 npm run dev:fake            # same, but every vendor is faked (tones + canned text): try the UI with no keys
 ```
 
-Pages: `/` latency lab, `/chat.html` chat (multi-turn conversation with the real vendors, switch A/B/C per turn, point at the demo page; history is kept per connection and shared across approaches, "New conversation" resets it; chat turns are saved to `results/chat-*.jsonl`, outside the benchmark set), `/cursor.html` cursor lab, `/audio-test.html` mic → server echo → playback.
+Pages: `/` latency lab, `/chat.html` chat (each turn is classified question / task / clarify / answer with a time estimate: short tasks get spoken progress lines while Opus works, long ones run as background jobs that are announced when done; press Space while it talks to interrupt, Esc to stop; clicks and highlighted text on the demo page are sent along; multi-turn conversation with the real vendors, switch A/B/C per turn, point at the demo page; history is kept per connection and shared across approaches, "New conversation" resets it; chat turns are saved to `results/chat-*.jsonl`, outside the benchmark set), `/cursor.html` cursor lab, `/audio-test.html` mic → server echo → playback.
 
 Checks: `npm run typecheck`, `npm test`, `npm run smoke:{scribe,realtime,tts,claude,e2e}` (each SKIPs without its keys), `npm run smoke:e2e -- --fake` (whole server path, fake vendors), `npm run smoke:chat -- a.wav b.wav c.wav` (real multi-turn chat, approach B → A → C).
 
