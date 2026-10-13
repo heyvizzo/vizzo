@@ -18,7 +18,16 @@ main.cursor-lab {
 #ov-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; z-index: 1000; }
 .ov-box { position: absolute; border: 2px solid; border-radius: 4px; pointer-events: none; }
 .ov-tag { position: absolute; left: -2px; top: -16px; font: 10px/14px ui-monospace, monospace; padding: 0 4px; border-radius: 3px; white-space: nowrap; }
-.ov-dot { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #000; }
+#hover-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; z-index: 999; }
+.ov-hover, .ov-hover-container { position: absolute; border-radius: 4px; pointer-events: none; }
+.ov-hover { border: 1.5px solid; background: rgba(167, 139, 250, 0.08); }
+.ov-hover-container { border: 1px dashed; opacity: 0.55; }
+.ov-click {
+  position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%;
+  background: #22d3ee; color: #000; font: 700 10px/16px ui-monospace, monospace; text-align: center;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px #000;
+}
+.ov-dot {position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #000; }
 
 .cl-side { overflow: auto; display: flex; flex-direction: column; gap: 10px; grid-row: 1 / span 2; grid-column: 2; }
 .cl-side h3 { margin: 0 0 8px; font-size: 13px; }
@@ -48,4 +57,19 @@ table.grid tr.active td { background: rgba(110, 168, 254, 0.1); }
 table.grid button { padding: 2px 6px; font-size: 12px; }
 button.armed { background: var(--warn); color: #000; }
 .file-btn { cursor: pointer; background: #222733; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
-#server-ctx { white-space: pre-wrap; margin: 8px 0 0; }
+#server-ctx { white-space: pre-wrap; margin: 4px 0 0; }
+
+/* "Under the cursor" inspector */
+.inspector { font-size: 12px; min-height: 58px; }
+.inspector .el { font-size: 14px; color: var(--text); word-break: break-word; }
+.inspector .el .tag { color: #a78bfa; font-family: ui-monospace, monospace; }
+.inspector .kv { display: grid; grid-template-columns: 52px 1fr; gap: 2px 8px; margin-top: 6px; }
+.inspector .kv span:nth-child(odd) { color: var(--muted); }
+.inspector .kv span:nth-child(even) { font-family: ui-monospace, monospace; word-break: break-all; }
+.cl-side h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.page-ctx { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.page-ctx li { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.page-ctx .n { flex: none; width: 16px; height: 16px; border-radius: 50%; background: #22d3ee; color: #000; font: 700 10px/16px ui-monospace, monospace; text-align: center; }
+.page-ctx .n.sel { background: #f0abfc; width: auto; padding: 0 4px; border-radius: 3px; }
+.page-ctx .when { margin-left: auto; white-space: nowrap; }
+.ctx-block { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: #cfd5e1; }

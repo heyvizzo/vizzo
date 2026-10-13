@@ -1,5 +1,7 @@
-// Element description for cursor samples: stable CSS path, closest [data-source], label.
-// Written against a minimal element interface so it runs under unit tests without a DOM.
+// Element description for cursor samples: the most specific meaningful element under the pointer
+// (a card's title, not the card), its stable CSS path, own label, nearest [data-source], and the
+// enclosing labeled component. Written against a minimal element interface so it runs under unit
+// tests without a DOM.
 
 export interface ElLike {
   tagName: string;
@@ -55,40 +57,106 @@ export function closestWithAttr(el: ElLike | null, attr: string, root?: ElLike |
   return null;
 }
 
-const clean = (s: string | null | undefined): string | null => {
+export const LABEL_MAX = 60;
+
+/** Trim, collapse whitespace, cap at `max` chars with an ellipsis; null when empty. */
+export function cleanText(s: string | null | undefined, max = LABEL_MAX): string | null {
   const t = (s ?? "").replace(/\s+/g, " ").trim();
-  return t ? (t.length > 80 ? t.slice(0, 79) + "…" : t) : null;
-};
+  return t ? (t.length > max ? t.slice(0, max - 1).trimEnd() + "…" : t) : null;
+}
 
 /** Simplified accessible name: aria-label, alt, title, placeholder, then text content. */
 export function accessibleName(el: ElLike): string | null {
   return (
-    clean(el.getAttribute("aria-label")) ??
-    clean(el.getAttribute("alt")) ??
-    clean(el.getAttribute("title")) ??
-    clean(el.getAttribute("placeholder")) ??
-    clean(el.textContent)
+    cleanText(el.getAttribute("aria-label")) ??
+    cleanText(el.getAttribute("alt")) ??
+    cleanText(el.getAttribute("title")) ??
+    cleanText(el.getAttribute("placeholder")) ??
+    cleanText(el.textContent)
   );
 }
 
-export interface ElementInfo { elementPath: string | null; dataSource: string | null; label: string | null }
+/** Elements that are a meaningful pointing target on their own (the title, not the card around it). */
+const MEANINGFUL = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6", "th", "td", "caption", "button", "a", "label", "legend",
+  "input", "select", "textarea", "option", "img", "li", "dt", "dd", "p", "blockquote", "summary", "figcaption",
+]);
+/** Elements whose text content isn't their name (form controls, images). */
+const CONTROLS = new Set(["input", "select", "textarea", "img"]);
 
-export const NO_ELEMENT: ElementInfo = { elementPath: null, dataSource: null, label: null };
+const tagOf = (el: ElLike) => el.tagName.toLowerCase();
+const hasOwnAttr = (el: ElLike, attr: string) => el.getAttribute(attr) !== null;
+const visibleLen = (s: string | null) => (s ?? "").replace(/\s+/g, "").length;
+
+/** True if the element has text of its own, not only text inside child elements (`<div>Price <b>$5</b></div>` → true). */
+export function hasOwnText(el: ElLike): boolean {
+  const all = visibleLen(el.textContent);
+  if (!all) return false;
+  let inChildren = 0;
+  for (const c of Array.from(el.children)) inChildren += visibleLen(c.textContent);
+  return all > inChildren;
+}
+
+/** A meaningful target: a listed tag, an element with its own data-label/data-source, or a div/span… with its own text. */
+export function isMeaningful(el: ElLike): boolean {
+  return MEANINGFUL.has(tagOf(el)) || hasOwnAttr(el, "data-label") || hasOwnAttr(el, "data-source") || hasOwnText(el);
+}
+
+/**
+ * The most specific meaningful element at or above `el`, never walking past `root`.
+ * Null if there is none (e.g. a bare wrapper with no labeled ancestor).
+ */
+export function meaningfulTarget(el: ElLike, root?: ElLike | null): ElLike | null {
+  for (let cur: ElLike | null = el; cur; cur = cur.parentElement) {
+    if (isMeaningful(cur)) return cur;
+    if (cur === root) break;
+  }
+  return null;
+}
+
+/**
+ * An element's own short label: its visible text for headings, cells, buttons, links…; its name for
+ * controls and images; its data-label for components (a card, a row), never the component's whole text.
+ */
+export function ownLabel(el: ElLike): string | null {
+  const attr = (n: string) => cleanText(el.getAttribute(n));
+  const tag = tagOf(el);
+  if (CONTROLS.has(tag)) return attr("aria-label") ?? attr("alt") ?? attr("data-label") ?? attr("title") ?? attr("placeholder");
+  if (MEANINGFUL.has(tag) || (!hasOwnAttr(el, "data-label") && hasOwnText(el))) {
+    return attr("aria-label") ?? cleanText(el.textContent) ?? attr("data-label") ?? attr("title");
+  }
+  return attr("data-label") ?? attr("aria-label") ?? attr("title");
+}
+
+export interface ElementInfo { elementPath: string | null; dataSource: string | null; label: string | null; container: string | null }
+
+export const NO_ELEMENT: ElementInfo = { elementPath: null, dataSource: null, label: null, container: null };
 
 /**
  * What a cursor sample records about the element under the pointer (ARCHITECTURE §3 CursorSample).
- * Outside `root` → all null. label = closest [data-label], else the accessible name of the closest
- * [data-source] element (or of `el` itself).
+ * Outside `root` → all null. Otherwise:
+ * - target = the most specific meaningful element at/above `el` (a card's `<h3>`, a `<th>`, a button),
+ *   walking up from bare wrappers but never past `root` (none found → `el` itself);
+ * - elementPath = the target's CSS path; label = `ownLabel(target)`;
+ * - dataSource = the target's own data-source, else the nearest ancestor's;
+ * - container = data-label of the nearest *ancestor* that has one (the card, table, form), when it
+ *   differs from label; else null.
  */
 export function describeElement(el: ElLike | null, root?: ElLike | null): ElementInfo {
   if (!el) return NO_ELEMENT;
-  const elementPath = cssPath(el, root);
+  if (root && !isInside(el, root)) return NO_ELEMENT;
+  const target = meaningfulTarget(el, root) ?? el;
+  const elementPath = cssPath(target, root);
   if (elementPath === null) return NO_ELEMENT;
-  const src = closestWithAttr(el, "data-source", root);
-  const lab = closestWithAttr(el, "data-label", root);
+  const label = ownLabel(target);
+  const src = closestWithAttr(target, "data-source", root);
+  const above = target === root ? null : target.parentElement;
+  const comp = above ? closestWithAttr(above, "data-label", root) : null;
+  const container = cleanText(comp?.getAttribute("data-label"));
   return {
     elementPath,
     dataSource: src?.getAttribute("data-source") ?? null,
-    label: clean(lab?.getAttribute("data-label")) ?? accessibleName(src ?? el),
+    label,
+    container: container && container !== label ? container : null,
   };
 }

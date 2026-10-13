@@ -48,6 +48,19 @@ describe("session files", () => {
     expect(c.words).toEqual(words);
     expect(c.samples).toEqual(samples);
     expect(l.labels).toEqual(s.labels);
+    expect(c.clicks).toBeUndefined(); // older files: no clicks/selection
+  });
+
+  it("round-trips clicks and selection (optional fields)", () => {
+    const s = session();
+    s.clicks = [{ t: 120, x: 5, y: 6, ...card(2), container: "Feature card grid" }];
+    s.selection = { t: -40, text: "Charts refresh", ...card(1), container: null };
+    const c = parseCursorFile(JSON.stringify(toCursorFile(s)));
+    expect(c.clicks).toEqual(s.clicks);
+    expect(c.selection).toEqual(s.selection);
+    const { sessions } = sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(toCursorFile(s)) }]);
+    expect(sessions[0]!.clicks).toEqual(s.clicks);
+    expect(sessions[0]!.selection).toEqual(s.selection);
   });
 
   it("rejects malformed files", () => {

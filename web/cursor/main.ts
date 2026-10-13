@@ -2,8 +2,11 @@
 import "./cursor.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type RunConfig } from "../../shared/config.ts";
-import { ALGORITHMS, formatPointingContext, resolvePointing, type WindowOpts } from "../../shared/pointing.ts";
-import type { CursorSample, PointingTarget, ServerMsg } from "../../shared/protocol.ts";
+import {
+  ALGORITHMS, dedupeClicks, formatPageContext, formatPointingContext, resolvePointing, tagFromPath, truncateText, wordNear,
+  type WindowOpts,
+} from "../../shared/pointing.ts";
+import type { CursorSample, PageClick, PageSelection, PointingTarget, ServerMsg } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { bindPushToTalk } from "../audio/ptt.ts";
 import { createWavRecorder, type WavRecorder } from "../audio/record.ts";
@@ -11,7 +14,9 @@ import { startReplay, type ReplayHandle } from "../audio/replay.ts";
 import { colorFor } from "./colors.ts";
 import { mountDemo } from "./demoLoader.ts";
 import { describeElement } from "./dom.ts";
-import { renderOverlay } from "./overlay.ts";
+import { cannedSession, hoverElement } from "./devDemo.ts";
+import { findPath, renderHover, renderOverlay } from "./overlay.ts";
+import { createPageContextRecorder } from "./pageContext.ts";
 import { Sampler } from "./sampler.ts";
 import { pct, scoreSessions, targetMatches } from "./scoring.ts";
 import {
@@ -28,6 +33,7 @@ app.classList.add("cursor-lab");
 app.innerHTML = `
 <div class="cl-demo" id="demo-scroller">
   <div id="demo-root"></div>
+  <div id="hover-layer" aria-hidden="true"></div>
   <div id="ov-layer" aria-hidden="true"></div>
 </div>
 <aside class="cl-side">
@@ -36,8 +42,12 @@ app.innerHTML = `
       <button id="ptt" class="ptt">Hold to talk <span class="muted">(or Space)</span></button>
       <span id="turn-status" class="muted"></span>
     </div>
-    <p id="transcript" class="transcript muted">Point at something on the page and say e.g. “move this over there”.</p>
+    <p id="transcript" class="transcript muted">Point at something on the page and say e.g. “move this over there”. Clicks and highlighted text count too.</p>
     <p id="latency" class="muted mono small"></p>
+  </section>
+  <section class="panel">
+    <h3>Under the cursor</h3>
+    <div id="inspector" class="inspector"></div>
   </section>
   <section class="panel">
     <h3>Algorithms</h3>
@@ -48,7 +58,10 @@ app.innerHTML = `
   <section class="panel">
     <h3>Picks <span id="active-id" class="muted"></span></h3>
     <div id="picks"></div>
-    <pre id="server-ctx" class="mono small muted"></pre>
+    <h4>Clicks &amp; selection</h4>
+    <ul id="page-ctx" class="page-ctx"></ul>
+    <h4>LLM context <span class="muted">(dwellMode, as the server formats it)</span></h4>
+    <pre id="server-ctx" class="mono small ctx-block"></pre>
   </section>
   <section class="panel">
     <h3>Sessions</h3>
@@ -73,6 +86,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const scroller = $("demo-scroller");
 const demoRoot = $("demo-root");
 const layer = $("ov-layer");
+const hoverLayer = $("hover-layer");
 const canvas = $<HTMLCanvasElement>("timeline");
 
 // ── state ──────────────────────────────────────────
@@ -99,16 +113,36 @@ interface Turn {
   sentUpTo: number; // cursor samples with t ≤ this were sent
   batchTimer?: ReturnType<typeof setInterval>;
   partial: string;
+  /** What was clicked / highlighted during the turn (absolute client time), set at release. */
+  clicks?: PageClick[];
+  selection?: PageSelection | null;
 }
 let turn: Turn | null = null;
 
 const sock = connectWithStatus();
 const sampler = new Sampler(demoRoot, scroller);
+const pageRecorder = createPageContextRecorder(demoRoot);
 
 // ── demo page ──────────────────────────────────────
-void mountDemo(demoRoot).then((info) => {
+void mountDemo(demoRoot).then(async (info) => {
   if (info.source === "fallback") $("turn-status").textContent = "using built-in fallback demo";
+  sampler.onSample = renderInspector;
   sampler.start();
+  // Overlay boxes are positioned from live layout; redraw when the demo's layout changes.
+  new ResizeObserver(() => renderOverlayNow()).observe(demoRoot);
+  const demo = new URLSearchParams(location.search).get("demo");
+  if (demo !== null) {
+    // Let the demo's layout settle before taking element positions for the canned trail.
+    await document.fonts.ready;
+    await new Promise((r) => setTimeout(r, 300));
+    const s = cannedSession(demoRoot, scroller);
+    if (s) {
+      upsertSession(s);
+      state.active = s;
+      // ?demo=title hovers a card title; anything else a table heading.
+      hoverElement(demoRoot.querySelector(demo === "title" ? ".card:nth-of-type(3) h3" : ".pricing-table th:nth-of-type(3)"));
+    }
+  }
   renderAll();
 });
 
@@ -160,6 +194,7 @@ async function press(): Promise<void> {
   if (!sock.isOpen) return setStatus("server not connected");
   const t = newTurn();
   turn = t;
+  pageRecorder.start(t.tPress);
   setStatus("listening…");
   $("ptt").classList.add("live");
   $("transcript").textContent = "…";
@@ -178,12 +213,14 @@ async function release(): Promise<void> {
   const t = turn;
   if (!t || t.tRelease !== undefined || t.replay) return;
   t.tRelease = performance.now();
+  ({ clicks: t.clicks, selection: t.selection } = pageRecorder.stop());
   $("ptt").classList.remove("live");
   await t.audioStarted;
   t.capture?.stop();
   if (turn !== t) return;
   flushSamples(t);
   clearInterval(t.batchTimer);
+  sock.send({ type: "turn.context", turnId: t.turnId, clicks: t.clicks, selection: t.selection });
   sock.send({ type: "turn.release", turnId: t.turnId, tRelease: t.tRelease });
   setStatus("transcribing…");
 }
@@ -192,6 +229,7 @@ function failTurn(t: Turn, msg: string): void {
   clearInterval(t.batchTimer);
   t.capture?.stop();
   t.replay?.stop();
+  if (!t.replay) pageRecorder.stop();
   sampler.paused = false;
   sock.send({ type: "turn.cancel", turnId: t.turnId });
   if (turn === t) turn = null;
@@ -218,6 +256,9 @@ async function replaySession(s: LabSession): Promise<void> {
   t.audioStarted = t.replay.tAudioStart.then((ta) => {
     t.tAudioStart = ta;
     sock.send({ type: "turn.audioStart", turnId: t.turnId, tAudioStart: ta });
+    // The saved clicks / selection, re-timed like the cursor trail (relative → this replay's clock).
+    t.clicks = (s.clicks ?? []).map((c) => ({ ...c, t: c.t + ta }));
+    t.selection = s.selection ? { ...s.selection, t: s.selection.t + ta } : null;
   });
   try {
     await t.audioStarted;
@@ -230,6 +271,7 @@ async function replaySession(s: LabSession): Promise<void> {
   flushSamples(t);
   clearInterval(t.batchTimer);
   sampler.paused = false;
+  sock.send({ type: "turn.context", turnId: t.turnId, clicks: t.clicks ?? [], selection: t.selection ?? null });
   sock.send({ type: "turn.release", turnId: t.turnId, tRelease: t.tRelease });
   setStatus("transcribing…");
 }
@@ -259,6 +301,8 @@ sock.on((msg: ServerMsg) => {
         samples: toRelativeSamples(turnSamples(t, tEnd), t.tAudioStart),
         labels: labelsFor(msg.words, t.replayOf?.labels ?? []),
         viewport: { width: scroller.clientWidth, height: scroller.clientHeight },
+        clicks: (t.clicks ?? []).map((c) => ({ ...c, t: c.t - t.tAudioStart! })),
+        selection: t.selection ? { ...t.selection, t: t.selection.t - t.tAudioStart } : null,
       };
       try {
         if (t.recorder && !t.replayOf) sess.wav = t.recorder.toWav();
@@ -416,7 +460,56 @@ const short = (s: CursorSample | null) => (s ? s.label ?? s.dataSource ?? s.elem
 let targets: PointingTarget[] = [];
 
 function renderOverlayNow(): void {
-  renderOverlay(layer, scroller, targets, state.active?.labels ?? [], state.visible);
+  const a = state.active;
+  renderOverlay(layer, scroller, targets, a?.labels ?? [], state.visible,
+    a ? { clicks: a.clicks ?? [], selection: a.selection ?? null, samples: a.samples } : null);
+}
+
+/** `<h3> "Live queries"` with the container muted, for the side panels. */
+function refHtml(r: { elementPath: string | null; label: string | null; container?: string | null }, showLabel = true): string {
+  const tag = tagFromPath(r.elementPath);
+  const label = !showLabel ? "" : r.label ? `“${esc(r.label)}”` : `<span class="muted">(no label)</span>`;
+  return `${tag ? `<span class="mono">&lt;${tag}&gt;</span> ` : ""}${label}`
+    + (r.container && r.container !== r.label ? ` <span class="muted">in “${esc(r.container)}”</span>` : "");
+}
+
+// ── live "Under the cursor" inspector + hover outline ──
+let hoverKey = "";
+function renderInspector(s: CursorSample): void {
+  const el = s.elementPath ? findPath(s.elementPath) : null;
+  const comp = el && s.container ? el.parentElement?.closest("[data-label]") ?? null : null;
+  renderHover(hoverLayer, scroller, el, comp && demoRoot.contains(comp) ? comp : null);
+  const key = `${s.elementPath}|${s.label}|${s.container}|${s.dataSource}`;
+  if (key === hoverKey) return;
+  hoverKey = key;
+  $("inspector").innerHTML = s.elementPath
+    ? `<div class="el">${refHtml(s).replace('class="mono"', 'class="tag"')}</div>
+      <div class="kv">
+        <span>in</span><span>${s.container ? `“${esc(s.container)}”` : "—"}</span>
+        <span>source</span><span>${s.dataSource ? esc(s.dataSource) : "—"}</span>
+        <span>path</span><span class="muted">${esc(s.elementPath)}</span>
+      </div>`
+    : `<p class="muted small">Move the pointer over the demo page: titles, table headings, buttons and fields are picked out on their own, with their card/table/form as the container.</p>`;
+}
+renderInspector({ t: 0, x: 0, y: 0, scrollX: 0, scrollY: 0, elementPath: null, dataSource: null, label: null });
+
+function renderPageContext(a: LabSession | null): void {
+  const clicks = a ? dedupeClicks(a.clicks ?? [], Infinity) : [];
+  const sel = a?.selection ?? null;
+  const items = clicks.map((c, i) => {
+    const w = wordNear(c.t, a!.words, 0);
+    return `<li><span class="n">${i + 1}</span><span>${refHtml(c)}</span>
+      <span class="when muted">${w ? `while “${esc(w.text)}” · ` : ""}${(c.t / 1000).toFixed(2)}s</span></li>`;
+  });
+  // The selection's element: tag + container (its label usually just repeats the selected text).
+  if (sel) items.push(`<li><span class="n sel">sel</span><span>“${esc(truncateText(sel.text, 120))}” <span class="muted">in</span> ${refHtml(sel, false)}</span></li>`);
+  $("page-ctx").innerHTML = items.length ? items.join("") : `<li class="muted">${a ? "No clicks or highlighted text in this turn." : "—"}</li>`;
+
+  const ctx = a ? [formatPointingContext(targets), formatPageContext(a.clicks ?? [], sel, a.words, 0)].filter(Boolean).join("\n") : "";
+  let text = ctx || (a ? "(nothing: no pointing words, clicks or selection)" : "Record a turn to see the context the LLM gets.");
+  const server = a?.serverTargets?.length ? formatPointingContext(a.serverTargets) : "";
+  if (server && !ctx.startsWith(server)) text += `\n\nserver sent (preMs/postMs at record time):\n${server}`;
+  $("server-ctx").textContent = text;
 }
 
 function renderAll(): void {
@@ -447,7 +540,7 @@ function renderAll(): void {
     }).join("");
     $("picks").innerHTML = `<table class="grid"><tr><th></th>${ALGORITHMS.map((al) => `<th>${al}</th>`).join("")}<th>label</th></tr>${rows}</table>`;
   }
-  $("server-ctx").textContent = a?.serverTargets?.length ? `server (dwellMode):\n${formatPointingContext(a.serverTargets)}` : "";
+  renderPageContext(a);
 
   $("sessions").innerHTML = state.sessions.length
     ? `<table class="grid">${state.sessions.map((s) => {
@@ -471,5 +564,5 @@ function renderAll(): void {
     : `<p class="muted small">Label pointing words (Picks → Label, then click the element) to score.</p>`;
 
   renderOverlayNow();
-  drawTimeline(canvas, a ? buildTimelineModel(a.samples, a.words, targets, state.opts) : null, state.visible);
+  drawTimeline(canvas, a ? buildTimelineModel(a.samples, a.words, targets, state.opts, 0, { clicks: a.clicks, selection: a.selection }) : null, state.visible);
 }

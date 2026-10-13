@@ -77,6 +77,7 @@ type ClientMsg =
   | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string }
   | { type: "cursor.samples"; turnId: string; samples: CursorSample[] } // batched every ~100ms
   | { type: "turn.audioStart"; turnId: string; tAudioStart: number } // client time of first captured sample (§6)
+  | { type: "turn.context"; turnId: string; clicks: PageClick[]; selection: PageSelection | null } // right before turn.release
   | { type: "turn.release"; turnId: string; tRelease: number }
   | { type: "audio.played"; turnId: string; segment: "ack" | "answer"; tPlayed: number }
   | { type: "turn.cancel"; turnId: string }
@@ -100,12 +101,20 @@ type ServerMsg =
 interface Word { text: string; start: number; end: number }           // seconds from turn audio start
 interface CursorSample {
   t: number; x: number; y: number; scrollX: number; scrollY: number;
-  elementPath: string | null;   // stable CSS path of document.elementFromPoint at sample time
-  dataSource: string | null;    // closest [data-source] attribute, "file:line"
-  label: string | null;         // closest [data-label] or accessible name
+  elementPath: string | null;   // stable CSS path of the most specific meaningful element under the pointer (see below)
+  dataSource: string | null;    // that element's own [data-source], else the nearest ancestor's, "file:line"
+  label: string | null;         // that element's own short text / name (a card title, a th), else its data-label
+  container?: string | null;    // data-label of the enclosing labeled component (card, table, form) when different
 }
+interface ElementRef { elementPath: string | null; dataSource: string | null; label: string | null; container?: string | null }
+interface PageClick extends ElementRef { t: number; x: number; y: number }      // client clock, viewport px
+interface PageSelection extends ElementRef { t: number; text: string }          // latest non-empty selection in the turn
 interface PointingTarget { word: string; wordStart: number; algorithm: string; sample: CursorSample | null }
 ```
+
+**Element description** (`web/cursor/dom.ts` `describeElement(hit, root)`, used for cursor samples, clicks and selections). The target is the most specific *meaningful* element at or above the hit element: h1–h6, th/td/caption, button, a, label/legend, input/select/textarea/option, img, li/dt/dd, p, blockquote, summary, figcaption, any element with its own `data-label`/`data-source`, or a div/span with text of its own. Bare wrappers walk up to the nearest such element, never past `root` (none → the hit element, unlabeled). So hovering a card's `<h3>` reports the `<h3>` ("Live queries", container "Card: Live queries"), not the card; a table heading reports the `<th>` (container "Pricing table"); a gap inside a card reports the card itself. `label` = aria-label, else the element's own whitespace-collapsed text (≤ 60 chars, "…"), else its data-label; controls/images use aria-label → alt → data-label → title → placeholder; components (article, section, tr…) reached by walking up use their data-label, never their whole text.
+
+**Page context** (`web/cursor/pageContext.ts` `createPageContextRecorder(root)`): `start(tPress)` on press, `stop()` on release. A click is a pointerdown→pointerup inside `root` that moved ≤ 6 px (a drag is a text selection, not a click), plus keyboard activations; the same element within 800 ms counts once. The selection is the latest non-empty one whose anchor and focus are inside `root` (`selectionchange`), and a selection still active at `stop()` counts even if it was made before the press. The client sends `turn.context` right before `turn.release`.
 
 The canonical types live in `shared/protocol.ts`. **Server-side bookkeeping:** the server converts every server mark to client time using the `clock.sync` offset and stores it in `RunRecord.marks`. After the orchestrator finishes, it waits (up to 3 s) for an `audio.played` for every segment it sent, then sends `turn.done` and appends the run to `results/`.
 
@@ -264,10 +273,18 @@ Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders
 - `dwellMode`: candidates are window samples with speed ≤ `minSpeed + DWELL_TIE_EPS` (**0.05 px/ms = 50 px/s**, i.e. "also basically still"). Prefer candidates on the `mode` element, then closest to the word start.
 - `resolvePointing` returns one `PointingTarget` per (pointing word × algorithm), in word order then `atStart, dwell, mode, dwellMode`. `word` is the normalized word, `wordStart` is `word.start` (**seconds** from turn audio start).
 
-**Server-side resolution:** in approaches B and C (and `cursor-only`), the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn and `config.preMs/postMs`. `formatPointingContext(targets, "dwellMode")` formats it for the LLM context, one line per pointing word (tag = last `elementPath` segment; missing parts are omitted; no pick → `(nothing)`):
-`Pointing: "this" → <button> "Get started" [data-source=web/cursor/demo/demo.html:27]`.
+**Server-side resolution:** in approaches B and C (and `cursor-only`), the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn and `config.preMs/postMs`. `formatPointingContext(targets, "dwellMode")` formats it for the LLM context, one line per pointing word (tag = last `elementPath` segment; `in "…"` = the container, omitted when null or equal to the label; missing parts are omitted; no pick → `(nothing)`):
+`Pointing: "this" → <button> "Get started" in "Hero section" [data-source=web/cursor/demo/demo.html:27]`
+`Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]`.
+
+`formatPageContext(clicks, selection, words, tAudioStart)` adds the turn's clicks and highlighted text: one `Clicked:` line per click (sorted, consecutive clicks on the same element deduped, the latest 5), naming the word whose span `[tAudioStart + start·1000, tAudioStart + end·1000]` is nearest the click (omitted without words/tAudioStart or when no word is within 1 s), then one `Selected text:` line (text collapsed and cut to 200 chars; the element's label is left out when it only repeats the text):
+`Clicked: <th> "Price / month" in "Pricing table" [data-source=web/cursor/demo/demo.html:67] (while saying "that")`
+`Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=web/cursor/demo/demo.html:37]`.
+
+**Demo page markup.** Components (cards, the pricing table, the form, sections) carry `data-label`, and so do the specific elements inside them that have their own `data-source` (card titles and texts, table headings, form labels/inputs, nav links, the CTA). Every `data-source` points at its own line (`server/fixtures-context/fixtures.test.ts`). Table body cells have no data-source of their own: a `<td>` reports its row's line, with the row ("Row: Team") as container.
 
 **Cursor lab specifics.** The demo page (`web/cursor/demo/demo.html`) is injected into the lab's own document (no iframe) inside a scroll container `#demo-scroller > #demo-root`; its CSS is wrapped in `@scope (#demo-root)`. In the cursor lab, `CursorSample.scrollX/scrollY` are that container's `scrollLeft/scrollTop` (not `window.scrollX/Y`), and `elementPath`/`dataSource`/`label` are null when the pointer is outside the demo. `elementPath` is a `querySelector`-valid path: `tag#id` for the nearest CSS-safe id, else `tag:nth-of-type(n)` segments (e.g. `div#demo-root > main > article:nth-of-type(2) > h3`).
+The lab shows the detection live: an **Under the cursor** panel (tag, label, container, data-source, path of the latest sample) with a thin outline around the specific element and a faint dashed one around its container; per turn, the clicks (numbered dots + outlined elements on the page, ticks on the timeline) and the selection, listed under Picks with the word being said; and the **LLM context** block = `formatPointingContext(targets)` + `formatPageContext(...)`, recomputed as preMs/postMs move. `/cursor.html?demo=1` (or `?demo=title`) loads a canned session ("Make this title match that column") without mic or server. Note: lab scoring matches by data-source, and specific elements now have their own, so a label on a card title no longer matches a pick on the card's text.
 
 ### 6.1 Fixture files (`fixtures/utterances/`)
 
@@ -279,8 +296,11 @@ The cursor lab saves (and loads, by file name) three files per session; `Uxx` is
   { version: 1; kind: "cursor"; id: "U04"; createdAt: string /* ISO */; transcript: string;
     words: Word[];               // as received in stt.final (seconds from tAudioStart)
     samples: CursorSample[];     // t = ms RELATIVE to tAudioStart (negative = before audio start); 500 ms pre-roll before press, 300 ms after release
-    viewport?: { width: number; height: number } }  // demo scroller size at record time
+    viewport?: { width: number; height: number };  // demo scroller size at record time
+    clicks?: PageClick[];                // optional (older files lack it): clicks during the turn, t relative to tAudioStart
+    selection?: PageSelection | null }   // optional: highlighted text, t relative to tAudioStart
   ```
+  Replaying a session re-times `clicks`/`selection` onto the replay's `tAudioStart` and sends them as `turn.context`.
   `samples` is exactly what `startReplay({cursor})` takes. Resolvers run on it with `tAudioStart = 0`.
 - `Uxx.labels.json`:
   ```ts
