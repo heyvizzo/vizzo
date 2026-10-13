@@ -10,6 +10,21 @@ A local web app that measures three voice architectures for a "talk to your app 
 | [TASKS.md](TASKS.md) | Work packages T0–T11, dependency graph, acceptance criteria |
 | REPORT.md | *(written by T11)* benchmark results and recommendation |
 
+## Running it
+
+```sh
+npm install
+cp .env.example .env        # add ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+npm run dev                 # server :8787 + Vite :5173 → http://localhost:5173
+npm run dev:fake            # same, but every vendor is faked (tones + canned text): try the UI with no keys
+```
+
+Pages: `/` latency lab, `/cursor.html` cursor lab, `/audio-test.html` mic → server echo → playback.
+
+Checks: `npm run typecheck`, `npm test`, `npm run smoke:{scribe,realtime,tts,claude,e2e}` (each SKIPs without its keys), `npm run smoke:e2e -- --fake` (whole server path, fake vendors).
+
+Fixtures: record U1–U5 in the cursor lab (Save files), drop them in `fixtures/utterances/`, and they show up in the latency lab's fixture picker.
+
 ## Running a multi-agent build
 
 1. **Keys:** `cp .env.example .env` (after T0) and fill in `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`. Without keys, everything still builds and the smoke tests SKIP.

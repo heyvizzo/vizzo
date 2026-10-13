@@ -80,8 +80,29 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
 }
 
 // `npm run dev:server` / `tsx server/index.ts`: listen on PORT (default 8787).
+// FAKE_VENDORS=1: every vendor is faked (tones, canned text) so the UI can be tried without keys. Runs aren't saved.
+async function fakeVendorOpts(): Promise<StartServerOpts> {
+  const { createFakeDeps, REALISTIC_TIMING } = await import("./orchestrators/fakes.ts");
+  const { createRealtimeOrchestrator } = await import("./orchestrators/realtime.ts");
+  const { createPipelineOrchestrator } = await import("./orchestrators/pipeline.ts");
+  const { createHybridOrchestrator } = await import("./orchestrators/hybrid.ts");
+  const { createCursorOnlyOrchestrator } = await import("./orchestrators/cursorOnly.ts");
+  const deps = () => createFakeDeps(REALISTIC_TIMING);
+  console.log("[server] FAKE_VENDORS=1: using fake adapters, runs are not persisted");
+  return {
+    persist: false,
+    orchestrators: {
+      realtime: createRealtimeOrchestrator(deps()),
+      pipeline: createPipelineOrchestrator(deps()),
+      hybrid: createHybridOrchestrator(deps()),
+      "cursor-only": createCursorOnlyOrchestrator(deps().openScribe),
+    },
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  startServer(Number(process.env.PORT ?? 8787)).catch((e) => {
+  const opts = process.env.FAKE_VENDORS === "1" ? await fakeVendorOpts() : {};
+  startServer(Number(process.env.PORT ?? 8787), opts).catch((e) => {
     console.error("[server] failed to start", e);
     process.exit(1);
   });
