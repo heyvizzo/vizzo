@@ -235,7 +235,7 @@ function renderChips(v: TurnView, targets: PointingTarget[], approach: ChatAppro
   v.chips.replaceChildren();
   for (const t of targets.filter((x) => x.algorithm === SHOWN_ALGORITHM)) {
     const c = el("span", "chip");
-    c.append(el("b", undefined, `“${t.word}”`), ` → ${shortTarget(t)}`);
+    c.append(el("b", undefined, `${t.ref !== undefined ? `[${t.ref}] ` : ""}“${t.word}”`), ` → ${shortTarget(t)}`);
     if (approach === "realtime") c.title = "Approach A doesn't use pointing; shown for reference";
     v.chips.append(c);
   }

@@ -111,7 +111,16 @@ export interface PageEvents {
   highlights: PageHighlight[];
 }
 
-export interface PointingTarget { word: string; wordStart: number; algorithm: string; sample: CursorSample | null }
+export interface PointingTarget {
+  word: string;
+  wordStart: number;
+  algorithm: string;
+  sample: CursorSample | null;
+  /** Reference number of this pointing word in the turn (1, 2, … in speech order; the same for every algorithm). */
+  ref?: number;
+  /** Index of the word in the turn's words[]. */
+  wordIndex?: number;
+}
 
 // ── client → server ──────────────────────────────
 export type ClientMsg =

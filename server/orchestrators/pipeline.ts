@@ -16,6 +16,7 @@ import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
+import { annotateTranscript } from "../../shared/pointing.ts";
 import { startJob } from "./jobs.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
@@ -158,7 +159,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background });
       };
       const route = await tag("haiku", deps.routeWithHaiku({
-        mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history, pageContext,
+        mark: base.mark, transcript: annotateTranscript(fin.words, pointing) ?? fin.text, pointing, mode: cfg.routerMode, history, pageContext,
         longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined,
         onDecision: (d) => decide(d.intent, d.estimateS),
         onPrompt: emitPrompt,

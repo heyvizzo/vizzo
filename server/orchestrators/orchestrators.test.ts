@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 // shared/pointing.ts is a stub until T9 lands; give it deterministic behaviour so injection is observable.
-vi.mock("../../shared/pointing.ts", () => ({
+vi.mock("../../shared/pointing.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../shared/pointing.ts")>()),
   resolvePointing: (words: { text: string; start: number }[]) =>
     words.filter((w) => /^this\b/i.test(w.text)).map((w) => ({
       word: w.text, wordStart: w.start, algorithm: "dwellMode",

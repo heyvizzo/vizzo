@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import type { BetaMessage, BetaMessageStreamParams } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { MODELS, type RouterMode } from "../../shared/config.ts";
+import { formatPointingLine } from "../../shared/pointing.ts";
 import type { Intent, LlmPrompt, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
 import { kindFor, parseEstimate, RouteInputStream, SpokenLineParser, type RouteFields } from "./claudeParse.ts";
 import type { GenerateFillers, RouteDecision, RouteWithHaiku, SolveWithOpus } from "./types.ts";
@@ -156,9 +157,10 @@ function tagFromPath(path: string | null): string {
  * `Pointing: "this" → <div> "Feature card grid" [data-source=web/cursor/demo/demo.html:34]`
  */
 export function formatPointingForPrompt(targets: PointingTarget[]): string {
+  // One line per pointing word (keyed by its reference number), using the best algorithm that resolved it.
   const byWord = new Map<string, PointingTarget[]>();
   for (const t of targets) {
-    const key = `${t.wordStart}|${t.word}`;
+    const key = t.ref !== undefined ? `#${t.ref}` : `${t.wordStart}|${t.word}`;
     byWord.set(key, [...(byWord.get(key) ?? []), t]);
   }
   const lines: string[] = [];
@@ -168,13 +170,7 @@ export function formatPointingForPrompt(targets: PointingTarget[]): string {
       return (t.sample ? 0 : 100) + (i < 0 ? ALGO_PREFERENCE.length : i);
     };
     const best = [...group].sort((a, b) => rank(a) - rank(b))[0]!;
-    const word = best.word.replace(/[^\p{L}\p{N}'-]/gu, "");
-    const s = best.sample;
-    if (!s) { lines.push(`Pointing: "${word}" → (no element resolved)`); continue; }
-    const label = s.label ? ` "${s.label}"` : "";
-    const container = s.container && s.container !== s.label ? ` in "${s.container}"` : "";
-    const src = s.dataSource ? ` [data-source=${s.dataSource}]` : "";
-    lines.push(`Pointing: "${word}" → <${tagFromPath(s.elementPath)}>${label}${container}${src}`);
+    lines.push(formatPointingLine({ ...best, word: best.word.replace(/[^\p{L}\p{N}'-]/gu, "") }));
   }
   return lines.length ? lines.join("\n") : "Pointing: none (the user was not pointing at anything we could resolve)";
 }

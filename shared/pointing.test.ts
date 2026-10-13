@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClickKind, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, Word } from "./protocol.ts";
 import {
-  ALGORITHMS, DWELL_TIE_EPS, atStart, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
+  ALGORITHMS, DWELL_TIE_EPS, annotateTranscript, atStart, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
   mode, normalizeWord, resolvePointing, sampleSpeeds, tagFromPath, truncateText, wordNear, wordWindow,
 } from "./pointing.ts";
 
@@ -301,5 +301,38 @@ describe("formatPageContext", () => {
     expect(wordNear(T0 + 650, words, T0)!.text).toBe("this");
     expect(wordNear(T0 - 300, words, T0)!.text).toBe("how");
     expect(wordNear(T0 + 3000, words, T0)).toBeNull();
+  });
+});
+
+describe("pointing reference numbers", () => {
+  const T = 10_000;
+  // "move this here and this there" — two "this", each its own reference
+  const words: Word[] = [w("move", 0, 0.3), w("this", 0.3, 0.5), w("here", 0.5, 0.8), w("and", 0.9, 1.0), w("this,", 1.0, 1.2), w("there.", 1.3, 1.6)];
+  const s = (t: number, label: string): CursorSample => ({ t, x: 0, y: 0, scrollX: 0, scrollY: 0, elementPath: `main > h3.${label}`, dataSource: `demo.html:${label.length}`, label });
+  const samples = [s(T + 350, "Alpha"), s(T + 600, "Beta"), s(T + 1050, "Gamma"), s(T + 1400, "Delta")];
+
+  it("numbers every pointing word in speech order, the same ref for each algorithm", () => {
+    const targets = resolvePointing(words, T, samples);
+    const refs = [...new Set(targets.map((t) => `${t.ref}:${t.word}:${t.wordIndex}`))];
+    expect(refs).toEqual(["1:this:1", "2:here:2", "3:this:4", "4:there:5"]);
+  });
+
+  it("annotates the transcript, keeping punctuation after the marker", () => {
+    const targets = resolvePointing(words, T, samples);
+    expect(annotateTranscript(words, targets)).toBe("move this [1] here [2] and this [3], there [4].");
+    expect(annotateTranscript([w("hello", 0, 0.2)], [])).toBeNull();
+  });
+
+  it("numbered lines keep repeated words distinct", () => {
+    const lines = formatPointingContext(resolvePointing(words, T, samples)).split("\n");
+    expect(lines[0]).toMatch(/^Pointing \[1\] "this" at 0\.3 s → <h3> "/);
+    expect(lines[2]).toMatch(/^Pointing \[3\] "this" at 1\.0 s → <h3> "Gamma"/);
+    expect(lines).toHaveLength(4);
+  });
+
+  it("click lines name the pointing word's reference", () => {
+    const targets = resolvePointing(words, T, samples);
+    const click: PageClick = { kind: "single", count: 1, t: T + 1100, tEnd: T + 1150, times: [T + 1100], x: 0, y: 0, elementPath: "main > h3.Gamma", dataSource: null, label: "Gamma" };
+    expect(formatPageContext({ clicks: [click], preselected: null, highlights: [] }, words, T, targets)).toContain('(while saying "this," [3])');
   });
 });

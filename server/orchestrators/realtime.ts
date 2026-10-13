@@ -10,7 +10,7 @@
 // Segment labels: the first response of the turn is "ack" on the wire (the adapter's currentSegment),
 // the post-tool response is "answer". If the turn ends without an ask_opus call, the first response
 // WAS the answer, so the TurnResult sets `ackIsAnswer` and the Session renames the marks (PRD §7: TTA = TTFA).
-import { formatPointingContext } from "../../shared/pointing.ts";
+import { annotateTranscript, formatPointingContext } from "../../shared/pointing.ts";
 import type { Segment } from "../../shared/protocol.ts";
 import type { RealtimeSession, ToolCall } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
@@ -218,7 +218,11 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (base.isFinished) return;
       let context: string | undefined;
       if (hybrid) {
-        if (finalArrived) context = formatPointingContext(base.pointing) || undefined;
+        if (finalArrived) {
+          const lines = formatPointingContext(base.pointing);
+          const marked = annotateTranscript(base.words, base.pointing);
+          context = [marked ? `Transcript with pointing references: "${marked}"` : "", lines].filter(Boolean).join("\n") || undefined;
+        }
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], pointingInjected: !!context, pointingMissed: !finalArrived };
       }
       // Clicks / highlighted text (no word timestamps needed, so A gets them too).

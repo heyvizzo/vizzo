@@ -617,14 +617,14 @@ function renderAll(): void {
   if (!a) $("picks").innerHTML = `<p class="muted small">No session yet.</p>`;
   else if (!a.labels.length) $("picks").innerHTML = `<p class="muted small">No pointing words in “${esc(a.transcript)}”.</p>`;
   else {
-    const rows = a.labels.map((l) => {
+    const rows = a.labels.map((l, n) => {
       const cells = ALGORITHMS.map((al) => {
         const t = targets.find((x) => x.algorithm === al && x.wordStart === a.words[l.wordIndex]!.start && x.word === l.word);
         const ok = l.target && t ? targetMatches(t.sample, l.target) : null;
         return `<td style="border-left:3px solid ${colorFor(al)}" class="${ok === null ? "" : ok ? "ok" : "bad"}">${esc(short(t?.sample ?? null))}</td>`;
       }).join("");
       const armed = state.labeling === l.wordIndex;
-      return `<tr><th>“${esc(l.word)}” <span class="muted">${l.start.toFixed(2)}s</span></th>${cells}
+      return `<tr><th><span class="muted">[${n + 1}]</span> “${esc(l.word)}” <span class="muted">${l.start.toFixed(2)}s</span></th>${cells}
         <td><button data-label-word="${l.wordIndex}" class="${armed ? "armed" : ""}">${armed ? "click target…" : l.target ? esc(l.target.label ?? "labeled") : "Label"}</button></td></tr>`;
     }).join("");
     $("picks").innerHTML = `<table class="grid"><tr><th></th>${ALGORITHMS.map((al) => `<th>${al}</th>`).join("")}<th>label</th></tr>${rows}</table>`;

@@ -273,6 +273,8 @@ Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders
 - `dwellMode`: candidates are window samples with speed ≤ `minSpeed + DWELL_TIE_EPS` (**0.05 px/ms = 50 px/s**, i.e. "also basically still"). Prefer candidates on the `mode` element, then closest to the word start.
 - `resolvePointing` returns one `PointingTarget` per (pointing word × algorithm), in word order then `atStart, dwell, mode, dwellMode`. `word` is the normalized word, `wordStart` is `word.start` (**seconds** from turn audio start).
 
+**Reference numbers.** `resolvePointing` gives each pointing word a `ref` (1, 2, … in speech order, shared by all algorithms) and its `wordIndex`. Every LLM sees `Transcript: "move this [1] over there [2]"` (`annotateTranscript`) and numbered lines `Pointing [1] "this" at 0.3 s → …` (`formatPointingLine`); click/highlight lines name the word as `"this" [1]`.
+
 **Server-side resolution:** in approaches B and C (and `cursor-only`), the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn and `config.preMs/postMs`. `formatPointingContext(targets, "dwellMode")` formats it for the LLM context, one line per pointing word (tag = last `elementPath` segment; `in "…"` = the container, omitted when null or equal to the label; missing parts are omitted; no pick → `(nothing)`):
 `Pointing: "this" → <button> "Get started" in "Hero section" [data-source=web/cursor/demo/demo.html:27]`
 `Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]`.

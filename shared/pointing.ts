@@ -136,13 +136,15 @@ export const ALGORITHMS = Object.keys(RESOLVERS);
 export function resolvePointing(words: Word[], tAudioStart: number, samples: CursorSample[], opts: WindowOpts = DEFAULT_WINDOW): PointingTarget[] {
   const sorted = sortByT(samples);
   const out: PointingTarget[] = [];
-  for (const word of words) {
+  let ref = 0;
+  words.forEach((word, wordIndex) => {
     const norm = normalizeWord(word.text);
-    if (!POINTING_WORDS.test(norm)) continue;
+    if (!POINTING_WORDS.test(norm)) return;
+    ref++;
     for (const [algorithm, r] of Object.entries(RESOLVERS)) {
-      out.push({ word: norm, wordStart: word.start, algorithm, sample: r(word, tAudioStart, sorted, opts) });
+      out.push({ word: norm, wordStart: word.start, algorithm, sample: r(word, tAudioStart, sorted, opts), ref, wordIndex });
     }
-  }
+  });
   return out;
 }
 
@@ -170,13 +172,35 @@ export function describeRef(r: ElementRef, opts: { label?: boolean } = {}): stri
   return parts.join(" ");
 }
 
-/** One line per pointing word for the chosen algorithm, e.g.
- * `Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]` */
+/**
+ * One pointing word, numbered so repeated words stay distinct:
+ * `Pointing [2] "this" at 2.1 s → <h3> "Live queries" in "Card: Live queries" [data-source=…:36]`
+ * (targets without a ref, e.g. from old fixtures, print as `Pointing: "this" → …`).
+ */
+export function formatPointingLine(t: PointingTarget): string {
+  const head = t.ref !== undefined ? `Pointing [${t.ref}] "${t.word}" at ${t.wordStart.toFixed(1)} s` : `Pointing: "${t.word}"`;
+  return `${head} → ${isEmptyRef(t.sample) ? "(nothing)" : describeRef(t.sample!)}`;
+}
+
+/** One line per pointing word for the chosen algorithm (see formatPointingLine). */
 export function formatPointingContext(targets: PointingTarget[], algorithm = "dwellMode"): string {
-  return targets
-    .filter((t) => t.algorithm === algorithm)
-    .map((t) => `Pointing: "${t.word}" → ${isEmptyRef(t.sample) ? "(nothing)" : describeRef(t.sample!)}`)
-    .join("\n");
+  return targets.filter((t) => t.algorithm === algorithm).map(formatPointingLine).join("\n");
+}
+
+/**
+ * The transcript rebuilt from its words with each pointing word's reference number after it (before
+ * trailing punctuation): `move this [1] over there [2], and this [3] too.` Null when there are no refs.
+ */
+export function annotateTranscript(words: readonly Word[], targets: readonly PointingTarget[]): string | null {
+  const refAt = new Map<number, number>();
+  for (const t of targets) if (t.ref !== undefined && t.wordIndex !== undefined) refAt.set(t.wordIndex, t.ref);
+  if (!refAt.size) return null;
+  return words.map((w, i) => {
+    const r = refAt.get(i);
+    if (r === undefined) return w.text;
+    const m = /^(.*?)([^\p{L}\p{N}]*)$/u.exec(w.text)!;
+    return `${m[1]} [${r}]${m[2]}`;
+  }).join(" ").replace(/\s+/g, " ").trim();
 }
 
 /** At most this many click lines (the latest events). */
@@ -251,9 +275,16 @@ function describeText(text: string, ref: ElementRef): string {
   return `${JSON.stringify(text)}${where ? ` in ${where}` : ""}`;
 }
 
-const saying = (t: number, words: Word[], tAudioStart: number | undefined): string => {
+/** `"this" [3]` when the word is a numbered pointing word, else `"word"`. */
+const quoteWord = (w: Word, words: readonly Word[], targets?: readonly PointingTarget[]): string => {
+  const i = words.indexOf(w);
+  const ref = targets?.find((t) => t.wordIndex === i && t.ref !== undefined)?.ref;
+  return `${JSON.stringify(w.text.trim())}${ref !== undefined ? ` [${ref}]` : ""}`;
+};
+
+const saying = (t: number, words: Word[], tAudioStart: number | undefined, targets?: readonly PointingTarget[]): string => {
   const w = wordNear(t, words, tAudioStart);
-  return w ? ` (while saying ${JSON.stringify(w.text.trim())})` : "";
+  return w ? ` (while saying ${quoteWord(w, words, targets)})` : "";
 };
 
 /**
@@ -266,10 +297,12 @@ const saying = (t: number, words: Word[], tAudioStart: number | undefined): stri
  * Clicks: sorted by time, the latest MAX_CLICK_LINES; the word nearest the first click (CLICK_WORD_MAX_MS).
  * Highlights: in order, the latest MAX_HIGHLIGHT_LINES, numbered; the word nearest the highlight's end.
  */
-export function formatPageContext(ev: PageEvents | null | undefined, words: Word[], tAudioStart: number | undefined): string {
+export function formatPageContext(
+  ev: PageEvents | null | undefined, words: Word[], tAudioStart: number | undefined, targets?: readonly PointingTarget[],
+): string {
   if (!ev) return "";
   const lines = sortClicks(ev.clicks ?? []).map((c) =>
-    `${clickVerb(c)}: ${describeRef(c)}${when(c.t, c.kind === "single" ? c.t : c.tEnd, tAudioStart)}${saying(c.t, words, tAudioStart)}`);
+    `${clickVerb(c)}: ${describeRef(c)}${when(c.t, c.kind === "single" ? c.t : c.tEnd, tAudioStart)}${saying(c.t, words, tAudioStart, targets)}`);
   const pre = ev.preselected ? truncateText(ev.preselected.text) : "";
   if (ev.preselected && pre) lines.push(`Already highlighted when recording started: ${describeText(pre, ev.preselected)}`);
   const hs = (ev.highlights ?? []).filter((h) => truncateText(h.text)).slice(-MAX_HIGHLIGHT_LINES);
@@ -277,7 +310,7 @@ export function formatPageContext(ev: PageEvents | null | undefined, words: Word
     const span = relTime(h.tStart, tAudioStart);
     const made = span ? `made${when(h.tStart, h.t, tAudioStart)}` : "";
     const w = wordNear(h.t, words, tAudioStart);
-    const meta = [h.via ? `by ${h.via}` : "", made, w ? `while saying ${JSON.stringify(w.text.trim())}` : ""].filter(Boolean).join(", ");
+    const meta = [h.via ? `by ${h.via}` : "", made, w ? `while saying ${quoteWord(w, words, targets)}` : ""].filter(Boolean).join(", ");
     lines.push(`Highlight ${i + 1}${meta ? ` (${meta.trim()})` : ""}: ${describeText(truncateText(h.text), h)}`);
   });
   return lines.join("\n");

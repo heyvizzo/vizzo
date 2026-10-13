@@ -178,7 +178,7 @@ export class TurnBase {
   pageContext(words: Word[] = this.words): string {
     const ev = this.ctx.pageEvents?.();
     if (!ev || (!ev.clicks.length && !ev.preselected && !ev.highlights.length)) return "";
-    return formatPageContext(ev, words, this.ctx.tAudioStart());
+    return formatPageContext(ev, words, this.ctx.tAudioStart(), this.pointing);
   }
 
   onCleanup(fn: (reason: CleanupReason) => void): void {

@@ -83,7 +83,7 @@ describe("formatPointingForPrompt", () => {
       { word: "there.", wordStart: 1.2, algorithm: "dwell", sample: null },
       { word: "this", wordStart: 0.3, algorithm: "dwell", sample: sample({ elementPath: "article.card", label: "Card: Alerts", dataSource: null }) },
     ];
-    expect(formatPointingForPrompt(t)).toBe(`Pointing: "this" → <article> "Card: Alerts"\nPointing: "there" → (no element resolved)`);
+    expect(formatPointingForPrompt(t)).toBe(`Pointing: "this" → <article> "Card: Alerts"\nPointing: "there" → (nothing)`);
   });
   it("says so when there is nothing", () => {
     expect(formatPointingForPrompt([])).toMatch(/^Pointing: none/);
