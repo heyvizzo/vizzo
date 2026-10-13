@@ -1,11 +1,15 @@
 // Chat: a multi-turn voice conversation with the real vendors, switching approach A/B/C per turn,
 // while pointing at the demo page. Uses chat mode (RunConfig.memory): the server keeps the
 // conversation per connection and shares it across approaches.
+// Per turn the server sends a `decision` (question / task / clarify / answer + estimate); short tasks get
+// spoken fillers, long ones run as background `job`s whose results are read out later as a `notice`.
+// The user can barge in (press while the assistant talks) or stop it (Esc / Stop button).
+// `?demo=1` renders a static sample conversation for layout review (no mic needed).
 import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type TtsModel } from "../../shared/config.ts";
-import type { PointingTarget, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
+import type { JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -13,13 +17,18 @@ import { bindPushToTalk } from "../audio/ptt.ts";
 import { mountDemo } from "../cursor/demoLoader.ts";
 import { renderOverlay } from "../cursor/overlay.ts";
 import { Sampler } from "../cursor/sampler.ts";
+import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
 const BATCH_MS = 100;
 /** Give up on a turn that never gets turn.done (server hiccup). */
 const TURN_TIMEOUT_MS = 90_000;
+const TICK_MS = 250;
 const SHOWN_ALGORITHM = "dwellMode";
 const STORE_KEY = "chat.settings.v1";
+const LONG_TASK_CHOICES = [10, 20, 30, 60];
+/** Dev-only static sample conversation (see renderDemo). */
+const DEMO = import.meta.env.DEV && new URLSearchParams(location.search).has("demo");
 
 type ChatApproach = Exclude<Approach, "cursor-only">;
 const APPROACHES: { id: ChatApproach; label: string; note: string }[] = [
@@ -27,10 +36,14 @@ const APPROACHES: { id: ChatApproach; label: string; note: string }[] = [
   { id: "pipeline", label: "B · Pipeline", note: "Scribe → Haiku → ElevenLabs; hard questions go to Opus. Pointing is resolved from word timestamps." },
   { id: "hybrid", label: "C · Hybrid", note: "OpenAI Realtime for voice, plus Scribe in parallel so it knows what you pointed at." },
 ];
+const labelOf = (a: Approach): string => APPROACHES.find((x) => x.id === a)?.label ?? a;
 
-interface Settings { approach: ChatApproach; realtimeModel: RealtimeModel; routerMode: RouterMode; ttsModel: TtsModel }
-const settings: Settings = { approach: "pipeline", realtimeModel: DEFAULT_CONFIG.realtimeModel, routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel };
+interface Settings { approach: ChatApproach; realtimeModel: RealtimeModel; routerMode: RouterMode; ttsModel: TtsModel; longTaskSeconds: number }
+const settings: Settings = {
+  approach: "pipeline", realtimeModel: DEFAULT_CONFIG.realtimeModel, routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, longTaskSeconds: 20,
+};
 try { Object.assign(settings, JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}")); } catch { /* storage unavailable */ }
+if (!LONG_TASK_CHOICES.includes(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
 const saveSettings = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch { /* ignore */ } };
 
 // ── layout ─────────────────────────────────────────
@@ -55,17 +68,24 @@ app.innerHTML = `
       <label data-for="pipeline">Voice <select id="tts">
         <option value="eleven_v4_turbo">v4 Turbo</option><option value="eleven_flash_v2_5">Flash v2.5</option>
       </select></label>
+    </div>
+    <div class="head-row opts">
+      <label title="Tasks estimated longer than this run in the background; the result is read out when done">Background after <select id="long-task">
+        ${LONG_TASK_CHOICES.map((s) => `<option value="${s}">${s} s</option>`).join("")}
+      </select></label>
+      <span class="jobs-pill" id="jobs-pill" hidden></span>
       <span class="spacer"></span>
-      <button id="reset" title="Forget the conversation on the server">New conversation</button>
+      <button id="reset" title="Forget the conversation on the server (also drops background tasks)">New conversation</button>
     </div>
   </section>
   <section class="panel messages" id="messages" aria-live="polite">
-    <p class="empty" id="empty">Hold <b>Space</b> (or the button) and talk. Point at things on the page while you say “this” or “that”. You can switch approach between turns; the conversation carries over.</p>
+    <p class="empty" id="empty">Hold <b>Space</b> (or the button) and talk. Point at things on the page while you say “this” or “that”. Press again while it's talking to interrupt; <b>Esc</b> stops it. You can switch approach between turns; the conversation carries over.</p>
   </section>
   <section class="panel talk">
     <div class="row">
       <button id="enable">Enable mic &amp; audio</button>
       <button id="ptt" class="ptt-big" disabled>Hold to talk</button>
+      <button id="stop" class="stop" hidden title="Stop speaking (Esc)">Stop</button>
     </div>
     <p class="status" id="status"></p>
   </section>
@@ -84,6 +104,7 @@ function setStatus(text: string, isErr = false): void {
 }
 
 // ── settings UI ────────────────────────────────────
+// Never locked: a change applies from the next turn (barge-in means a turn can start at any time).
 const segButtons = new Map<ChatApproach, HTMLButtonElement>();
 for (const a of APPROACHES) {
   const b = document.createElement("button");
@@ -95,9 +116,11 @@ for (const a of APPROACHES) {
 const rtModel = $<HTMLSelectElement>("rt-model");
 const router = $<HTMLSelectElement>("router");
 const tts = $<HTMLSelectElement>("tts");
+const longTask = $<HTMLSelectElement>("long-task");
 rtModel.onchange = () => { settings.realtimeModel = rtModel.value as RealtimeModel; saveSettings(); };
 router.onchange = () => { settings.routerMode = router.value as RouterMode; saveSettings(); };
 tts.onchange = () => { settings.ttsModel = tts.value as TtsModel; saveSettings(); };
+longTask.onchange = () => { settings.longTaskSeconds = Number(longTask.value); saveSettings(); };
 
 function renderSettings(): void {
   for (const [id, b] of segButtons) b.setAttribute("aria-pressed", String(id === settings.approach));
@@ -105,6 +128,7 @@ function renderSettings(): void {
   rtModel.value = settings.realtimeModel;
   router.value = settings.routerMode;
   tts.value = settings.ttsModel;
+  longTask.value = String(settings.longTaskSeconds);
   for (const el of document.querySelectorAll<HTMLElement>(".opts [data-for]")) {
     el.hidden = !el.dataset.for!.split(" ").includes(settings.approach);
   }
@@ -120,6 +144,9 @@ function config(): RunConfig {
     ttsModel: settings.ttsModel,
     prewarm: true,
     memory: true,
+    fillers: true,
+    backgroundLongTasks: true,
+    longTaskSeconds: settings.longTaskSeconds,
   };
 }
 
@@ -128,54 +155,69 @@ interface TurnView {
   root: HTMLElement;
   user: HTMLElement;
   chips: HTMLElement;
+  badges: HTMLElement;
+  decision: HTMLElement;
   bot: HTMLElement;
   botText: Text;
   detail: HTMLDetailsElement;
   detailPre: HTMLElement;
   meta: HTMLElement;
 }
+/** Every turn view by turnId (job cards are placed after the turn that started them). */
+const views = new Map<string, TurnView>();
 
-function addTurnView(approach: ChatApproach): TurnView {
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function addTurnView(turnId: string, approach: ChatApproach): TurnView {
   $("empty").hidden = true;
-  const root = document.createElement("div");
-  root.className = "turn";
-  const user = document.createElement("div");
-  user.className = "bubble user pending";
-  user.textContent = "listening…";
-  const chips = document.createElement("div");
-  chips.className = "chips";
-  const bot = document.createElement("div");
-  bot.className = "bubble bot";
+  const root = el("div", "turn");
+  root.dataset.turn = turnId;
+  const user = el("div", "bubble user pending", "listening…");
+  const chips = el("div", "chips");
+  const badges = el("div", "badges");
+  badges.hidden = true;
+  const decision = el("span", "decision");
+  badges.append(decision);
+  const bot = el("div", "bubble bot");
   bot.hidden = true;
-  const who = document.createElement("span");
-  who.className = "who";
-  who.textContent = APPROACHES.find((a) => a.id === approach)!.label;
   const botText = document.createTextNode("");
-  bot.append(who, botText);
-  const detail = document.createElement("details");
-  detail.className = "detail";
+  bot.append(el("span", "who", labelOf(approach)), botText);
+  const detail = el("details", "detail");
   detail.hidden = true;
-  const summary = document.createElement("summary");
-  summary.textContent = "Opus's detailed answer";
-  const detailPre = document.createElement("pre");
-  detail.append(summary, detailPre);
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  root.append(user, chips, bot, detail, meta);
+  const detailPre = el("pre");
+  detail.append(el("summary", undefined, "Opus's detailed answer"), detailPre);
+  const meta = el("div", "meta");
+  root.append(user, chips, badges, bot, detail, meta);
   messages.append(root);
+  const v = { root, user, chips, badges, decision, bot, botText, detail, detailPre, meta };
+  views.set(turnId, v);
   scrollDown();
-  return { root, user, chips, bot, botText, detail, detailPre, meta };
+  return v;
 }
 
 function scrollDown(): void {
   messages.scrollTop = messages.scrollHeight;
 }
 
-/** Opus streams `SPOKEN: …` + blank line + details. The spoken part is already in the bot bubble. */
-function detailOf(opusText: string): string {
-  if (!/^\s*SPOKEN:/i.test(opusText)) return opusText;
-  const i = opusText.search(/\n\s*\n/);
-  return i < 0 ? "" : opusText.slice(i).trim();
+function renderDecision(v: TurnView, d: DecisionLike): void {
+  v.decision.replaceChildren();
+  decisionBadges(d).forEach((text, i) => {
+    const cls = i === 0 ? `badge intent-${d.intent}` : text === "working in background" ? "badge bg" : "badge";
+    v.decision.append(el("span", cls, text));
+  });
+  v.badges.hidden = false;
+}
+
+/** Small state tag on a turn ("interrupted", "stopped"), once. */
+function addTag(v: TurnView, text: string): void {
+  if (v.badges.querySelector(".tag")) return;
+  v.badges.append(el("span", "tag", text));
+  v.badges.hidden = false;
 }
 
 function shortTarget(t: PointingTarget): string {
@@ -187,34 +229,21 @@ function shortTarget(t: PointingTarget): string {
 function renderChips(v: TurnView, targets: PointingTarget[], approach: ChatApproach): void {
   v.chips.replaceChildren();
   for (const t of targets.filter((x) => x.algorithm === SHOWN_ALGORITHM)) {
-    const c = document.createElement("span");
-    c.className = "chip";
-    const b = document.createElement("b");
-    b.textContent = `“${t.word}”`;
-    c.append(b, ` → ${shortTarget(t)}`);
+    const c = el("span", "chip");
+    c.append(el("b", undefined, `“${t.word}”`), ` → ${shortTarget(t)}`);
     if (approach === "realtime") c.title = "Approach A doesn't use pointing; shown for reference";
     v.chips.append(c);
   }
-  if (approach === "realtime" && v.chips.childElementCount) {
-    const n = document.createElement("span");
-    n.className = "chip";
-    n.textContent = "not sent to A";
-    v.chips.append(n);
-  }
+  if (approach === "realtime" && v.chips.childElementCount) v.chips.append(el("span", "chip", "not sent to A"));
 }
 
 function fmtMs(v: number | null | undefined): string {
   return v == null ? "–" : v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`;
 }
 
-function renderMeta(v: TurnView, run: RunRecord): void {
+function renderMeta(v: TurnView, run: Pick<RunRecord, "metrics" | "costUsd" | "error">): void {
   v.meta.replaceChildren();
-  const add = (text: string, cls?: string) => {
-    const s = document.createElement("span");
-    s.textContent = text;
-    if (cls) s.className = cls;
-    v.meta.append(s);
-  };
+  const add = (text: string, cls?: string) => v.meta.append(el("span", cls, text));
   add(`first audio ${fmtMs(run.metrics.ttfa)}`);
   add(`answer ${fmtMs(run.metrics.tta)}`);
   if (run.metrics.opusTotal != null) add(`opus ${fmtMs(run.metrics.opusTotal)}`);
@@ -222,11 +251,100 @@ function renderMeta(v: TurnView, run: RunRecord): void {
   if (run.error) add(run.error, "err");
 }
 
+// ── background job cards ───────────────────────────
+interface JobCard {
+  info: JobInfo;
+  /** performance.now() when the job started (approx: first seen minus elapsedMs). */
+  tStart: number;
+  root: HTMLElement;
+  head: HTMLElement;
+  question: HTMLElement;
+  sub: HTMLElement;
+  spoken: HTMLElement;
+  detail: HTMLDetailsElement;
+  detailPre: HTMLElement;
+  err: HTMLElement;
+}
+const jobs = new Map<string, JobCard>();
+/** Jobs dropped by "New conversation": ignore late updates for them. */
+const droppedJobs = new Set<string>();
+
+function createJobCard(info: JobInfo): JobCard {
+  $("empty").hidden = true;
+  const root = el("div", "job");
+  root.dataset.turn = info.turnId;
+  const head = el("div", "job-head");
+  const question = el("div", "job-q");
+  const sub = el("div", "job-sub");
+  const spoken = el("div", "job-spoken");
+  const detail = el("details", "detail");
+  const detailPre = el("pre");
+  detail.append(el("summary", undefined, "Detailed answer"), detailPre);
+  const err = el("div", "job-err");
+  root.append(head, question, sub, spoken, detail, err);
+  // After the starting turn (and after any earlier cards of that turn); else at the end.
+  let anchor: Element | null = views.get(info.turnId)?.root ?? null;
+  while (anchor?.nextElementSibling instanceof HTMLElement && anchor.nextElementSibling.matches(`.job[data-turn="${CSS.escape(info.turnId)}"]`)) {
+    anchor = anchor.nextElementSibling;
+  }
+  if (anchor) anchor.after(root);
+  else messages.append(root);
+  return { info, tStart: performance.now() - (info.elapsedMs ?? 0), root, head, question, sub, spoken, detail, detailPre, err };
+}
+
+function upsertJob(info: JobInfo): void {
+  if (droppedJobs.has(info.jobId)) return;
+  let c = jobs.get(info.jobId);
+  if (!c) {
+    c = createJobCard(info);
+    jobs.set(info.jobId, c);
+    if (c.root === messages.lastElementChild) scrollDown();
+  }
+  if (info.state === "running" && info.elapsedMs != null) c.tStart = performance.now() - info.elapsedMs;
+  // Keep text we already have if a later update omits it.
+  c.info = { ...c.info, ...info };
+  renderJob(c);
+  renderJobsPill();
+}
+
+function renderJob(c: JobCard): void {
+  const j = c.info;
+  c.root.dataset.state = j.state;
+  c.head.textContent = jobHeadline(j, performance.now() - c.tStart);
+  c.question.textContent = j.question ? `“${j.question}”` : "";
+  c.question.hidden = !j.question;
+  const est = fmtEstimate(j.estimateS);
+  c.sub.textContent = [labelOf(j.approach), j.state === "running" && est ? `estimate ${est}` : ""].filter(Boolean).join(" · ");
+  const spoken = j.state === "done" && j.spoken ? spokenOf(j.spoken) : "";
+  c.spoken.textContent = spoken;
+  c.spoken.hidden = !spoken;
+  const detail = j.state === "done" && j.detail ? detailOf(j.detail) : "";
+  c.detailPre.textContent = detail;
+  c.detail.hidden = !detail;
+  c.err.textContent = j.state === "failed" ? j.error || "The task failed." : "";
+  c.err.hidden = j.state !== "failed";
+}
+
+function renderJobsPill(): void {
+  const n = [...jobs.values()].filter((c) => c.info.state === "running").length;
+  const pill = $("jobs-pill");
+  pill.textContent = runningLabel(n);
+  pill.hidden = n === 0;
+}
+
 // ── audio + cursor ─────────────────────────────────
 const sock = connectWithStatus();
 const sampler = new Sampler(demoRoot, scroller);
 let player: Player | null = null;
 let lastTargets: PointingTarget[] = [];
+/** Rough "is something audible" estimate from bytes pushed vs time. */
+const playback = new PlaybackClock();
+/** Whose audio was pushed last, so a barge-in only tags a turn whose reply was actually cut off. */
+let audioOwner: "turn" | "notice" | null = null;
+/** Job whose result is being read out (between notice start/end), if any. */
+let noticeJobId: string | null = null;
+/** Notices the user stopped or talked over: ignore the rest of their frames/messages. */
+const stoppedNotices = new Set<string>();
 
 void mountDemo(demoRoot).then(() => sampler.start());
 scroller.addEventListener("scroll", () => drawOverlay(), { passive: true });
@@ -241,7 +359,8 @@ async function enableAudio(): Promise<void> {
     await warmUpAudio();
     player ??= await createPlayer();
     player.onPlayed = (segment: Segment, tPlayed: number) => {
-      if (turn && !turn.finished) sock.send({ type: "audio.played", turnId: turn.turnId, segment, tPlayed });
+      // Marks only for the current turn's segments; notices aren't part of any turn.
+      if (segment !== "notice" && turn && !turn.finished) sock.send({ type: "audio.played", turnId: turn.turnId, segment, tPlayed });
     };
     $("enable").hidden = true;
     $<HTMLButtonElement>("ptt").disabled = false;
@@ -253,8 +372,36 @@ async function enableAudio(): Promise<void> {
 $("enable").onclick = () => void enableAudio();
 
 sock.onAudio((pcm) => {
-  if (turn && !turn.finished) player?.push(pcm);
+  // Frames aren't tagged: they belong to the active turn once it has opened a segment (so stray frames from a
+  // cancelled turn don't play over the new recording), or to the notice being read out.
+  const forTurn = !!turn && !turn.finished && turn.segmentOpen;
+  if (!forTurn && !noticeJobId) return;
+  player?.push(pcm);
+  playback.push(pcm.byteLength, performance.now());
+  audioOwner = forTurn ? "turn" : "notice";
 });
+
+function onNotice(msg: Extract<ServerMsg, { type: "notice" }>): void {
+  if (stoppedNotices.has(msg.jobId)) return;
+  if (msg.state === "start") {
+    noticeJobId = msg.jobId;
+    player?.startSegment("notice");
+    setStatus("Reading out a background result… (press to talk over it, Esc to stop)");
+  } else if (noticeJobId === msg.jobId) {
+    player?.endSegment("notice");
+    noticeJobId = null;
+    if (!turnBusy()) setStatus("Ready.");
+  }
+  refreshBusy();
+}
+
+/** Stop the notice being read out (if any) and tell the server. */
+function stopNotice(): void {
+  if (!noticeJobId) return;
+  stoppedNotices.add(noticeJobId);
+  noticeJobId = null;
+  sock.send({ type: "speech.stop" });
+}
 
 // ── turn flow ──────────────────────────────────────
 interface Turn {
@@ -270,13 +417,22 @@ interface Turn {
   view: TurnView;
   voice: string;
   opus: string;
+  /** Got an audio.segment start: binary frames are now this turn's. */
+  segmentOpen: boolean;
   finished: boolean;
 }
 let turn: Turn | null = null;
+/** Turns we cancelled: their late messages are ignored (a late turn.done still renders metrics). */
+const cancelled = new Set<string>();
 
-function lockControls(locked: boolean): void {
-  for (const b of segButtons.values()) b.disabled = locked;
-  $<HTMLButtonElement>("reset").disabled = locked;
+/** Released and waiting for / playing the reply. */
+function turnBusy(): boolean {
+  return !!turn && !turn.finished && turn.tRelease !== undefined;
+}
+
+/** Show the Stop button while the assistant is thinking/speaking or a notice is audible. */
+function refreshBusy(): void {
+  $("stop").hidden = !(DEMO || turnBusy() || noticeJobId || playback.isPlaying(performance.now()));
 }
 
 function flushSamples(t: Turn): void {
@@ -286,29 +442,54 @@ function flushSamples(t: Turn): void {
   sock.send({ type: "cursor.samples", turnId: t.turnId, samples: fresh });
 }
 
+/** Cancel an unfinished turn now (don't wait for turn.done) and tag its view; keeps what was said so far. */
+function cancelTurn(t: Turn, reason: "interrupt" | "stop"): void {
+  if (t.finished) return;
+  sock.send({ type: "turn.cancel", turnId: t.turnId, reason });
+  cancelled.add(t.turnId);
+  endTurn(t);
+  const v = t.view;
+  if (v.user.classList.contains("pending")) {
+    v.user.classList.remove("pending");
+    if (t.tRelease === undefined || v.user.textContent === "listening…") v.user.textContent = "(cancelled)";
+  }
+  addTag(v, reason === "interrupt" ? "interrupted" : "stopped");
+}
+
 function press(): void {
   if (!player) return setStatus("Click “Enable mic & audio” first.", true);
-  if (turn && !turn.finished) return setStatus("Still answering the last turn…");
   if (!sock.isOpen) return setStatus("Server not connected.", true);
+  const now = performance.now();
+  const prev = turn;
+  // Barge-in: cut off whatever the assistant is doing or saying.
+  if (prev && !prev.finished) {
+    if (prev.tRelease === undefined) return; // still recording
+    cancelTurn(prev, "interrupt");
+  } else if (prev && audioOwner === "turn" && playback.isPlaying(now)) {
+    addTag(prev.view, "interrupted"); // finished on the server, but its audio was still playing
+  }
+  stopNotice();
   player.reset();
-  const tPress = performance.now();
+  playback.reset();
+
+  const turnId = crypto.randomUUID();
   const t: Turn = {
-    turnId: crypto.randomUUID(), approach: settings.approach, tPress, audioStarted: Promise.resolve(),
-    sentUpTo: tPress - PRE_ROLL_MS - 1, view: addTurnView(settings.approach), voice: "", opus: "", finished: false,
+    turnId, approach: settings.approach, tPress: now, audioStarted: Promise.resolve(),
+    sentUpTo: now - PRE_ROLL_MS - 1, view: addTurnView(turnId, settings.approach), voice: "", opus: "", segmentOpen: false, finished: false,
   };
   turn = t;
-  lockControls(true);
   lastTargets = [];
   drawOverlay();
-  sock.send({ type: "turn.start", turnId: t.turnId, config: config(), tPress });
+  sock.send({ type: "turn.start", turnId, config: config(), tPress: now });
   t.batchTimer = setInterval(() => flushSamples(t), BATCH_MS);
   $("ptt").classList.add("live");
   setStatus("Listening… release to send.");
+  refreshBusy();
   t.audioStarted = (async () => {
     try {
-      t.capture = await startCapture({ onFrame: (pcm) => { if (turn === t && t.tRelease === undefined) sock.sendAudio(pcm); } });
+      t.capture = await startCapture({ onFrame: (pcm) => { if (turn === t && t.tRelease === undefined && !t.finished) sock.sendAudio(pcm); } });
       const tAudioStart = await t.capture.tAudioStart;
-      sock.send({ type: "turn.audioStart", turnId: t.turnId, tAudioStart });
+      if (!t.finished) sock.send({ type: "turn.audioStart", turnId, tAudioStart });
     } catch (e) {
       failTurn(t, `Mic: ${(e as Error).message}`);
     }
@@ -327,7 +508,24 @@ async function release(): Promise<void> {
   clearInterval(t.batchTimer);
   sock.send({ type: "turn.release", turnId: t.turnId, tRelease: t.tRelease });
   setStatus("Thinking…");
+  refreshBusy();
   t.timeout = setTimeout(() => failTurn(t, "No reply from the server (timed out)."), TURN_TIMEOUT_MS);
+}
+
+/** Esc / Stop button: silence everything and cancel the turn in progress. */
+function stopAll(): void {
+  const now = performance.now();
+  const wasPlaying = playback.isPlaying(now);
+  const turnAudible = wasPlaying && audioOwner === "turn";
+  player?.reset();
+  playback.reset();
+  const t = turn;
+  const hadNotice = !!noticeJobId;
+  if (t && !t.finished) cancelTurn(t, "stop");
+  else if (t && turnAudible) addTag(t.view, "stopped");
+  stopNotice();
+  if (t || hadNotice || wasPlaying) setStatus("Stopped.");
+  refreshBusy();
 }
 
 function endTurn(t: Turn): void {
@@ -335,28 +533,43 @@ function endTurn(t: Turn): void {
   clearInterval(t.batchTimer);
   clearTimeout(t.timeout);
   t.capture?.stop();
-  $("ptt").classList.remove("live");
-  lockControls(false);
+  if (turn === t) $("ptt").classList.remove("live");
+  refreshBusy();
 }
 
 function failTurn(t: Turn, msg: string): void {
   if (t.finished) return;
   sock.send({ type: "turn.cancel", turnId: t.turnId });
+  cancelled.add(t.turnId);
   endTurn(t);
   if (t.view.user.classList.contains("pending")) t.view.user.textContent = "(cancelled)";
-  const e = document.createElement("span");
-  e.className = "err";
-  e.textContent = msg;
-  t.view.meta.append(e);
+  t.view.meta.append(el("span", "err", msg));
   setStatus(msg, true);
 }
 
+const INTENT_STATUS: Record<RouteIntent, string> = {
+  question: "Looking into your question…",
+  task: "Working on it…",
+  clarify: "Asking you a follow-up…",
+  answer: "Answering…",
+};
+
 sock.on((msg: ServerMsg) => {
-  const t = turn;
-  if (!t || !("turnId" in msg) || msg.turnId !== t.turnId) {
-    if (msg.type === "error" && !("turnId" in msg && msg.turnId)) setStatus(`${msg.source}: ${msg.message}`, true);
+  if (msg.type === "job") return upsertJob(msg.job);
+  if (msg.type === "notice") return onNotice(msg);
+  if (!("turnId" in msg) || !msg.turnId) {
+    if (msg.type === "error") setStatus(`${msg.source}: ${msg.message}`, true);
     return;
   }
+  if (cancelled.has(msg.turnId)) {
+    if (msg.type === "turn.done") {
+      const v = views.get(msg.turnId);
+      if (v) renderMeta(v, msg.run);
+    }
+    return;
+  }
+  const t = turn;
+  if (!t || msg.turnId !== t.turnId || t.finished) return;
   const v = t.view;
   switch (msg.type) {
     case "stt.partial":
@@ -371,11 +584,16 @@ sock.on((msg: ServerMsg) => {
       renderChips(v, msg.targets, t.approach);
       drawOverlay();
       break;
+    case "decision":
+      renderDecision(v, msg);
+      setStatus(msg.background ? "Working on it in the background; you can keep talking." : INTENT_STATUS[msg.intent]);
+      break;
     case "voice.text":
+      // Ack, fillers and the answer all arrive here; the bubble shows everything said, in order.
       t.voice += msg.delta;
       v.bot.hidden = false;
       v.botText.data = t.voice;
-      setStatus("Speaking…");
+      setStatus("Speaking… (press to interrupt, Esc to stop)");
       break;
     case "opus.text": {
       t.opus += msg.delta;
@@ -385,8 +603,10 @@ sock.on((msg: ServerMsg) => {
       break;
     }
     case "audio.segment":
-      if (msg.state === "start") player?.startSegment(msg.segment);
-      else player?.endSegment(msg.segment);
+      if (msg.state === "start") {
+        t.segmentOpen = true;
+        player?.startSegment(msg.segment);
+      } else player?.endSegment(msg.segment);
       break;
     case "error":
       setStatus(`${msg.source}: ${msg.message}`, true);
@@ -408,32 +628,128 @@ sock.on((msg: ServerMsg) => {
 });
 
 bindPushToTalk({ button: $("ptt"), onPress: () => press(), onRelease: () => void release() });
+$("stop").onclick = () => stopAll();
 
-$("reset").onclick = () => {
-  if (turn && !turn.finished) return;
-  sock.send({ type: "conversation.reset" });
-  player?.reset();
-  messages.querySelectorAll(".turn").forEach((n) => n.remove());
+/** Same rule as ptt.ts: Esc in a form control belongs to the control. */
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.repeat) return;
+  const tg = e.target;
+  if (tg instanceof HTMLElement && (tg.isContentEditable || tg instanceof HTMLInputElement || tg instanceof HTMLTextAreaElement || tg instanceof HTMLSelectElement)) return;
+  stopAll();
+});
+
+// Live timers on running job cards, and the Stop button once queued audio has drained.
+setInterval(() => {
+  for (const c of jobs.values()) if (c.info.state === "running") renderJob(c);
+  refreshBusy();
+}, TICK_MS);
+
+function clearConversation(): void {
+  messages.querySelectorAll(".turn, .job, .note").forEach((n) => n.remove());
+  views.clear();
+  for (const id of jobs.keys()) droppedJobs.add(id);
+  jobs.clear();
+  renderJobsPill();
   $("empty").hidden = false;
   lastTargets = [];
   drawOverlay();
+}
+
+$("reset").onclick = () => {
+  if (turn && !turn.finished) cancelTurn(turn, "stop");
+  stopNotice();
+  player?.reset();
+  playback.reset();
+  sock.send({ type: "conversation.reset" });
+  clearConversation();
+  refreshBusy();
   setStatus("New conversation.");
 };
 
-// The server keeps the conversation per WebSocket connection: after a reconnect it starts fresh.
+// The server keeps the conversation (and its jobs) per WebSocket connection: after a reconnect it starts fresh.
 {
   const render = sock.onStatus;
   let opened = false;
   sock.onStatus = (s) => {
     render?.(s);
     if (s !== "open") return;
+    if (opened) {
+      if (turn && !turn.finished) failTurn(turn, "Connection lost.");
+      noticeJobId = null;
+      for (const c of jobs.values()) {
+        if (c.info.state !== "running") continue;
+        c.info = { ...c.info, state: "failed", error: "Connection lost; the server dropped this task." };
+        renderJob(c);
+      }
+      renderJobsPill();
+    }
     if (opened && messages.querySelector(".turn")) {
-      const note = document.createElement("p");
-      note.className = "status err";
-      note.textContent = "Reconnected: the server started a new conversation (earlier turns are forgotten).";
+      const note = el("p", "status err note", "Reconnected: the server started a new conversation (earlier turns are forgotten).");
       messages.append(note);
       scrollDown();
     }
     opened = true;
+    refreshBusy();
   };
+}
+
+// ── ?demo=1: static sample conversation for layout review ──
+if (DEMO) renderDemo();
+
+function renderDemo(): void {
+  const metrics = (ttfa: number, tta: number | null, opusTotal: number | null) =>
+    ({ ttfa, tta, opusTotal, stt: null, llmFirst: null, toolCall: null, opusFirst: null, opusSpoken: null, ttsFirst: null });
+  const sample = (label: string) =>
+    ({ t: 0, x: 0, y: 0, scrollX: 0, scrollY: 0, elementPath: null, dataSource: null, label });
+  const turnOf = (id: string, approach: ChatApproach, user: string, bot: string, d: DecisionLike | null) => {
+    const v = addTurnView(id, approach);
+    v.user.classList.remove("pending");
+    v.user.textContent = user;
+    if (d) renderDecision(v, d);
+    v.bot.hidden = false;
+    v.botText.data = bot;
+    return v;
+  };
+
+  const t1 = turnOf("demo-1", "pipeline", "Compare our three plans against the two main competitors.",
+    "Sure, that'll take a couple of minutes. I'll work on it in the background and tell you when it's ready.",
+    { intent: "task", estimateS: 95, background: true });
+  renderMeta(t1, { metrics: metrics(612, 1840, null), costUsd: 0.0021 });
+
+  const t2 = turnOf("demo-2", "hybrid", "Can you make this bigger?",
+    "Do you mean the hero image or the headline above it?", { intent: "clarify", estimateS: null, background: false });
+  renderChips(t2, [{ word: "this", wordStart: 1.1, algorithm: SHOWN_ALGORITHM, sample: sample("Hero image") }], "hybrid");
+  renderMeta(t2, { metrics: metrics(488, 488, null), costUsd: 0.0009 });
+
+  const t3 = turnOf("demo-3", "pipeline", "Why is the checkout button greyed out?",
+    "Let me check that. Looking at the form state now… Got it: the button stays disabled until the email field validates, and the address there is missing its domain.",
+    { intent: "question", estimateS: 8, background: false });
+  t3.detail.hidden = false;
+  t3.detailPre.textContent = "The submit button binds `disabled` to `!form.valid`.\n\nThe email input has value “dana@” which fails the pattern check, so `form.valid` is false. Fixing the address (or relaxing the pattern) enables the button.";
+  renderMeta(t3, { metrics: metrics(540, 7320, 6900), costUsd: 0.0188 });
+
+  const t4 = turnOf("demo-4", "realtime", "Summarise the pricing table for me.",
+    "The pricing table has three tiers. The Starter plan is", { intent: "question", estimateS: 12, background: false });
+  addTag(t4, "interrupted");
+
+  turnOf("demo-5", "pipeline", "Audit every page for accessibility issues.",
+    "On it. I'll keep going in the background and read you the results when I'm done.",
+    { intent: "task", estimateS: 150, background: true });
+
+  upsertJob({
+    jobId: "job-1", turnId: "demo-1", approach: "pipeline", intent: "task", question: "Compare our three plans against the two main competitors.",
+    estimateS: 95, state: "done", elapsedMs: 74_000,
+    spoken: "SPOKEN: Done. We're cheapest at the top tier, but both competitors include SSO in their middle plan and we don't.",
+    detail: "SPOKEN: Done. We're cheapest at the top tier…\n\nStarter: we're $2 above Acme and level with Globex.\nTeam: Globex and Acme both bundle SSO; we charge for it as an add-on.\nEnterprise: we're about 15% cheaper than either.\n\nSuggestion: move SSO into Team.",
+  });
+  upsertJob({
+    jobId: "job-2", turnId: "demo-5", approach: "pipeline", intent: "task", question: "Audit every page for accessibility issues.",
+    estimateS: 150, state: "running", elapsedMs: 37_000,
+  });
+  upsertJob({
+    jobId: "job-3", turnId: "demo-x", approach: "hybrid", intent: "question", question: "Find every place we still call the old billing API.",
+    estimateS: 40, state: "failed", elapsedMs: 12_000, error: "Opus: request timed out",
+  });
+  refreshBusy();
+  setStatus("Demo conversation (static sample, ?demo=1).");
 }
