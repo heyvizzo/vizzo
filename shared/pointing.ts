@@ -1,5 +1,5 @@
 // Pointing resolution (ARCHITECTURE §6). Pure functions, shared by the server and the cursor lab.
-import type { CursorSample, PointingTarget, Word } from "./protocol.ts";
+import type { CursorSample, ElementRef, PageClick, PageSelection, PointingTarget, Word } from "./protocol.ts";
 
 export const POINTING_WORDS = /^(this|that|these|those|here|there)$/i;
 
@@ -154,34 +154,98 @@ export function tagFromPath(path: string | null): string | null {
   return m ? m[0].toLowerCase() : null;
 }
 
+const isEmptyRef = (r: ElementRef | null | undefined): boolean => !r || (!r.elementPath && !r.dataSource && !r.label);
+
+/**
+ * `<h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]`. Missing
+ * parts are omitted; `in "…"` only when the container differs from the label. "" for an empty ref.
+ */
+export function describeRef(r: ElementRef, opts: { label?: boolean } = {}): string {
+  const parts: string[] = [];
+  const tag = tagFromPath(r.elementPath);
+  if (tag) parts.push(`<${tag}>`);
+  if (r.label && opts.label !== false) parts.push(JSON.stringify(r.label));
+  if (r.container && r.container !== r.label) parts.push(`in ${JSON.stringify(r.container)}`);
+  if (r.dataSource) parts.push(`[data-source=${r.dataSource}]`);
+  return parts.join(" ");
+}
+
 /** One line per pointing word for the chosen algorithm, e.g.
- * `Pointing: "this" → <button> "Get started" [data-source=web/cursor/demo/demo.html:42]` */
+ * `Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]` */
 export function formatPointingContext(targets: PointingTarget[], algorithm = "dwellMode"): string {
   return targets
     .filter((t) => t.algorithm === algorithm)
-    .map((t) => {
-      const s = t.sample;
-      if (!s || (!s.elementPath && !s.dataSource && !s.label)) return `Pointing: "${t.word}" → (nothing)`;
-      const parts: string[] = [];
-      const tag = tagFromPath(s.elementPath);
-      if (tag) parts.push(`<${tag}>`);
-      if (s.label) parts.push(JSON.stringify(s.label));
-      if (s.dataSource) parts.push(`[data-source=${s.dataSource}]`);
-      return `Pointing: "${t.word}" → ${parts.join(" ")}`;
-    })
+    .map((t) => `Pointing: "${t.word}" → ${isEmptyRef(t.sample) ? "(nothing)" : describeRef(t.sample!)}`)
     .join("\n");
 }
 
+/** At most this many `Clicked:` lines (the latest ones). */
+export const MAX_CLICK_LINES = 5;
+/** A click further than this from every word's span isn't attributed to a word. */
+export const CLICK_WORD_MAX_MS = 1000;
+/** Selected text is cut to this many characters in the context. */
+export const SELECTION_MAX = 200;
+
+const refKey = (r: ElementRef) => r.elementPath ?? `${r.dataSource ?? ""}|${r.label ?? ""}`;
+
+/** Sorted by t; consecutive clicks on the same element collapse into the first; empty refs dropped; the latest `max` kept. */
+export function dedupeClicks(clicks: readonly PageClick[], max = MAX_CLICK_LINES): PageClick[] {
+  const out: PageClick[] = [];
+  for (const c of [...clicks].sort((a, b) => a.t - b.t)) {
+    if (isEmptyRef(c)) continue;
+    const prev = out[out.length - 1];
+    if (prev && refKey(prev) === refKey(c)) continue;
+    out.push(c);
+  }
+  return out.slice(-max);
+}
+
 /**
- * Clicks and highlighted text from the turn, as lines for the LLM context (empty string if none).
- * Each click names the word being said closest to it, e.g.
- *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] (while saying "this")`
- *   `Selected text: "Charts refresh as rows land." in <p> … [data-source=…]`
- * Implemented by the pointer-detection task; stub returns "".
+ * The word whose span [tAudioStart + start·1000, tAudioStart + end·1000] is nearest client time `t`
+ * (0 inside the span; ties → the earlier word), if within `maxMs`. Null without words/tAudioStart.
  */
-export function formatPageContext(
-  _clicks: import("./protocol.ts").PageClick[], _selection: import("./protocol.ts").PageSelection | null,
-  _words: Word[], _tAudioStart: number | undefined,
-): string {
-  return "";
+export function wordNear(t: number, words: readonly Word[] | undefined, tAudioStart: number | undefined, maxMs = CLICK_WORD_MAX_MS): Word | null {
+  if (!words?.length || tAudioStart === undefined || !Number.isFinite(tAudioStart)) return null;
+  let best: Word | null = null;
+  let bestD = Infinity;
+  for (const w of words) {
+    const from = tAudioStart + w.start * 1000;
+    const to = tAudioStart + w.end * 1000;
+    const d = t < from ? from - t : t > to ? t - to : 0;
+    if (d < bestD) [best, bestD] = [w, d];
+  }
+  return bestD <= maxMs ? best : null;
+}
+
+/** Collapse whitespace and cut to `max` chars with an ellipsis. */
+export function truncateText(text: string, max = SELECTION_MAX): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max - 1).trimEnd() + "…" : t;
+}
+
+const norm = (s: string) => s.replace(/…$/, "").replace(/\s+/g, " ").trim().toLowerCase();
+
+/**
+ * Clicks and highlighted text from the turn, as lines for the LLM context (empty string if none):
+ *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] (while saying "this")`
+ *   `Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=…]`
+ * Clicks: one line each, sorted by time, consecutive clicks on the same element deduped, the latest
+ * MAX_CLICK_LINES kept; `(while saying "…")` names the word nearest the click (wordNear), omitted
+ * when words/tAudioStart are missing or no word is within CLICK_WORD_MAX_MS. Selection: text cut to
+ * SELECTION_MAX chars, then its element; the element's label is left out when it just repeats the text.
+ */
+export function formatPageContext(clicks: PageClick[], selection: PageSelection | null, words: Word[], tAudioStart: number | undefined): string {
+  const lines = dedupeClicks(clicks ?? []).map((c) => {
+    const w = wordNear(c.t, words, tAudioStart);
+    const saying = w ? ` (while saying ${JSON.stringify(w.text.trim())})` : "";
+    return `Clicked: ${describeRef(c)}${saying}`;
+  });
+  const text = selection ? truncateText(selection.text) : "";
+  if (selection && text) {
+    const label = selection.label ? norm(selection.label) : "";
+    const repeats = !!label && (norm(text).includes(label) || label.includes(norm(text)));
+    const where = describeRef(selection, { label: !repeats });
+    lines.push(`Selected text: ${JSON.stringify(text)}${where ? ` in ${where}` : ""}`);
+  }
+  return lines.join("\n");
 }

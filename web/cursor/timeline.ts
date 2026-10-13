@@ -1,7 +1,7 @@
 // Timeline (PRD FR11): cursor speed over time, word spans, shaded pointing-word windows, picked samples.
 import { isPointingWord, sampleSpeeds, wordWindow, type WindowOpts } from "../../shared/pointing.ts";
-import type { CursorSample, PointingTarget, Word } from "../../shared/protocol.ts";
-import { colorFor, LABEL_COLOR } from "./colors.ts";
+import type { CursorSample, PageClick, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
+import { CLICK_COLOR, colorFor, LABEL_COLOR, SELECTION_COLOR } from "./colors.ts";
 
 export interface TimelineModel {
   /** ms relative to tAudioStart */
@@ -12,12 +12,19 @@ export interface TimelineModel {
   vmax: number;
   words: { text: string; from: number; to: number; pointing: boolean; win: [number, number] | null }[];
   picks: { t: number; v: number; algorithm: string; word: string }[];
+  /** Clicks during the turn, numbered from 1 in time order. */
+  clicks: { t: number; n: number }[];
+  /** When the highlighted text was selected, if any. */
+  selection: number | null;
 }
 
 /** Everything in ms relative to tAudioStart (pass tAudioStart = 0 for relative samples). */
 export function buildTimelineModel(
   samples: readonly CursorSample[], words: readonly Word[], targets: readonly PointingTarget[], opts: WindowOpts, tAudioStart = 0,
+  page: { clicks?: readonly PageClick[]; selection?: PageSelection | null } = {},
 ): TimelineModel {
+  const clicks = [...(page.clicks ?? [])].sort((a, b) => a.t - b.t).map((c, i) => ({ t: c.t - tAudioStart, n: i + 1 }));
+  const selection = page.selection ? page.selection.t - tAudioStart : null;
   const sorted = [...samples].sort((a, b) => a.t - b.t);
   const sp = sampleSpeeds(sorted);
   const speed = sorted.flatMap((s, i) => (Number.isNaN(sp[i]) ? [] : [{ t: s.t - tAudioStart, v: sp[i]! * 1000 }]));
@@ -32,13 +39,16 @@ export function buildTimelineModel(
     return best?.v ?? 0;
   };
   const picks = targets.flatMap((p) => (p.sample ? [{ t: p.sample.t - tAudioStart, v: speedAt(p.sample.t - tAudioStart), algorithm: p.algorithm, word: p.word }] : []));
-  const times = [...speed.map((p) => p.t), ...ws.flatMap((w) => [w.win?.[0] ?? w.from, w.win?.[1] ?? w.to]), 0];
+  const times = [
+    ...speed.map((p) => p.t), ...ws.flatMap((w) => [w.win?.[0] ?? w.from, w.win?.[1] ?? w.to]), 0,
+    ...clicks.map((c) => c.t), ...(selection === null ? [] : [selection]),
+  ];
   const t0 = Math.min(...times);
   const t1 = Math.max(...times, t0 + 1);
   // Robust y scale: 98th percentile so a single jump doesn't flatten the line.
   const vs = speed.map((p) => p.v).sort((a, b) => a - b);
   const vmax = Math.max(200, (vs[Math.floor(vs.length * 0.98)] ?? 0) * 1.1);
-  return { t0, t1, speed, vmax, words: ws, picks };
+  return { t0, t1, speed, vmax, words: ws, picks, clicks, selection };
 }
 
 /** Draws the model (null = placeholder text). Only algorithms in `visible` get pick markers. */
@@ -106,6 +116,19 @@ export function drawTimeline(canvas: HTMLCanvasElement, m: TimelineModel | null,
     g.fillStyle = w.pointing ? "#e6e8ee" : "#8a93a6";
     g.fillText(w.text, x(w.from), wy + 24);
   }
+  // Clicks (numbered ticks) and the selection time
+  const tick = (t: number, color: string, text: string) => {
+    g.fillStyle = color;
+    g.fillRect(Math.round(x(t)), TOP, 1.5, plotH);
+    g.beginPath();
+    g.moveTo(x(t) - 4, TOP);
+    g.lineTo(x(t) + 4, TOP);
+    g.lineTo(x(t), TOP + 6);
+    g.fill();
+    g.fillText(text, x(t) + 4, TOP + 16);
+  };
+  if (m.selection !== null) tick(m.selection, SELECTION_COLOR, "sel");
+  for (const c of m.clicks) tick(c.t, CLICK_COLOR, `click ${c.n}`);
   // Picks
   const seen = new Map<string, number>();
   for (const p of m.picks) {

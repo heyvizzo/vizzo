@@ -1,6 +1,6 @@
 // Cursor-lab sessions and their fixture files (ARCHITECTURE §6.1): Uxx.wav, Uxx.cursor.json, Uxx.labels.json.
 import { isPointingWord, normalizeWord } from "../../shared/pointing.ts";
-import type { CursorSample, PointingTarget, Word } from "../../shared/protocol.ts";
+import type { CursorSample, PageClick, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
 
 export interface LabelTarget { elementPath: string | null; dataSource: string | null; label: string | null }
 
@@ -28,6 +28,10 @@ export interface CursorFile {
   samples: CursorSample[];
   /** Window size + demo scroller size at record time, for reference. */
   viewport?: { width: number; height: number };
+  /** Clicks during the turn (t relative to tAudioStart, like samples). Optional: older files lack it. */
+  clicks?: PageClick[];
+  /** Text highlighted during the turn (t relative to tAudioStart). Optional. */
+  selection?: PageSelection | null;
 }
 
 /** Uxx.labels.json */
@@ -50,6 +54,9 @@ export interface LabSession {
   /** What the server's resolver sent (live turns only). */
   serverTargets?: PointingTarget[];
   viewport?: { width: number; height: number };
+  /** Clicks / selection during the turn, t relative to tAudioStart. */
+  clicks?: PageClick[];
+  selection?: PageSelection | null;
 }
 
 /** Shift absolute client-time samples to be relative to tAudioStart, keeping those in [from, to] (absolute). */
@@ -73,6 +80,7 @@ export function toCursorFile(s: LabSession): CursorFile {
   return {
     version: 1, kind: "cursor", id: s.id, createdAt: s.createdAt, transcript: s.transcript,
     words: s.words, samples: s.samples, ...(s.viewport ? { viewport: s.viewport } : {}),
+    ...(s.clicks?.length ? { clicks: s.clicks } : {}), ...(s.selection ? { selection: s.selection } : {}),
   };
 }
 
@@ -94,6 +102,14 @@ function isSample(v: unknown): v is CursorSample {
 function isTarget(v: unknown): v is LabelTarget {
   return isObj(v) && strOrNull(v.elementPath) && strOrNull(v.dataSource) && strOrNull(v.label);
 }
+const optStrOrNull = (v: unknown) => v === undefined || strOrNull(v);
+const isRef = (v: unknown): v is Record<string, unknown> => isObj(v) && isTarget(v) && optStrOrNull(v.container);
+function isClick(v: unknown): v is PageClick {
+  return isRef(v) && isNum(v.t) && isNum(v.x) && isNum(v.y);
+}
+function isSelection(v: unknown): v is PageSelection {
+  return isRef(v) && isNum(v.t) && typeof v.text === "string";
+}
 
 /** Throws with a readable message on a malformed file. */
 export function parseCursorFile(text: string): CursorFile {
@@ -108,6 +124,8 @@ export function parseCursorFile(text: string): CursorFile {
     words: v.words, samples: v.samples,
     ...(isObj(v.viewport) && isNum(v.viewport.width) && isNum(v.viewport.height)
       ? { viewport: { width: v.viewport.width, height: v.viewport.height } } : {}),
+    ...(Array.isArray(v.clicks) && v.clicks.every(isClick) ? { clicks: v.clicks } : {}),
+    ...(isSelection(v.selection) ? { selection: v.selection } : {}),
   };
 }
 
@@ -159,6 +177,7 @@ export function sessionsFromFiles(files: readonly LoadedFile[]): { sessions: Lab
       sessions.push({
         id, createdAt: c.createdAt, transcript: c.transcript, words: c.words, samples: c.samples,
         labels: labelsFor(c.words, lab), wav: g.wav?.blob, viewport: c.viewport,
+        clicks: c.clicks ?? [], selection: c.selection ?? null,
       });
     } catch (e) {
       errors.push(`${id}: ${(e as Error).message}`);

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { CursorSample, Word } from "./protocol.ts";
+import type { CursorSample, PageClick, PageSelection, Word } from "./protocol.ts";
 import {
-  ALGORITHMS, DWELL_TIE_EPS, atStart, dwell, dwellMode, formatPointingContext, isPointingWord, mode, normalizeWord,
-  resolvePointing, sampleSpeeds, tagFromPath, wordWindow,
+  ALGORITHMS, DWELL_TIE_EPS, atStart, dedupeClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
+  mode, normalizeWord, resolvePointing, sampleSpeeds, tagFromPath, truncateText, wordNear, wordWindow,
 } from "./pointing.ts";
 
 const T0 = 10_000; // tAudioStart
@@ -218,9 +218,72 @@ describe("formatPointingContext", () => {
     expect(formatPointingContext([{ word: "here", wordStart: 0, algorithm: "mode", sample }], "mode")).toBe(`Pointing: "here" → <p>`);
   });
 
+  it("names the container when it differs from the label", () => {
+    const base = { t: 0, x: 0, y: 0, scrollX: 0, scrollY: 0, elementPath: "main > article:nth-of-type(1) > h3", dataSource: "web/cursor/demo/demo.html:36", label: "Live queries" };
+    const line = (container: string | null) =>
+      formatPointingContext([{ word: "this", wordStart: 0, algorithm: "dwellMode", sample: { ...base, container } }]);
+    expect(line("Card: Live queries")).toBe(`Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]`);
+    expect(line(null)).toBe(`Pointing: "this" → <h3> "Live queries" [data-source=web/cursor/demo/demo.html:36]`);
+    expect(line("Live queries")).toBe(`Pointing: "this" → <h3> "Live queries" [data-source=web/cursor/demo/demo.html:36]`);
+  });
+
   it("tagFromPath", () => {
     expect(tagFromPath("main > td:nth-of-type(2)")).toBe("td");
     expect(tagFromPath("#demo-root")).toBeNull();
     expect(tagFromPath(null)).toBeNull();
+  });
+});
+
+describe("formatPageContext", () => {
+  const DS = "web/cursor/demo/demo.html";
+  const th = { elementPath: "table > thead > tr > th:nth-of-type(4)", dataSource: `${DS}:67`, label: "Price / month", container: "Pricing table" };
+  const cta = { elementPath: "section > button", dataSource: `${DS}:27`, label: "Get started", container: "Hero section" };
+  const click = (t: number, el: typeof th): PageClick => ({ t, x: 1, y: 2, ...el });
+  // "how much is this one" — "this" spans 10_600..10_900
+  const words: Word[] = [w("how", 0.0, 0.2), w("much", 0.2, 0.4), w("is", 0.4, 0.6), w("this", 0.6, 0.9), w("one", 0.9, 1.1)];
+
+  it("one Clicked line per click, naming the word being said", () => {
+    expect(formatPageContext([click(T0 + 700, th)], null, words, T0)).toBe(
+      `Clicked: <th> "Price / month" in "Pricing table" [data-source=${DS}:67] (while saying "this")`,
+    );
+  });
+
+  it("omits the word without words / tAudioStart, or when no word is near", () => {
+    expect(formatPageContext([click(T0 + 700, th)], null, [], T0)).not.toContain("while saying");
+    expect(formatPageContext([click(T0 + 700, th)], null, words, undefined)).not.toContain("while saying");
+    expect(formatPageContext([click(T0 + 5000, th)], null, words, T0)).not.toContain("while saying");
+  });
+
+  it("dedupes consecutive clicks on the same element and keeps the latest 5", () => {
+    const lines = formatPageContext([click(T0 + 900, cta), click(T0 + 100, th), click(T0 + 200, th)], null, words, T0).split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(`"Price / month"`);
+    expect(lines[0]).toContain(`(while saying "how")`);
+    expect(lines[1]).toContain(`"Get started" in "Hero section"`);
+    const many = Array.from({ length: 8 }, (_, i) => click(i * 10, i % 2 ? th : cta));
+    expect(dedupeClicks(many)).toHaveLength(5);
+    expect(dedupeClicks(many)[4]!.t).toBe(70);
+    expect(dedupeClicks([{ t: 0, x: 0, y: 0, elementPath: null, dataSource: null, label: null }])).toEqual([]);
+  });
+
+  it("adds the selected text with its element, dropping a label that only repeats the text", () => {
+    const p = { elementPath: "article > p", dataSource: `${DS}:37`, label: "Charts refresh as rows land. Postgres, MySQL and BigQuery…", container: "Card: Live queries" };
+    const sel: PageSelection = { t: T0, text: "  Charts refresh\n as rows land. ", ...p };
+    expect(formatPageContext([], sel, words, T0)).toBe(`Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=${DS}:37]`);
+    const other: PageSelection = { ...sel, text: "Pricing", label: "Plan", elementPath: "th", container: null };
+    expect(formatPageContext([click(T0 + 700, th)], other, words, T0).split("\n")[1]).toBe(`Selected text: "Pricing" in <th> "Plan" [data-source=${DS}:37]`);
+    expect(formatPageContext([], { ...sel, text: "   " }, words, T0)).toBe("");
+    expect(formatPageContext([], null, words, T0)).toBe("");
+  });
+
+  it("truncates long selections to ~200 chars", () => {
+    expect(truncateText("x".repeat(500))).toHaveLength(200);
+    expect(truncateText("x".repeat(500)).endsWith("…")).toBe(true);
+  });
+
+  it("wordNear picks the nearest span (inside = 0)", () => {
+    expect(wordNear(T0 + 650, words, T0)!.text).toBe("this");
+    expect(wordNear(T0 - 300, words, T0)!.text).toBe("how");
+    expect(wordNear(T0 + 3000, words, T0)).toBeNull();
   });
 });
