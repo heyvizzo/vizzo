@@ -220,8 +220,9 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (hybrid) {
         if (finalArrived) {
           const lines = formatPointingContext(base.pointing);
-          const marked = annotateTranscript(base.words, base.pointing, base.rests);
-          context = [marked ? `Transcript with pointing references: "${marked}"` : "", lines].filter(Boolean).join("\n") || undefined;
+          // Always include Scribe's transcript: a dedicated recognizer, often more accurate than the model's own hearing.
+          const marked = annotateTranscript(base.words, base.pointing, base.rests) ?? base.transcript;
+          context = [marked ? `Transcript (from a dedicated speech recognizer; trust it over what you heard if they differ): "${marked}"` : "", lines].filter(Boolean).join("\n") || undefined;
         }
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], pointingInjected: !!context, pointingMissed: !finalArrived };
       }
