@@ -15,6 +15,7 @@ import type { Segment } from "../../shared/protocol.ts";
 import type { RealtimeSession, ToolCall } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
 import { acquireRealtime, LazyScribe, type RealtimeLease, type RealtimeListener } from "./shared.ts";
+import { formatHistoryRecap, getConversation } from "../conversation.ts";
 import { errMessage, sleep, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
@@ -53,10 +54,11 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       collectUsage: () => ({
         ...(opusUsage !== undefined ? { anthropic: { opus: opusUsage } } : {}),
         ...(lease ? { openai: lease.turnUsage() } : {}),
-        ...(hybrid ? { scribeSeconds: scribe!.seconds } : {}),
+        ...(scribe ? { scribeSeconds: scribe.seconds } : {}),
       }),
     });
-    const scribe = hybrid ? new LazyScribe(base, deps) : null;
+    // C: Scribe for pointing. A in chat mode: Scribe only for the transcript (history + display); never waited on.
+    const scribe = hybrid || cfg.memory ? new LazyScribe(base, deps) : null;
 
     const listener: RealtimeListener = {
       onAudio(pcm) {
@@ -137,7 +139,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       finalArrived = true;
       base.sttFinal(fin.text, fin.words);
       pointingMarked = true;
-      base.resolvePointing(fin.words, responding ? { pointingMissed: true, late: true } : {});
+      base.resolvePointing(fin.words, hybrid && responding ? { pointingMissed: true, late: true } : {});
     }
 
     async function run(): Promise<void> {
@@ -146,14 +148,23 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         scribe.commit();
         const finalP = tag("scribe", scribe.final());
         finalSettled = finalP.then(onFinal, (e) => { if (!base.isFinished) base.softError("scribe", e); });
-        if (cfg.hybridWaitMs > 0) await Promise.race([finalSettled, sleep(cfg.hybridWaitMs)]);
+        if (hybrid && cfg.hybridWaitMs > 0) await Promise.race([finalSettled, sleep(cfg.hybridWaitMs)]);
       }
       const l = await acquire();
       if (base.isFinished) return;
       let context: string | undefined;
-      if (scribe) {
+      if (hybrid) {
         if (finalArrived) context = formatPointingContext(base.pointing) || undefined;
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], pointingInjected: !!context, pointingMissed: !finalArrived };
+      }
+      if (cfg.memory) {
+        // Turns this session didn't hear (handled by B, or before a reopen) go in as a text recap.
+        const unseen = getConversation(ctx.connection).filter((t) => !l.seenTurns.has(t.turnId));
+        const recap = formatHistoryRecap(unseen);
+        if (recap) context = context ? `${recap}\n\n${context}` : recap;
+        for (const t of unseen) l.seenTurns.add(t.turnId);
+        l.seenTurns.add(ctx.turnId);
+        base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], historyRecapTurns: unseen.length };
       }
       responding = true;
       l.session.commitAndRespond(context);

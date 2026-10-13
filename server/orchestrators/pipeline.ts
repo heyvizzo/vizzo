@@ -13,6 +13,7 @@ import type { Segment } from "../../shared/protocol.ts";
 import type { TtsStream } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
 import { LazyScribe } from "./shared.ts";
+import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
@@ -84,6 +85,8 @@ class SegmentTts {
 export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator {
   return (ctx) => {
     const cfg = ctx.config;
+    // Chat mode: a snapshot of the earlier turns (this turn is appended by the Session when it ends).
+    const history = cfg.memory ? [...getConversation(ctx.connection)] : undefined;
     const warm = cfg.prewarm;
     const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
     const ttsStreams: SegmentTts[] = [];
@@ -135,7 +138,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         return spoken;
       };
       const route = await tag("haiku", deps.routeWithHaiku({
-        mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode,
+        mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history,
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;
           if (!label) label = kind;
@@ -160,7 +163,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         if (answerTts) answerTts.setLabel("answer");
         let spokenLine = false;
         const opus = await tag("opus", deps.solveWithOpus({
-          mark: base.mark, question: route.delegate.question, pointing, fast: cfg.opusFast,
+          mark: base.mark, question: route.delegate.question, pointing, fast: cfg.opusFast, history,
           onDelta: (d) => base.opus(d),
           onSpokenLine: (line) => {
             if (base.isFinished || spokenLine) return;

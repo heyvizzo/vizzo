@@ -1,5 +1,6 @@
 // Adapter interfaces (ARCHITECTURE §4). Orchestrators depend only on these.
 import type { Mark } from "../clock.ts";
+import type { ChatTurn } from "../conversation.ts";
 import type { PointingTarget, Word } from "../../shared/protocol.ts";
 import type { RealtimeModel, RouterMode, TtsModel } from "../../shared/config.ts";
 
@@ -81,6 +82,8 @@ export type OpenRealtime = (opts: OpenRealtimeOpts) => Promise<RealtimeSession>;
 
 export interface RouteWithHaikuOpts {
   mark: Mark; transcript: string; pointing: PointingTarget[]; mode: RouterMode;
+  /** Chat mode: earlier turns, oldest first. */
+  history?: ChatTurn[];
   /**
    * Text to speak right away. `kind` (T7 addition) says what it is: "ack" = the `ack` field of an
    * ask_opus call (delegation follows), "answer" = a direct text answer (auto mode only).
@@ -97,6 +100,8 @@ export type RouteWithHaiku = (opts: RouteWithHaikuOpts) => Promise<{ delegate: n
 
 export interface SolveWithOpusOpts {
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
+  /** Chat mode: earlier turns, oldest first. */
+  history?: ChatTurn[];
   /** Fires once the SPOKEN: line is complete. */
   onSpokenLine: (line: string) => void;
   /** Full answer stream. */

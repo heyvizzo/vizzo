@@ -16,6 +16,8 @@ export interface RunConfig {
   /** Pointing window offsets (ARCHITECTURE §6). */
   preMs: number;
   postMs: number;
+  /** Chat mode: keep conversation history across turns (and approaches) on this connection. */
+  memory: boolean;
 }
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -28,6 +30,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   prewarm: true,
   preMs: 300,
   postMs: 200,
+  memory: false,
 };
 
 export const MODELS = {

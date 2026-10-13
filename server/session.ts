@@ -14,6 +14,8 @@ import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
 import { computeCost } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
+import { getConversation, resetConversation } from "./conversation.ts";
+import { dropRealtime } from "./orchestrators/shared.ts";
 
 export const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
   realtime: realtimeOrchestrator,
@@ -134,6 +136,12 @@ export class Session {
           this.turn = null;
         }
         return;
+      case "conversation.reset":
+        this.turn?.handlers?.cancel();
+        this.turn = null;
+        resetConversation(this.connection);
+        dropRealtime(this.connection);
+        return;
     }
   }
 
@@ -185,6 +193,13 @@ export class Session {
 
   private async finishTurn(turn: Turn, result: TurnResult): Promise<void> {
     if (this.turn !== turn) return;
+    // Chat mode: record the turn right away, so a quick follow-up already sees it.
+    if (turn.config.memory && (result.transcript || result.voiceText)) {
+      getConversation(this.connection).push({
+        turnId: turn.turnId, approach: turn.config.approach,
+        user: result.transcript, assistant: result.voiceText.trim(), detail: result.opusText,
+      });
+    }
     // Wait for the client to report every segment we sent as played.
     await new Promise<void>((resolve) => {
       const check = () => [...turn.segmentsSent].every((s) => turn.segmentsPlayed.has(s)) && resolve();

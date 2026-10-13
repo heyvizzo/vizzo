@@ -8,6 +8,7 @@ import { MODELS } from "../../shared/config.ts";
 import type { PointingTarget } from "../../shared/protocol.ts";
 import { JsonStringFieldExtractor, SpokenLineParser } from "./claudeParse.ts";
 import type { RouteWithHaiku, SolveWithOpus } from "./types.ts";
+import { trimDetail, type ChatTurn } from "../conversation.ts";
 
 // ── Client injection (tests swap in a mock) ────────────────────────────────
 
@@ -162,6 +163,20 @@ export const ROUTER_TOOL: Anthropic.Tool = {
 
 export interface RouterInput { ack: string; question: string }
 
+type HistoryMessage = { role: "user" | "assistant"; content: string };
+
+/** Earlier chat turns as alternating user/assistant messages (never empty content). */
+export function historyMessages(history: ChatTurn[], forOpus: boolean): HistoryMessage[] {
+  return history.flatMap((t): HistoryMessage[] => [
+    { role: "user", content: t.user || "(inaudible)" },
+    {
+      role: "assistant",
+      // Opus answers in the SPOKEN:-first format; replay its own detailed answer when it gave one.
+      content: (forOpus ? (t.detail ? trimDetail(t.detail) : `SPOKEN: ${t.assistant}`) : t.assistant) || "(no reply)",
+    },
+  ]);
+}
+
 export function validateRouterInput(v: unknown): RouterInput | null {
   if (typeof v !== "object" || v === null) return null;
   const { ack, question } = v as Record<string, unknown>;
@@ -169,7 +184,9 @@ export function validateRouterInput(v: unknown): RouterInput | null {
   return { ack, question: question.trim() };
 }
 
-export function buildRouterParams(transcript: string, pointing: PointingTarget[], mode: "forced" | "auto"): Anthropic.MessageStreamParams {
+export function buildRouterParams(
+  transcript: string, pointing: PointingTarget[], mode: "forced" | "auto", history: ChatTurn[] = [],
+): Anthropic.MessageStreamParams {
   return {
     model: modelId(MODELS.haiku),
     max_tokens: 2048,
@@ -180,15 +197,15 @@ export function buildRouterParams(transcript: string, pointing: PointingTarget[]
     tool_choice: mode === "forced"
       ? { type: "tool", name: ROUTER_TOOL.name, disable_parallel_tool_use: true }
       : { type: "auto", disable_parallel_tool_use: true },
-    messages: [{
+    messages: [...historyMessages(history, false), {
       role: "user",
       content: `${mode === "forced" ? "Mode: always delegate with ask_opus." : "Mode: you may answer trivial questions directly; otherwise call ask_opus."}\nTranscript: "${transcript}"\n${formatPointingForPrompt(pointing)}`,
     }],
   };
 }
 
-export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointing, mode, onSpokenDelta, onSpokenEnd }) => {
-  const params = buildRouterParams(transcript, pointing, mode);
+export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointing, mode, history, onSpokenDelta, onSpokenEnd }) => {
+  const params = buildRouterParams(transcript, pointing, mode, history);
   const ack = new JsonStringFieldExtractor("ack");
   let firstToken = false;
   let toolIndex = -1;
@@ -268,7 +285,7 @@ export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointin
 const FAST_BETA = "fast-mode-2026-02-01";
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
-export function buildOpusParams(question: string, pointing: PointingTarget[], fast: boolean): BetaMessageStreamParams {
+export function buildOpusParams(question: string, pointing: PointingTarget[], fast: boolean, history: ChatTurn[] = []): BetaMessageStreamParams {
   const p = prompts();
   return {
     model: modelId(MODELS.opus),
@@ -278,7 +295,7 @@ export function buildOpusParams(question: string, pointing: PointingTarget[], fa
       { type: "text", text: p.opus },
       { type: "text", text: p.fixture, cache_control: { type: "ephemeral" } },
     ],
-    messages: [{
+    messages: [...historyMessages(history, true), {
       role: "user",
       content: `Question: ${question}\n\nPointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}`,
     }],
@@ -291,7 +308,7 @@ export function buildOpusParams(question: string, pointing: PointingTarget[], fa
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, onSpokenLine, onDelta }) => {
+export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, onSpokenLine, onDelta }) => {
   let text = "";
   let firstToken = false;
   let spokenReady = false;
@@ -304,7 +321,7 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
   });
 
   const run = async (useFast: boolean): Promise<Anthropic.Beta.Messages.BetaMessage> => {
-    const params = buildOpusParams(question, pointing, useFast);
+    const params = buildOpusParams(question, pointing, useFast, history);
     mark("opus.request", { model: params.model, fast: useFast, ...(fastFellBack ? { fastFallback: true } : {}) });
     // Fast mode: no SDK retries, so a 429 falls back to standard speed right away.
     const stream = getClient().beta.messages.stream(params, useFast ? { maxRetries: 0 } : undefined);

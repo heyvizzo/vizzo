@@ -47,6 +47,7 @@ export function variantKey(c: RunConfig): string {
   if (c.approach === "hybrid") parts.push(`wait:${c.hybridWaitMs}`);
   if (c.approach !== "cursor-only") parts.push(c.opusFast ? "opus:fast" : "opus:std");
   if (!c.prewarm) parts.push("cold");
+  if (c.memory) parts.push("chat");
   return parts.join(" · ");
 }
 

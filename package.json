@@ -17,7 +17,8 @@
     "smoke:realtime": "tsx scripts/smoke-realtime.ts",
     "smoke:tts": "tsx scripts/smoke-tts.ts",
     "smoke:claude": "tsx scripts/smoke-claude.ts",
-    "smoke:e2e": "tsx scripts/smoke-e2e.ts"
+    "smoke:e2e": "tsx scripts/smoke-e2e.ts",
+    "smoke:chat": "tsx scripts/smoke-chat.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",

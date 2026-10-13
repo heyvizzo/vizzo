@@ -34,7 +34,9 @@ export type ClientMsg =
   | { type: "audio.played"; turnId: string; segment: Segment; tPlayed: number }
   | { type: "turn.cancel"; turnId: string }
   /** Debug: while on (and no turn is active), the server echoes binary audio frames back. Used by /audio-test. */
-  | { type: "echo"; on: boolean };
+  | { type: "echo"; on: boolean }
+  /** Chat mode: forget the conversation (and drop the Realtime session, which holds its own history). */
+  | { type: "conversation.reset" };
 
 // ── server → client ──────────────────────────────
 export type ServerMsg =

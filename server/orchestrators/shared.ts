@@ -75,6 +75,8 @@ export interface RealtimeListener {
 class RealtimeHolder {
   listener: RealtimeListener | null = null;
   dead = false;
+  /** Chat turns this session has in its own history (it handled them, or got them as a recap). */
+  readonly seenTurns = new Set<string>();
   constructor(readonly session: RealtimeSession, readonly model: RealtimeModel) {
     session.onAudio((b) => this.listener?.onAudio(b));
     session.onText((d) => this.listener?.onText(d));
@@ -97,6 +99,8 @@ export interface RealtimeLease {
   reused: boolean;
   /** Usage of this turn only (the session's counters are cumulative). */
   turnUsage(): RealtimeUsage;
+  /** Chat turn IDs already in this session's conversation (chat mode). */
+  seenTurns: Set<string>;
   /** Detach from the turn. `inFlight`: a response may still be running, so the session is closed and dropped. */
   release(inFlight: boolean): void;
 }
@@ -128,7 +132,7 @@ export async function acquireRealtime(
     holder.listener = listener;
     const base = snapshot(holder.session.usage);
     return {
-      session: holder.session, cold: true, reused: false,
+      session: holder.session, cold: true, reused: false, seenTurns: holder.seenTurns,
       turnUsage: () => diffUsage(holder.session.usage, base),
       release: () => { holder.listener = null; holder.session.close(); },
     };
@@ -157,7 +161,7 @@ export async function acquireRealtime(
   holder.listener = listener;
   const base = snapshot(holder.session.usage);
   return {
-    session: holder.session, cold: false, reused,
+    session: holder.session, cold: false, reused, seenTurns: holder.seenTurns,
     turnUsage: () => diffUsage(holder.session.usage, base),
     release: (inFlight) => {
       if (holder.listener === listener) holder.listener = null;
@@ -167,4 +171,9 @@ export async function acquireRealtime(
       else if (inFlight || holder.dead) holder.session.close();
     },
   };
+}
+
+/** Drop the connection's Realtime session (chat "New conversation": its history lives in the session). */
+export function dropRealtime(conn: TurnContext["connection"]): void {
+  conn.delete(CACHE_KEY);
 }

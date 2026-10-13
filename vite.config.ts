@@ -18,6 +18,7 @@ export default defineConfig({
       input: {
         index: resolve(import.meta.dirname, "web/index.html"),
         cursor: resolve(import.meta.dirname, "web/cursor.html"),
+        chat: resolve(import.meta.dirname, "web/chat.html"),
         audioTest: resolve(import.meta.dirname, "web/audio-test.html"),
       },
     },

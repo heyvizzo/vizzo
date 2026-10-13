@@ -314,6 +314,8 @@ The cursor lab saves (and loads, by file name) three files per session; `Uxx` is
 - **Errors / cancel.** Any adapter failure → `error {source: scribe|openai|tts|haiku|opus|timeout}` and `done` resolves with `error` set. Overall turn timeout 60 s from `turn.start`. `cancel()` closes every socket opened for the turn (and the reusable Realtime session only if a response was in flight).
 - **Headless check.** `npm run smoke:e2e` (real keys; SKIPs per approach) and `npm run smoke:e2e -- --fake` (fake adapters over the real `/ws`) print one RunRecord per approach with marks relative to release.
 
+**Chat mode (`RunConfig.memory`, the `/chat.html` page).** The Session appends each finished turn (`{user, assistant, detail}`) to a per-connection conversation log (`server/conversation.ts`); `conversation.reset` clears it and drops the Realtime session. B sends the log to Haiku and Opus as prior messages. A/C: the reused Realtime session remembers turns it handled; turns it didn't hear (B turns, or turns before a reopen) are injected once as a text recap in the context item. In chat mode A also tees audio to Scribe (never waited on) so its turns have a transcript. Benchmark runs keep `memory: false`.
+
 ## 8. Decisions and alternatives
 
 - **One server WebSocket for everything** (not browser WebRTC straight to OpenAI). Same network path for every approach, keys stay server-side, and every mark is instrumented in one place. A browser→OpenAI WebRTC variant of approach A is a follow-up, to measure how much the server hop costs.
