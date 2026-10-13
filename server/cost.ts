@@ -1,7 +1,7 @@
 // Cost per turn from usage × prices in docs/API-NOTES.md §Prices (USD).
 //
 // Usage shapes (TurnResult.usage, built by the orchestrators):
-//   anthropic: { haiku?: Anthropic usage, opus?: Anthropic usage }  — {input_tokens, output_tokens,
+//   anthropic: { haiku?: Anthropic usage, opus?: Anthropic usage, fillers?: Anthropic usage (progress lines) }  — {input_tokens, output_tokens,
 //              cache_read_input_tokens, cache_creation_input_tokens, speed?}; input_tokens excludes cache reads/writes.
 //   openai:    RealtimeUsage for this turn only — { responses: raw[], totals: {inputText, inputAudio, cachedText, cachedAudio, outputText, outputAudio, ...} }
 //   elevenChars: TTS characters sent;  scribeSeconds: audio seconds sent to Scribe.
@@ -70,7 +70,8 @@ export function realtimeCost(u: unknown, model: RunConfig["realtimeModel"]): num
 export function costBreakdown(config: RunConfig, usage: Usage): CostBreakdown {
   const a = obj(usage.anthropic);
   const b = {
-    haiku: a.haiku ? haikuCost(a.haiku) : 0,
+    // Router + the progress-lines call (both Haiku).
+    haiku: (a.haiku ? haikuCost(a.haiku) : 0) + (a.fillers ? haikuCost(a.fillers) : 0),
     opus: a.opus ? opusCost(a.opus, config.opusFast) : 0,
     openai: usage.openai ? realtimeCost(usage.openai, config.realtimeModel) : 0,
     tts: num(usage.elevenChars) * PRICES.elevenPerChar,

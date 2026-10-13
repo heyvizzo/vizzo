@@ -54,3 +54,12 @@ describe("cost", () => {
     expect(computeCost(cfg(), { anthropic: "nope", openai: 42, elevenChars: Number.NaN })).toBe(0);
   });
 });
+
+describe("progress lines", () => {
+  it("the Haiku call that writes them is billed with the router", () => {
+    const fillers = { input_tokens: 346, output_tokens: 85, cache_creation_input_tokens: 809, cache_read_input_tokens: 0 };
+    const b = costBreakdown(DEFAULT_CONFIG, { anthropic: { fillers } });
+    // 346 × $0.10 + 809 × $0.125 (cache write) + 85 × $0.50, per million
+    expect(b.haiku).toBeCloseTo((346 * 0.1 + 809 * 0.125 + 85 * 0.5) / 1e6, 10);
+  });
+});
