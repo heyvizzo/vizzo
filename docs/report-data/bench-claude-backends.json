@@ -1,0 +1,630 @@
+{
+  "started": "2026-10-13T22:00:17.470Z",
+  "N": {
+    "router": 8,
+    "fillers": 5,
+    "opus": 4,
+    "e2e": 4
+  },
+  "runs": [
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 0,
+      "ttft": 981.8314169999999,
+      "decision": 1246.232667,
+      "ack": 1248.4389999999999,
+      "total": 1821.9350419999998,
+      "costUsd": 0.000154
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 1,
+      "ttft": 899.9099999999999,
+      "decision": 1023.534834,
+      "ack": 1027.632334,
+      "total": 1636.710459,
+      "costUsd": 0.0001535
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 2,
+      "ttft": 649.9922920000008,
+      "decision": 933.5300000000007,
+      "ack": 933.6934579999997,
+      "total": 1402.9654580000006,
+      "costUsd": 0.000147
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 3,
+      "ttft": 686.8461660000012,
+      "decision": 953.5801659999997,
+      "ack": 954.0587910000013,
+      "total": 1465.4511249999996,
+      "costUsd": 0.000148
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 4,
+      "ttft": 675.8052500000013,
+      "decision": 882.5328330000011,
+      "ack": 884.3722500000003,
+      "total": 1384.7457910000012,
+      "costUsd": 0.000147
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 5,
+      "ttft": 729.6317090000011,
+      "decision": 988.6222500000003,
+      "ack": 990.8206250000003,
+      "total": 1507.2172500000015,
+      "costUsd": 0.000148
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 6,
+      "ttft": 804.5397090000006,
+      "decision": 974.5505419999972,
+      "ack": 976.7259589999994,
+      "total": 1526.163999999997,
+      "costUsd": 0.000157
+    },
+    {
+      "variant": "api",
+      "role": "router",
+      "i": 7,
+      "ttft": 722.6380419999987,
+      "decision": 1000.2652500000004,
+      "ack": 1000.6968330000018,
+      "total": 1498.7851670000018,
+      "costUsd": 0.00014749999999999998
+    },
+    {
+      "variant": "api",
+      "role": "fillers",
+      "i": 0,
+      "ttft": null,
+      "total": 1271.8522909999992,
+      "costUsd": 0.00009129
+    },
+    {
+      "variant": "api",
+      "role": "fillers",
+      "i": 1,
+      "ttft": null,
+      "total": 1125.1626250000045,
+      "costUsd": 0.00008529
+    },
+    {
+      "variant": "api",
+      "role": "fillers",
+      "i": 2,
+      "ttft": null,
+      "total": 1105.5351660000015,
+      "costUsd": 0.00008529
+    },
+    {
+      "variant": "api",
+      "role": "fillers",
+      "i": 3,
+      "ttft": null,
+      "total": 1330.1279159999976,
+      "costUsd": 0.00008679
+    },
+    {
+      "variant": "api",
+      "role": "fillers",
+      "i": 4,
+      "ttft": null,
+      "total": 1256.6173340000023,
+      "costUsd": 0.00008679
+    },
+    {
+      "variant": "api",
+      "role": "opus",
+      "i": 0,
+      "ttft": 1449.918749999997,
+      "spoken": 2604.948833000002,
+      "total": 7319.621832999997,
+      "costUsd": 0.0170668
+    },
+    {
+      "variant": "api",
+      "role": "opus",
+      "i": 1,
+      "ttft": 1329.2987500000017,
+      "spoken": 2532.0068329999995,
+      "total": 7168.725833000004,
+      "costUsd": 0.0169068
+    },
+    {
+      "variant": "api",
+      "role": "opus",
+      "i": 2,
+      "ttft": 1532.8772080000053,
+      "spoken": 1871.855792000002,
+      "total": 6824.014500000005,
+      "costUsd": 0.016706799999999997
+    },
+    {
+      "variant": "api",
+      "role": "opus",
+      "i": 3,
+      "ttft": 1684.906582999989,
+      "spoken": 3035.462999999989,
+      "total": 7963.664249999987,
+      "costUsd": 0.017026799999999998
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 0,
+      "ttft": 946.4214580000116,
+      "decision": 1155.6151660000032,
+      "ack": 1156.1720410000125,
+      "total": 1764.5465000000113,
+      "costUsd": 0.00010402999999999999,
+      "cliCostUsd": 0.00010403,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 1,
+      "ttft": 738.0783749999973,
+      "decision": 924.4437080000062,
+      "ack": 925.5123750000057,
+      "total": 1388.3371659999975,
+      "costUsd": 0.00010303,
+      "cliCostUsd": 0.00010303000000000001,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 2,
+      "ttft": 807.3694169999944,
+      "decision": 930.9604999999865,
+      "ack": 931.9435419999936,
+      "total": 1474.697874999998,
+      "costUsd": 0.00010753,
+      "cliCostUsd": 0.00010753000000000001,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 3,
+      "ttft": 1407.677457999991,
+      "decision": 1454.1091250000027,
+      "ack": 1579.8708329999936,
+      "total": 2160.1737500000017,
+      "costUsd": 0.00011203,
+      "cliCostUsd": 0.00011203000000000001,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 4,
+      "ttft": 1083.8250829999888,
+      "decision": 1084.2197499999893,
+      "ack": 1244.4542499999952,
+      "total": 1869.1787079999922,
+      "costUsd": 0.00011253,
+      "cliCostUsd": 0.00011253000000000001,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 5,
+      "ttft": 832.3966250000085,
+      "decision": 1028.4740830000082,
+      "ack": 1029.3322920000064,
+      "total": 1526.7740420000046,
+      "costUsd": 0.00010952999999999999,
+      "cliCostUsd": 0.00010953,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 6,
+      "ttft": 1289.835957999996,
+      "decision": 1478.6348330000037,
+      "ack": 1479.4648750000051,
+      "total": 2055.0550829999993,
+      "costUsd": 0.00010452999999999999,
+      "cliCostUsd": 0.00010453,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "router",
+      "i": 7,
+      "ttft": 1098.1192080000037,
+      "decision": 1343.0959169999987,
+      "ack": 1344.083958000003,
+      "total": 1897.4884579999925,
+      "costUsd": 0.00010703,
+      "cliCostUsd": 0.00010703000000000001,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "fillers",
+      "i": 0,
+      "ttft": null,
+      "total": 1365.4015409999993,
+      "costUsd": 0.00004674,
+      "cliCostUsd": 0.000046739999999999996,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "fillers",
+      "i": 1,
+      "ttft": null,
+      "total": 975.8041249999951,
+      "costUsd": 0.00003924,
+      "cliCostUsd": 0.00003924,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "fillers",
+      "i": 2,
+      "ttft": null,
+      "total": 1240.0035419999913,
+      "costUsd": 0.00010073999999999999,
+      "cliCostUsd": 0.00010074,
+      "warm": true,
+      "error": "no lines"
+    },
+    {
+      "variant": "cli-warm",
+      "role": "fillers",
+      "i": 3,
+      "ttft": null,
+      "total": 1533.9542920000094,
+      "costUsd": 0.00004574,
+      "cliCostUsd": 0.00004574,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "fillers",
+      "i": 4,
+      "ttft": null,
+      "total": 959.0095409999776,
+      "costUsd": 0.00004074,
+      "cliCostUsd": 0.00004074,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "opus",
+      "i": 0,
+      "ttft": 664.1708749999816,
+      "spoken": 1615.2584999999963,
+      "total": 6257.85491699999,
+      "costUsd": 0.016210799999999997,
+      "cliCostUsd": 0.0162108,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "opus",
+      "i": 1,
+      "ttft": 727.4341669999994,
+      "spoken": 1700.1348339999968,
+      "total": 6208.288958999998,
+      "costUsd": 0.0156708,
+      "cliCostUsd": 0.0156708,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "opus",
+      "i": 2,
+      "ttft": 812.2897919999959,
+      "spoken": 1864.876499999984,
+      "total": 6693.804791999981,
+      "costUsd": 0.0160708,
+      "cliCostUsd": 0.0160708,
+      "warm": true
+    },
+    {
+      "variant": "cli-warm",
+      "role": "opus",
+      "i": 3,
+      "ttft": 647.72233400002,
+      "spoken": 1632.4303749999963,
+      "total": 6459.194542000012,
+      "costUsd": 0.0163508,
+      "cliCostUsd": 0.0163508,
+      "warm": true
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 0,
+      "ttft": 1875.3752500000119,
+      "decision": 2033.2617500000051,
+      "ack": 2034.0335000000196,
+      "total": 2584.3538750000007,
+      "costUsd": 0.00010452999999999999,
+      "cliCostUsd": 0.00010453,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 1,
+      "ttft": 1312.673792000016,
+      "decision": 1514.249334000022,
+      "ack": 1515.3862500000105,
+      "total": 2217.0459170000104,
+      "costUsd": 0.00010402999999999999,
+      "cliCostUsd": 0.00010403,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 2,
+      "ttft": 1507.2650830000057,
+      "decision": 1619.650958000013,
+      "ack": 1620.2235000000219,
+      "total": 2166.348458000022,
+      "costUsd": 0.00009653,
+      "cliCostUsd": 0.00009653000000000001,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 3,
+      "ttft": 2486.6644999999844,
+      "decision": 2882.0727919999918,
+      "ack": 2882.916082999989,
+      "total": 3291.6169579999987,
+      "costUsd": 0.00011352999999999999,
+      "cliCostUsd": 0.00011353,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 4,
+      "ttft": 1533.798625000025,
+      "decision": 1687.7139580000076,
+      "ack": 1689.1540830000013,
+      "total": 2213.9834580000024,
+      "costUsd": 0.00010203,
+      "cliCostUsd": 0.00010203000000000001,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 5,
+      "ttft": 1370.0829999999842,
+      "decision": 1535.9559589999844,
+      "ack": 1537.8571249999804,
+      "total": 2074.778833999997,
+      "costUsd": 0.00010603,
+      "cliCostUsd": 0.00010603000000000001,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 6,
+      "ttft": 1403.5474579999864,
+      "decision": 1437.3211249999877,
+      "ack": 1595.027166999993,
+      "total": 2215.573708000011,
+      "costUsd": 0.00009902999999999999,
+      "cliCostUsd": 0.00009903,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "router",
+      "i": 7,
+      "ttft": 1322.0657920000085,
+      "decision": 1472.7047500000044,
+      "ack": 1493.9177499999932,
+      "total": 1992.0257920000004,
+      "costUsd": 0.00011352999999999999,
+      "cliCostUsd": 0.00011353,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "fillers",
+      "i": 0,
+      "ttft": null,
+      "total": 2234.0091660000035,
+      "costUsd": 0.00004474,
+      "cliCostUsd": 0.000044739999999999995,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "fillers",
+      "i": 1,
+      "ttft": null,
+      "total": 1935.1463329999824,
+      "costUsd": 0.00004374,
+      "cliCostUsd": 0.00004374,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "fillers",
+      "i": 2,
+      "ttft": null,
+      "total": 1664.2160419999855,
+      "costUsd": 0.00004224,
+      "cliCostUsd": 0.00004224,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "fillers",
+      "i": 3,
+      "ttft": null,
+      "total": 1689.7719999999972,
+      "costUsd": 0.00004424,
+      "cliCostUsd": 0.000044239999999999997,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "fillers",
+      "i": 4,
+      "ttft": null,
+      "total": 2122.492749999976,
+      "costUsd": 0.00004124,
+      "cliCostUsd": 0.000041240000000000005,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "opus",
+      "i": 0,
+      "ttft": 1169.226708000002,
+      "spoken": 2185.20529100002,
+      "total": 6816.385915999999,
+      "costUsd": 0.0162308,
+      "cliCostUsd": 0.0162308,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "opus",
+      "i": 1,
+      "ttft": 1371.8371669999906,
+      "spoken": 2414.064207999996,
+      "total": 6993.8868749999965,
+      "costUsd": 0.015710799999999997,
+      "cliCostUsd": 0.015710799999999997,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "opus",
+      "i": 2,
+      "ttft": 1330.3540409999841,
+      "spoken": 2368.9462079999794,
+      "total": 7355.602832999983,
+      "costUsd": 0.0164308,
+      "cliCostUsd": 0.0164308,
+      "warm": false
+    },
+    {
+      "variant": "cli-cold",
+      "role": "opus",
+      "i": 3,
+      "ttft": 1167.6100829999777,
+      "spoken": 2344.3166249999776,
+      "total": 6529.118207999971,
+      "costUsd": 0.015010799999999998,
+      "cliCostUsd": 0.0150108,
+      "warm": false
+    }
+  ],
+  "e2e": [
+    {
+      "variant": "api",
+      "i": 0,
+      "ttfa": 2384.127583,
+      "tta": 5400.17525,
+      "llmFirst": 2034.3978349531249,
+      "opusFirst": 4354.182747062499,
+      "opusSpoken": 5280.243782218749,
+      "costUsd": 0.029249540972222224
+    },
+    {
+      "variant": "api",
+      "i": 1,
+      "ttfa": 1416.4111250000024,
+      "tta": 6853.556667000001,
+      "llmFirst": 1041.4098769531265,
+      "opusFirst": 5594.5085097656265,
+      "opusSpoken": 6748.1044570312515,
+      "costUsd": 0.03114454097222222
+    },
+    {
+      "variant": "api",
+      "i": 2,
+      "ttfa": 1507.0539159999971,
+      "tta": 4878.629000000001,
+      "llmFirst": 1162.9528066249986,
+      "opusFirst": 3876.1927968593736,
+      "opusSpoken": 4765.831468734374,
+      "costUsd": 0.02882054097222222
+    },
+    {
+      "variant": "api",
+      "i": 3,
+      "ttfa": 1462.4990419999958,
+      "tta": 4426.997583999997,
+      "llmFirst": 1116.7074531249964,
+      "opusFirst": 3378.8751777343714,
+      "opusSpoken": 4250.744562499996,
+      "costUsd": 0.031450040972222225
+    },
+    {
+      "variant": "cli-warm",
+      "i": 0,
+      "ttfa": 2564.0573339999974,
+      "tta": 4652.661959000005,
+      "llmFirst": 2375.3767539062537,
+      "opusFirst": 3561.8809042968787,
+      "opusSpoken": 4540.207320312504,
+      "costUsd": 0.03383566097222222
+    },
+    {
+      "variant": "cli-warm",
+      "i": 1,
+      "ttfa": 1684.5299579999992,
+      "tta": 3804.5507919999945,
+      "llmFirst": 1514.3323193281249,
+      "opusFirst": 2653.74467284375,
+      "opusSpoken": 3688.275190421875,
+      "costUsd": 0.03451266097222222
+    },
+    {
+      "variant": "cli-warm",
+      "i": 2,
+      "ttfa": 1191.9217919999937,
+      "tta": 3360.267624999993,
+      "llmFirst": 892.4776533124968,
+      "opusFirst": 2317.275016593747,
+      "opusSpoken": 3233.460807609372,
+      "costUsd": 0.033879660972222225
+    },
+    {
+      "variant": "cli-warm",
+      "i": 3,
+      "ttfa": 1226.834124999994,
+      "tta": 3598.764041000002,
+      "llmFirst": 982.8418183437461,
+      "opusFirst": 2462.325460921871,
+      "opusSpoken": 3428.138693343746,
+      "costUsd": 0.03542866097222222
+    }
+  ]
+}

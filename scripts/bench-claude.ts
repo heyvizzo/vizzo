@@ -15,6 +15,8 @@ import type { LlmResponse, PointingTarget } from "../shared/protocol.ts";
 const arg = (k: string, d: number) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? Number(process.argv[i + 1]) : d; };
 const N = { router: arg("router", 8), fillers: arg("fillers", 5), opus: arg("opus", 4), e2e: arg("e2e", 3) };
 const SKIP_E2E = process.argv.includes("--skip-e2e");
+/** Re-run only the end-to-end turns, keeping the per-call runs from the last report's raw data. */
+const ONLY_E2E = process.argv.includes("--only-e2e");
 const GAP_MS = 2500; // between runs: lets the replacement agent boot (and evens out the API runs)
 
 if (!hasClaudeCredentials()) { console.log("SKIP bench:claude: OPENROUTER_API_KEY (or ANTHROPIC_API_KEY) not set"); process.exit(0); }
@@ -100,6 +102,8 @@ async function benchE2E(v: Variant, i: number, wavPath: string): Promise<void> {
   const server = await startServer(0, { quiet: true, persist: false });
   const ws = new WebSocket(`ws://localhost:${server.port}/ws`);
   await new Promise((r) => ws.once("open", r));
+  // Same process as the server: its clock is performance.timeOrigin + performance.now(), so the offset is exact.
+  ws.send(JSON.stringify({ type: "clock.sync", rttMs: 0, offsetMs: performance.timeOrigin }));
   const turnId = `e2e-${v}-${i}`;
   const done = new Promise<any>((res) => ws.on("message", (d, bin) => {
     if (bin) return;
@@ -138,8 +142,14 @@ function row(label: string, xs: (number | null | undefined)[]): string {
 }
 
 async function main(): Promise<void> {
-  const started = new Date().toISOString();
-  for (const v of VARIANTS) {
+  let started = new Date().toISOString();
+  if (ONLY_E2E) {
+    const prev = JSON.parse(readFileSync(new URL("../docs/report-data/bench-claude-backends.json", import.meta.url), "utf8"));
+    runs.push(...prev.runs);
+    Object.assign(N, { router: prev.N.router, fillers: prev.N.fillers, opus: prev.N.opus });
+    started = prev.started;
+  }
+  for (const v of ONLY_E2E ? [] : VARIANTS) {
     setVariant(v);
     if (v === "cli-warm") await sleep(3000); // let the pools boot
     console.log(`\n== ${v}`);
@@ -209,7 +219,11 @@ async function main(): Promise<void> {
   ].join("\n");
   mkdirSync(new URL("../docs/report-data", import.meta.url), { recursive: true });
   writeFileSync(new URL("../docs/report-data/bench-claude-backends.json", import.meta.url), JSON.stringify({ started, N, runs, e2e }, null, 2));
-  writeFileSync(new URL("../docs/BENCH-claude-backends.md", import.meta.url), md + "\n");
+  // Keep a hand-written "## Findings" section from the previous report.
+  const reportUrl = new URL("../docs/BENCH-claude-backends.md", import.meta.url);
+  let findings = "";
+  try { const prev = readFileSync(reportUrl, "utf8"); const k = prev.indexOf("\n## Findings"); if (k >= 0) findings = prev.slice(k); } catch { /* first run */ }
+  writeFileSync(reportUrl, md + "\n" + findings);
   console.log("\n" + md);
   process.exit(0);
 }
