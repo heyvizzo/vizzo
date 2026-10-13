@@ -9,7 +9,7 @@
 // Labels: forced mode → the router's speech is always the "ack". Auto mode → `kind` on the first
 // spoken delta decides: "ack" (it called ask_opus) or "answer" (it answered directly). The first TTS
 // socket is opened before the label is known, so its *.ttsFirstByte mark is renamed to the final label.
-import type { RouteIntent, Segment } from "../../shared/protocol.ts";
+import type { LlmPrompt, RouteIntent, Segment } from "../../shared/protocol.ts";
 import type { TtsStream } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
 import { LazyScribe } from "./shared.ts";
@@ -146,6 +146,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         }
         return spoken;
       };
+      const emitPrompt = (prompt: LlmPrompt) => { if (!base.isFinished) ctx.send({ type: "llm.prompt", turnId: ctx.turnId, prompt }); };
       const canBackground = cfg.memory && cfg.backgroundLongTasks && !!ctx.channel;
       let background = false;
       let decided = false;
@@ -160,6 +161,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history, pageContext,
         longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined,
         onDecision: (d) => decide(d.intent, d.estimateS),
+        onPrompt: emitPrompt,
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;
           if (!label) label = kind;
@@ -196,7 +198,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         const fillers = cfg.fillers && deps.generateFillers
           ? new FillerScheduler(
             base,
-            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing })
+            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, onPrompt: emitPrompt })
               .then((r) => { fillerUsage = r.usage; return r.lines; }),
             async (line) => {
               const t = openTts("filler");
@@ -211,6 +213,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         const opus = await tag("opus", deps.solveWithOpus({
           mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext,
           onDelta: (d) => base.opus(d),
+          onPrompt: emitPrompt,
           onSpokenLine: (line) => {
             if (base.isFinished || spokenLine) return;
             spokenLine = true;

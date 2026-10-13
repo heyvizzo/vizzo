@@ -4,7 +4,7 @@ import type { GenerateFillers,
   OpenRealtime, OpenScribe, OpenTts, RealtimeSession, RealtimeUsage, RouteWithHaiku, SolveWithOpus, SttStream, ToolCall, TtsStream,
 } from "../adapters/types.ts";
 import type { Mark } from "../clock.ts";
-import type { RouteIntent, Word } from "../../shared/protocol.ts";
+import type { LlmPrompt, RouteIntent, Word } from "../../shared/protocol.ts";
 import type { OrchestratorDeps } from "./types.ts";
 
 export interface FakeTiming {
@@ -283,7 +283,11 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     return s;
   };
 
-  const routeWithHaiku: RouteWithHaiku = async ({ mark, mode, onDecision, onSpokenDelta, onSpokenEnd }) => {
+  const fakePrompt = (target: LlmPrompt["target"], text: string): LlmPrompt =>
+    ({ target, model: `fake-${target}`, system: [{ label: `${target}.md`, text: "(fake instructions)", cached: true }], messages: [{ role: "user", text, label: "this turn" }] });
+
+  const routeWithHaiku: RouteWithHaiku = async ({ mark, mode, transcript, onDecision, onSpokenDelta, onSpokenEnd, onPrompt }) => {
+    onPrompt?.(fakePrompt("router", `Transcript: "${transcript}"`));
     mark("llm.request", { mode });
     await wait(t.llmFirstMs);
     if (sc.failIn === "haiku") throw new Error("fake haiku: 529 overloaded");
@@ -304,12 +308,14 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     return { delegate: { question: "Why is the features section a CSS grid?", intent: routed, estimateS }, decision, usage };
   };
 
-  const generateFillers: GenerateFillers = async () => {
+  const generateFillers: GenerateFillers = async ({ question, onPrompt }) => {
+    onPrompt?.(fakePrompt("fillers", question));
     await wait(t.llmFirstMs);
     return { lines: sc.fillerLines ?? FILLER_LINES, usage: { input_tokens: 300, output_tokens: 30 } };
   };
 
-  const solveWithOpus: SolveWithOpus = async ({ mark, fast, onSpokenLine, onDelta }) => {
+  const solveWithOpus: SolveWithOpus = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt }) => {
+    onPrompt?.(fakePrompt("opus", `Question: ${question}`));
     mark("opus.request", { fast });
     await wait(t.opusFirstMs);
     if (sc.failIn === "opus") throw new Error("fake opus: 500");

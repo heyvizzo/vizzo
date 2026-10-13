@@ -61,7 +61,7 @@ export class LazyScribe {
 
 // ── OpenAI Realtime (one session per connection, reused across turns) ─────
 
-const REALTIME_INSTRUCTIONS = readFileSync(new URL("../prompts/realtime.md", import.meta.url), "utf8").trim();
+export const REALTIME_INSTRUCTIONS = readFileSync(new URL("../prompts/realtime.md", import.meta.url), "utf8").trim();
 const CACHE_KEY = "realtime";
 
 /** Per-turn callbacks; the session's own callbacks are registered once and dispatch to the current listener. */

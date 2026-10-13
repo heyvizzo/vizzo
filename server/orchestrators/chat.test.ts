@@ -135,3 +135,32 @@ describe("realtime (A) in chat mode", () => {
     expect(s.decision()).toMatchObject({ intent: "clarify", background: false });
   });
 });
+
+describe("prompt capture (llm.prompt)", () => {
+  const targets = (events: ServerMsg[]) => events.filter((e) => e.type === "llm.prompt").map((e) => (e as Extract<ServerMsg, { type: "llm.prompt" }>).prompt.target);
+
+  it("B sends the router, fillers and Opus prompts for the turn", async () => {
+    const s = setup({ approach: "pipeline" });
+    await run(createPipelineOrchestrator(deps({ estimateS: 8 }, 300)), s.ctx);
+    expect(targets(s.events)).toEqual(["router", "fillers", "opus"]);
+    expect(s.events.find((e) => e.type === "llm.prompt")).toMatchObject({ turnId: "t1" });
+  });
+
+  it("A sends the Realtime prompt (instructions, audio, context) and then Opus", async () => {
+    const s = setup({ approach: "realtime", fillers: false });
+    await run(createRealtimeOrchestrator(deps({ estimateS: 8 })), s.ctx);
+    expect(targets(s.events)).toEqual(["realtime", "opus"]);
+    const rt = (s.events.find((e) => e.type === "llm.prompt") as Extract<ServerMsg, { type: "llm.prompt" }>).prompt;
+    expect(rt.system[0]!.label).toMatch(/realtime\.md/);
+    expect(rt.messages.some((m) => m.label === "this turn · audio" && /0\.5 s/.test(m.text))).toBe(true);
+  });
+
+  it("a background job's Opus prompt goes out on the channel with its jobId", async () => {
+    const s = setup({ approach: "pipeline" });
+    await run(createPipelineOrchestrator(deps({ intent: "task", estimateS: 120 })), s.ctx);
+    await until(() => s.channelEvents.some((e) => e.type === "llm.prompt"));
+    const p = s.channelEvents.find((e) => e.type === "llm.prompt") as Extract<ServerMsg, { type: "llm.prompt" }>;
+    expect(p).toMatchObject({ turnId: "t1", jobId: expect.any(String), prompt: { target: "opus" } });
+  });
+});
+

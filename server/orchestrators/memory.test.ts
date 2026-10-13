@@ -104,3 +104,18 @@ describe("router/Opus per-turn context", () => {
     expect(o.messages[o.messages.length - 1]!.content as string).toContain(page);
   });
 });
+
+describe("promptInfo", () => {
+  it("labels system blocks, marks cached ones, labels the last message as this turn, shows the tool choice", async () => {
+    const { buildRouterParams, promptInfo } = await import("../adapters/claude.ts");
+    const params = buildRouterParams("what is this", [], "forced", [B_TURN], { pageContext: "Clicked: <th> \"Price\"" });
+    const p = promptInfo("router", params as never, ["router.md"]);
+    expect(p.system).toEqual([{ label: "router.md", text: expect.stringContaining("intent"), cached: true }]);
+    expect(p.messages.map((m) => [m.role, m.label])).toEqual([["user", "earlier turn"], ["assistant", "earlier turn"], ["user", "this turn"]]);
+    expect(p.messages[2]!.text).toContain("Clicked:");
+    expect(p.toolChoice).toBe("tool: route");
+    expect(p.tools).toEqual(["route"]);
+    expect(p.settings).toMatchObject({ output_config: { effort: "low" } });
+  });
+});
+

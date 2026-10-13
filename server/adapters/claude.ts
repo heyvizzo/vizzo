@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import type { BetaMessage, BetaMessageStreamParams } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { MODELS, type RouterMode } from "../../shared/config.ts";
-import type { Intent, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
+import type { Intent, LlmPrompt, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
 import { kindFor, parseEstimate, RouteInputStream, SpokenLineParser, type RouteFields } from "./claudeParse.ts";
 import type { GenerateFillers, RouteDecision, RouteWithHaiku, SolveWithOpus } from "./types.ts";
 import { trimDetail, type ChatTurn } from "../conversation.ts";
@@ -22,6 +22,40 @@ let log: (msg: string) => void = (msg) => console.info(msg);
 export function setClient(c: ClaudeClient | null): void { client = c; }
 /** Redirect the adapter's one-line usage logs (default: console.info). */
 export function setLogger(fn: (msg: string) => void): void { log = fn; }
+
+// ── Prompt capture (debug view on the Chat page) ───────────────────────────
+
+type AnyParams = {
+  model: string; system?: unknown; messages: { role: string; content: unknown }[];
+  tools?: { name?: string }[]; tool_choice?: { type: string; name?: string };
+  max_tokens?: number; output_config?: unknown; betas?: unknown; speed?: unknown; fallbacks?: unknown;
+};
+
+const blockText = (c: unknown): string =>
+  typeof c === "string" ? c
+    : Array.isArray(c) ? c.map((b: { type?: string; text?: string }) => (b.type === "text" ? b.text ?? "" : `[${b.type ?? "block"}]`)).join("\n")
+    : "";
+
+/** The request as sent, for display: labelled system blocks, messages (last one = this turn), tools, settings. */
+export function promptInfo(target: LlmPrompt["target"], params: AnyParams, systemLabels: string[]): LlmPrompt {
+  const sys = Array.isArray(params.system) ? params.system as { text?: string; cache_control?: unknown }[] : params.system ? [{ text: String(params.system) }] : [];
+  const n = params.messages.length;
+  return {
+    target,
+    model: params.model,
+    system: sys.map((b, i) => ({ label: systemLabels[i] ?? `system ${i + 1}`, text: b.text ?? "", ...(b.cache_control ? { cached: true } : {}) })),
+    messages: params.messages.map((m, i) => ({
+      role: m.role as "user" | "assistant",
+      text: blockText(m.content),
+      label: i === n - 1 ? "this turn" : "earlier turn",
+    })),
+    ...(params.tools?.length ? { tools: params.tools.map((t) => t.name ?? "?") } : {}),
+    ...(params.tool_choice ? { toolChoice: params.tool_choice.name ? `${params.tool_choice.type}: ${params.tool_choice.name}` : params.tool_choice.type } : {}),
+    settings: Object.fromEntries(Object.entries({
+      max_tokens: params.max_tokens, output_config: params.output_config, betas: params.betas, speed: params.speed, fallbacks: params.fallbacks,
+    }).filter(([, v]) => v !== undefined)),
+  };
+}
 
 // ── Provider: OpenRouter (Anthropic-compatible Messages API) or Anthropic directly ──
 
@@ -262,9 +296,10 @@ export function buildRouterParams(
 }
 
 export const routeWithHaiku: RouteWithHaiku = async ({
-  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, onDecision, onSpokenDelta, onSpokenEnd,
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, onDecision, onSpokenDelta, onSpokenEnd, onPrompt,
 }) => {
   const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds });
+  onPrompt?.(promptInfo("router", params as AnyParams, ["router.md"]));
   const route = new RouteInputStream(
     {
       onDecision: (d) => onDecision?.(d),
@@ -391,9 +426,11 @@ export function buildFillersParams(transcript: string, question: string, intent:
 
 const MAX_FILLERS = 3;
 
-export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing }) => {
+export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, onPrompt }) => {
   try {
-    const msg = await getClient().messages.create(buildFillersParams(transcript, question, intent, pointing));
+    const fp = buildFillersParams(transcript, question, intent, pointing);
+    onPrompt?.(promptInfo("fillers", fp as AnyParams, ["fillers.md"]));
+    const msg = await getClient().messages.create(fp);
     if (msg.usage) logUsage("haiku fillers", msg.usage);
     if (msg.stop_reason === "refusal") {
       log("[claude] haiku fillers refused; no fillers");
@@ -450,7 +487,7 @@ export function buildOpusParams(
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext }) => {
+export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt }) => {
   let text = "";
   let firstToken = false;
   let spokenReady = false;
@@ -464,6 +501,7 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
 
   const run = async (useFast: boolean): Promise<Anthropic.Beta.Messages.BetaMessage> => {
     const params = buildOpusParams(question, pointing, useFast, history, intent, pageContext);
+    if (!fastFellBack) onPrompt?.(promptInfo("opus", params as AnyParams, ["opus.md", "fixture codebase"]));
     mark("opus.request", { model: params.model, fast: useFast, ...(intent === "task" ? { intent } : {}), ...(fastFellBack ? { fastFallback: true } : {}) });
     // Fast mode: no SDK retries, so a 429 falls back to standard speed right away.
     const stream = getClient().beta.messages.stream(params, useFast ? { maxRetries: 0 } : undefined);

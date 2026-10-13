@@ -9,7 +9,7 @@ import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type TtsModel } from "../../shared/config.ts";
-import type { PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
+import type { LlmPrompt, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -19,6 +19,7 @@ import { renderOverlay } from "../cursor/overlay.ts";
 import { Sampler } from "../cursor/sampler.ts";
 import { createPageContextRecorder } from "../cursor/pageContext.ts";
 import { clickVerb, relTime } from "../../shared/pointing.ts";
+import { renderPrompt } from "./promptView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
@@ -164,6 +165,8 @@ interface TurnView {
   detail: HTMLDetailsElement;
   detailPre: HTMLElement;
   meta: HTMLElement;
+  /** "Prompt" section, created on the first llm.prompt for the turn. */
+  prompts?: { root: HTMLDetailsElement; summary: HTMLElement; list: HTMLElement; n: number };
 }
 /** Every turn view by turnId (job cards are placed after the turn that started them). */
 const views = new Map<string, TurnView>();
@@ -291,10 +294,44 @@ interface JobCard {
   detail: HTMLDetailsElement;
   detailPre: HTMLElement;
   err: HTMLElement;
+  prompts?: NonNullable<TurnView["prompts"]>;
 }
 const jobs = new Map<string, JobCard>();
 /** Jobs dropped by "New conversation": ignore late updates for them. */
 const droppedJobs = new Set<string>();
+
+/** Prompts of background jobs whose card doesn't exist yet. */
+const pendingJobPrompts = new Map<string, LlmPrompt[]>();
+
+/** The "Prompt" section of a turn or job card: what each model call was sent. */
+function promptSection(host: HTMLElement): NonNullable<TurnView["prompts"]> {
+  const root = el("details", "prompts");
+  const summary = el("summary");
+  const list = el("div", "pcalls");
+  root.append(summary, list);
+  host.append(root);
+  return { root, summary, list, n: 0 };
+}
+
+function pushPrompt(sec: NonNullable<TurnView["prompts"]>, p: LlmPrompt): void {
+  sec.list.append(renderPrompt(p));
+  sec.n++;
+  sec.summary.textContent = `Prompt · ${sec.n} model call${sec.n === 1 ? "" : "s"}`;
+}
+
+function addPrompt(msg: Extract<ServerMsg, { type: "llm.prompt" }>): void {
+  if (msg.jobId) {
+    const card = jobs.get(msg.jobId);
+    if (!card) { pendingJobPrompts.set(msg.jobId, [...(pendingJobPrompts.get(msg.jobId) ?? []), msg.prompt]); return; }
+    card.prompts ??= promptSection(card.root);
+    pushPrompt(card.prompts, msg.prompt);
+    return;
+  }
+  const v = views.get(msg.turnId);
+  if (!v) return;
+  v.prompts ??= promptSection(v.root);
+  pushPrompt(v.prompts, msg.prompt);
+}
 
 function createJobCard(info: JobInfo): JobCard {
   $("empty").hidden = true;
@@ -325,6 +362,8 @@ function upsertJob(info: JobInfo): void {
   if (!c) {
     c = createJobCard(info);
     jobs.set(info.jobId, c);
+    for (const p of pendingJobPrompts.get(info.jobId) ?? []) { c.prompts ??= promptSection(c.root); pushPrompt(c.prompts, p); }
+    pendingJobPrompts.delete(info.jobId);
     if (c.root === messages.lastElementChild) scrollDown();
   }
   if (info.state === "running" && info.elapsedMs != null) c.tStart = performance.now() - info.elapsedMs;
@@ -451,6 +490,8 @@ interface Turn {
   /** Got an audio.segment start: binary frames are now this turn's. */
   segmentOpen: boolean;
   finished: boolean;
+  /** Its clicks / highlights were sent and the page reset (the recorder belongs to the next turn now). */
+  pageDone?: boolean;
 }
 let turn: Turn | null = null;
 /** Turns we cancelled: their late messages are ignored (a late turn.done still renders metrics). */
@@ -540,6 +581,9 @@ async function release(): Promise<void> {
   flushSamples(t);
   clearInterval(t.batchTimer);
   const page = pageRec.stop();
+  // A question's highlights are sent with it; they shouldn't linger or carry over to the next one.
+  pageRec.clear();
+  t.pageDone = true;
   sock.send({ type: "turn.context", turnId: t.turnId, ...page });
   renderPageChips(t.view, page, t.tAudioStart);
   sock.send({ type: "turn.release", turnId: t.turnId, tRelease: t.tRelease });
@@ -566,6 +610,7 @@ function stopAll(): void {
 
 function endTurn(t: Turn): void {
   t.finished = true;
+  if (!t.pageDone) { pageRec.clear(); t.pageDone = true; } // cancelled / failed before release finished
   clearInterval(t.batchTimer);
   clearTimeout(t.timeout);
   t.capture?.stop();
@@ -591,6 +636,7 @@ const INTENT_STATUS: Record<RouteIntent, string> = {
 };
 
 sock.on((msg: ServerMsg) => {
+  if (msg.type === "llm.prompt") return addPrompt(msg);
   if (msg.type === "job") return upsertJob(msg.job);
   if (msg.type === "notice") return onNotice(msg);
   if (!("turnId" in msg) || !msg.turnId) {

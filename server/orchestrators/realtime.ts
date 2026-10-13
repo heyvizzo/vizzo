@@ -14,12 +14,13 @@ import { formatPointingContext } from "../../shared/pointing.ts";
 import type { Segment } from "../../shared/protocol.ts";
 import type { RealtimeSession, ToolCall } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
-import { acquireRealtime, LazyScribe, type RealtimeLease, type RealtimeListener } from "./shared.ts";
+import { acquireRealtime, LazyScribe, REALTIME_INSTRUCTIONS, type RealtimeLease, type RealtimeListener } from "./shared.ts";
 import { formatHistoryRecap, getConversation } from "../conversation.ts";
 import { FillerScheduler } from "./fillers.ts";
 import { DEFAULT_LONG_TASK_SECONDS } from "../adapters/claude.ts";
 import { startJob } from "./jobs.ts";
-import type { Intent, RouteIntent } from "../../shared/protocol.ts";
+import type { Intent, LlmPrompt, RouteIntent } from "../../shared/protocol.ts";
+import type { ChatTurn } from "../conversation.ts";
 import { errMessage, sleep, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
@@ -58,6 +59,8 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
     let openCall: string | null = null;
     let decided = false;
     let writer: SegmentWriter | null = null;
+    let audioBytes = 0;
+    const emitPrompt = (prompt: LlmPrompt) => { if (!base.isFinished) ctx.send({ type: "llm.prompt", turnId: ctx.turnId, prompt }); };
     let textSeg: Segment = "ack";
     // hybrid
     let finalArrived = false;
@@ -173,7 +176,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (cfg.fillers && deps.generateFillers) {
         fillers = new FillerScheduler(
           base,
-          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing })
+          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, onPrompt: emitPrompt })
             .then((r) => { fillerUsage = r.usage; return r.lines; }),
           async (line) => {
             await s.speak(line, "filler");
@@ -184,7 +187,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       }
       opusRuns.push(
         deps.solveWithOpus({
-          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined,
+          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, onPrompt: emitPrompt,
           onSpokenLine: sendResult, onDelta: (d) => base.opus(d),
         })
           .then((r) => {
@@ -236,6 +239,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], historyRecapTurns: unseen.length };
       }
       responding = true;
+      emitPrompt(realtimePrompt(cfg.realtimeModel, audioBytes, context, cfg.memory ? getConversation(ctx.connection).filter((t) => l.seenTurns.has(t.turnId) && t.turnId !== ctx.turnId) : null));
       l.session.commitAndRespond(context);
 
       for (let i = 0; i < MAX_RESPONSES; i++) {
@@ -280,6 +284,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
     return {
       onAudio(pcm) {
         if (base.isFinished) return;
+        audioBytes += pcm.length;
         if (session) session.pushAudio(pcm);
         else audioBuf.push(pcm);
         scribe?.push(pcm);
@@ -296,3 +301,27 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
 
 export const createRealtimeOrchestrator = (deps: OrchestratorDeps): Orchestrator => createRealtimeLikeOrchestrator(deps, false);
 export const realtimeOrchestrator: Orchestrator = createRealtimeOrchestrator(realDeps);
+
+/**
+ * What the Realtime model gets for a turn (debug view): its session instructions, the earlier turns its
+ * conversation holds (chat mode; null = not tracked), this turn's audio and the context item.
+ */
+export function realtimePrompt(model: string, audioBytes: number, context: string | undefined, heard: ChatTurn[] | null): LlmPrompt {
+  const messages: LlmPrompt["messages"] = [];
+  if (heard) {
+    for (const t of heard) {
+      messages.push({ role: "user", text: t.user || "(inaudible)", label: "earlier turn (in the session)" });
+      messages.push({ role: "assistant", text: t.assistant || "(no reply)", label: "earlier turn (in the session)" });
+    }
+  } else {
+    messages.push({ role: "system", text: "(The reused Realtime session also keeps this connection's earlier turns; not tracked outside chat mode.)", label: "note" });
+  }
+  messages.push({ role: "user", text: `(push-to-talk audio, ${(audioBytes / 48000).toFixed(1)} s, sent as input_audio_buffer)`, label: "this turn · audio" });
+  if (context) messages.push({ role: "user", text: context, label: "this turn · context item" });
+  return {
+    target: "realtime", model,
+    system: [{ label: "realtime.md (session instructions)", text: REALTIME_INSTRUCTIONS }],
+    messages, tools: ["ask_opus"], toolChoice: "auto",
+  };
+}
+

@@ -85,6 +85,23 @@ export interface PageHighlight extends ElementRef {
   t: number;
 }
 
+/** Which model call a prompt belongs to. */
+export type PromptTarget = "router" | "fillers" | "opus" | "realtime";
+/** One block of fixed instructions/context (system prompt). `cached`: marked for prompt caching. */
+export interface PromptPart { label: string; text: string; cached?: boolean }
+export interface PromptMessage { role: "user" | "assistant" | "system"; text: string; /** e.g. "earlier turn", "this turn", "audio" */ label?: string }
+/** Exactly what was sent to a model (debug view on the Chat page). */
+export interface LlmPrompt {
+  target: PromptTarget;
+  model: string;
+  system: PromptPart[];
+  messages: PromptMessage[];
+  tools?: string[];
+  toolChoice?: string;
+  /** Other request settings worth seeing (effort, max_tokens, betas…). */
+  settings?: Record<string, unknown>;
+}
+
 /** Everything the user did on the page during a turn (ClientMsg turn.context). */
 export interface PageEvents {
   clicks: PageClick[];
@@ -132,6 +149,8 @@ export type ServerMsg =
   | { type: "turn.done"; turnId: string; run: RunRecord }
   /** The voice layer's decision for this turn, as soon as it's known. background: Opus runs as a job. */
   | { type: "decision"; turnId: string; intent: RouteIntent; estimateS: number | null; background: boolean }
+  /** A model call's exact prompt. jobId: sent by a background job (after its turn ended). */
+  | { type: "llm.prompt"; turnId: string; jobId?: string; prompt: LlmPrompt }
   /** Background job lifecycle (chat mode, long tasks). Not tied to the active turn. */
   | { type: "job"; job: JobInfo }
   /** Frames a spoken job result: binary audio between start and end belongs to it (sent only when no turn is active). */

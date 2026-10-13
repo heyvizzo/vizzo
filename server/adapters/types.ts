@@ -1,7 +1,7 @@
 // Adapter interfaces (ARCHITECTURE §4). Orchestrators depend only on these.
 import type { Mark } from "../clock.ts";
 import type { ChatTurn } from "../conversation.ts";
-import type { Intent, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
+import type { Intent, LlmPrompt, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
 import type { RealtimeModel, RouterMode, TtsModel } from "../../shared/config.ts";
 
 export type { Mark };
@@ -106,6 +106,8 @@ export interface RouteWithHaikuOpts {
   pageContext?: string;
   /** Long-task threshold in seconds when it differs from the prompt's default (RunConfig.longTaskSeconds). */
   longTaskSeconds?: number;
+  /** Called with the exact prompt right before it's sent (debug view). */
+  onPrompt?: (p: LlmPrompt) => void;
   /**
    * Fires once, as soon as the router's `intent` (and `estimate_seconds`, if given) are parsed, i.e. before
    * `say` streams, so the caller knows whether the spoken text is an ack or the whole reply.
@@ -129,6 +131,7 @@ export type RouteWithHaiku = (opts: RouteWithHaikuOpts) => Promise<{
 /** Short spoken progress lines for the wait on a short task (Haiku, called in parallel with Opus). */
 export type GenerateFillers = (opts: {
   transcript: string; question: string; intent: Intent; pointing: PointingTarget[];
+  onPrompt?: (p: LlmPrompt) => void;
 }) => Promise<{ lines: string[]; usage: unknown }>;
 
 export interface SolveWithOpusOpts {
@@ -139,6 +142,8 @@ export interface SolveWithOpusOpts {
   pageContext?: string;
   /** "task": the user wants something changed (Opus describes the change; it can't edit files here). Default question. */
   intent?: Intent;
+  /** Called with the exact prompt right before it's sent (debug view). */
+  onPrompt?: (p: LlmPrompt) => void;
   /** Fires once the SPOKEN: line is complete. */
   onSpokenLine: (line: string) => void;
   /** Full answer stream. */

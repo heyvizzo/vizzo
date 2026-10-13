@@ -101,6 +101,11 @@ export interface PageContextRecorder {
   stop(): PageEvents;
   /** The current turn's events so far (live views). */
   current(): PageEvents;
+  /**
+   * Stop recording and forget the turn: unpaint its highlights and drop the page's text selection (so it
+   * isn't picked up as "already highlighted" by the next turn). For views that don't review past turns.
+   */
+  clear(): void;
   /** Called after every change while recording. */
   onChange: ((ev: PageEvents) => void) | null;
   dispose(): void;
@@ -278,6 +283,17 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
       return events(); // highlights stay painted until the next turn starts
     },
     current: events,
+    clear() {
+      active = false;
+      clicks = [];
+      highlights = [];
+      preselected = null;
+      down = null;
+      keySelectStart = null;
+      const sel = document.getSelection();
+      if (sel && (inside(sel.anchorNode) || inside(sel.focusNode))) sel.removeAllRanges();
+      if (paint) repaint();
+    },
     dispose() {
       active = false;
       root.removeEventListener("pointerdown", onDown, true);
