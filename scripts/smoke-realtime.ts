@@ -2,10 +2,13 @@
 //   npm run smoke:realtime [-- --model gpt-realtime-2.1-mini]
 // Case 1: stream fixtures/smoke/hello.wav, commit, save reply to out/realtime-reply.wav, print marks.
 // Case 2: instruct the model to always call ask_opus, return a fake result, print the answer-segment marks.
+// Case 3: speak() a filler (out-of-band) and a notice on an idle session → out/realtime-{filler,notice}.wav.
+// Case 4: cancelResponse() after the first audio delta, beginTurn() + a normal turn; checks no stale audio leaks.
 import "dotenv/config";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { serverNow } from "../server/clock.ts";
-import { openRealtime } from "../server/adapters/openaiRealtime.ts";
+import WebSocket from "ws";
+import { createOpenRealtime, openRealtime, type RealtimeSocketCtor } from "../server/adapters/openaiRealtime.ts";
 import { ASK_OPUS_TOOL, type Mark } from "../server/adapters/types.ts";
 import type { RealtimeModel } from "../shared/config.ts";
 import { parseWav, writeWavPcm16 } from "../server/wav.ts";
@@ -99,8 +102,7 @@ async function case2() {
   }
   console.log(`  tool call: ${call.name} ${JSON.stringify(call.args)}`);
   s.sendToolResult(call.callId, "SPOKEN: The header is sticky so navigation stays visible while scrolling long pages.");
-  await s.responseDone(); // ack response
-  if (s.currentSegment !== "answer") await s.responseDone(); // answer response
+  await s.responseDone(); // waits for the ack and the queued answer response
   console.log(`  transcript: ${JSON.stringify(transcript)}`);
   rec.print(release);
   const ans = rec.list.find((m) => m.name === "answer.ttsFirstByte");
@@ -109,9 +111,151 @@ async function case2() {
   s.close();
 }
 
+/** A `ws` WebSocket that records every server event, so the smoke can inspect what the adapter filtered. */
+function tappedOpen() {
+  const events: Record<string, any>[] = [];
+  class Tapped extends (WebSocket as any) {
+    constructor(url: string, opts: unknown) {
+      super(url, opts);
+      (this as any).on("message", (d: Buffer) => {
+        try {
+          events.push(JSON.parse(d.toString("utf8")));
+        } catch {
+          /* ignore */
+        }
+      });
+    }
+  }
+  return { open: createOpenRealtime({ WebSocket: Tapped as unknown as RealtimeSocketCtor }), events };
+}
+
+/** Raw audio bytes per response id, from tapped server events. */
+function audioBytesById(events: Record<string, any>[]) {
+  const m = new Map<string, number>();
+  for (const e of events) {
+    if (e.type === "response.output_audio.delta") m.set(e.response_id, (m.get(e.response_id) ?? 0) + Buffer.from(e.delta, "base64").length);
+  }
+  return m;
+}
+
+async function case3() {
+  console.log(`\n[case 3] speak(): filler (out-of-band) + notice (in-conversation) on an idle session (${model})`);
+  const { open, events } = tappedOpen();
+  const rec = markRecorder("case 3");
+  const s = await open({
+    mark: rec.mark,
+    model,
+    instructions: "You are a friendly voice assistant for a web developer. Keep replies short.",
+    tools: [ASK_OPUS_TOOL],
+  });
+  s.onError((e) => console.log("  error:", e.message));
+  let audio: Buffer[] = [];
+  let transcript = "";
+  s.onAudio((b) => audio.push(b));
+  s.onText((d) => (transcript += d));
+  mkdirSync("out", { recursive: true });
+
+  for (const [kind, text, file] of [
+    ["filler", "Still checking the stylesheet.", "out/realtime-filler.wav"],
+    ["notice", "the CSS refactor finished; 3 files changed and the build passes", "out/realtime-notice.wav"],
+  ] as const) {
+    audio = [];
+    transcript = "";
+    const from = events.length;
+    const t0 = serverNow();
+    let firstAudio = 0;
+    s.onAudio(() => (firstAudio ||= serverNow()));
+    await s.speak(text, kind);
+    const pcm = Buffer.concat(audio);
+    writeFileSync(file, writeWavPcm16(pcm, 24000));
+    const evs = events.slice(from);
+    const created = evs.find((e) => e.type === "response.created")?.response;
+    const done = evs.find((e) => e.type === "response.done")?.response;
+    console.log(`  ${kind}: asked ${JSON.stringify(text)}`);
+    console.log(`    said:        ${JSON.stringify(transcript)}`);
+    console.log(`    first audio: ${firstAudio ? (firstAudio - t0).toFixed(0) + " ms" : "none"}, done ${(serverNow() - t0).toFixed(0)} ms; saved ${file} (${(pcm.length / 48000).toFixed(2)} s)`);
+    console.log(`    response.created: conversation_id=${JSON.stringify(created?.conversation_id)} metadata=${JSON.stringify(created?.metadata)}`);
+    console.log(`    response.done: status=${done?.status} usage=${JSON.stringify(done?.usage?.output_token_details)} in=${done?.usage?.input_tokens}`);
+    console.log(`    event types: ${[...new Set(evs.map((e) => e.type))].join(", ")}`);
+    if (kind === "filler") {
+      const norm = (x: string) => x.toLowerCase().replace(/[^a-z ]/g, "").trim();
+      console.log(`    verbatim: ${norm(transcript) === norm(text) ? "YES" : "NO"}`);
+    }
+  }
+  console.log(`  marks (should be none): ${JSON.stringify(rec.list.map((m) => m.name))}`);
+  console.log("  usage totals:", JSON.stringify(s.usage.totals), `(${s.usage.responses.length} responses)`);
+  s.close();
+}
+
+async function case4() {
+  console.log(`\n[case 4] cancelResponse() after first audio, then beginTurn() + a normal turn on the same session (${model})`);
+  const { open, events } = tappedOpen();
+  const rec = markRecorder("case 4");
+  const s = await open({
+    mark: rec.mark,
+    model,
+    instructions: "You are a voice assistant. Answer every user turn in about four sentences.",
+    tools: [],
+  });
+  s.onError((e) => console.log("  error:", e.message));
+  let phase: "first" | "second" = "first";
+  const delivered = { first: 0, second: 0 };
+  let transcript2 = "";
+  let cancelledAt = -1;
+  s.onText((d) => phase === "second" && (transcript2 += d));
+  let resolveFirst!: () => void;
+  const firstAudio = new Promise<void>((r) => (resolveFirst = r));
+  s.onAudio((b) => {
+    delivered[phase] += b.length;
+    if (phase === "first" && cancelledAt < 0) {
+      cancelledAt = events.length;
+      s.cancelResponse();
+      resolveFirst();
+    }
+  });
+  s.beginTurn();
+  streamFixture((b) => s.pushAudio(b));
+  s.commitAndRespond();
+  await firstAudio;
+  // Barge-in: new turn right away, before the cancelled response's response.done.
+  const rec2 = markRecorder("case 4 turn 2");
+  s.setMark(rec2.mark);
+  phase = "second";
+  s.beginTurn();
+  streamFixture((b) => s.pushAudio(b));
+  const release = serverNow();
+  s.commitAndRespond();
+  await s.responseDone();
+  // Let any trailing events arrive.
+  await new Promise((r) => setTimeout(r, 300));
+
+  const ids = [...new Set(events.filter((e) => e.type === "response.created").map((e) => e.response.id))];
+  const bytes = audioBytesById(events);
+  const dones = events.filter((e) => e.type === "response.done").map((e) => e.response);
+  for (const id of ids) {
+    const d = dones.find((r) => r.id === id);
+    console.log(`  ${id}: raw audio ${bytes.get(id) ?? 0} B, status=${d?.status} ${JSON.stringify(d?.status_details ?? null)}`);
+    const said = events.filter((e) => e.type === "response.output_audio_transcript.delta" && e.response_id === id).map((e) => e.delta).join("");
+    console.log(`    raw transcript: ${JSON.stringify(said)}`);
+  }
+  const lateOld = events.slice(cancelledAt).filter((e) => e.type === "response.output_audio.delta" && e.response_id === ids[0]).length;
+  console.log(`  cancelled response: ${lateOld} audio deltas arrived after cancelResponse()`);
+  console.log(`  delivered to onAudio: first turn ${delivered.first} B, second turn ${delivered.second} B`);
+  const ok = ids.length === 2 && delivered.second === (bytes.get(ids[1]!) ?? 0);
+  console.log(`  no stale leak: ${ok ? "YES" : "NO"} (second turn delivered == raw bytes of ${ids[1]})`);
+  if (!ok) process.exitCode = 1;
+  console.log(`  turn 2 transcript: ${JSON.stringify(transcript2)}`);
+  const errs = events.filter((e) => e.type === "error");
+  if (errs.length) console.log("  server errors:", JSON.stringify(errs.map((e) => e.error)));
+  rec2.print(release);
+  s.close();
+}
+
 try {
   await case1();
   await case2();
+  await case3();
+  await case4();
 } catch (e) {
   console.error("smoke:realtime failed:", e);
   process.exit(1);

@@ -9,8 +9,18 @@
 //   resets per-turn mark state; `setMark()` swaps the per-turn mark function.
 // - Context items (`commitAndRespond(extraContext)`) use `role: "user"` with `input_text` content. API-NOTES says
 //   user or system both work; user is the shape shown in the client-events reference example.
-// - Only one response may be active per conversation, so a `response.create` requested while a response is
-//   still in flight (e.g. sendToolResult before the ack response's `response.done`) is deferred until it finishes.
+// - Responses are strictly serialized: one `response.create` in flight at a time, later ones (ack, answer,
+//   filler, notice) wait in a FIFO queue until the active response's `response.done` (or its create failed).
+//   The API allows parallel out-of-band responses, but we play one audio stream, so fillers queue too.
+//   Every create carries `metadata: {kind, seq}`, checked against `response.created`.
+// - `responseDone()` only tracks ack/answer responses of the current turn; filler/notice/stale ones don't count.
+// - `beginTurn()` marks the in-flight response stale (its audio/text/tool calls are dropped, its done only frees
+//   the slot) and drops queued requests. `cancelResponse()` drops queued requests and sends
+//   `response.cancel {response_id}` (deferred to `response.created` if the id isn't known yet; without an id the
+//   API only cancels default-conversation responses, which would miss an out-of-band filler).
+// - speak() promises: resolve at their response.done (completed/cancelled/incomplete), reject on status
+//   "failed", a failed create, socket error/close or close(). Requests dropped before being sent
+//   (cancelResponse/beginTurn) resolve: the drop is deliberate, not an error.
 import WebSocket from "ws";
 import type { Mark, OpenRealtime, OpenRealtimeOpts, RealtimeSession, RealtimeUsage, ToolCall, ToolDef } from "./types.ts";
 
@@ -142,21 +152,45 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
   let answerMarked = false;
   const toolCallMarked = new Set<string>();
 
-  // Response tracking.
-  type Segment = "ack" | "answer";
-  let pendingSegment: Segment = "ack"; // segment for the next response.create
-  const requestedSegments: Segment[] = []; // FIFO of response.create sent, awaiting response.created
-  const responseSegment = new Map<string, Segment>();
-  let currentSegment: Segment = "ack";
-  let responseActive = false; // a response.create was sent and its response.done hasn't arrived
-  let deferredCreate: Segment | null = null;
-  const createEventIds = new Set<string>();
+  // Response tracking. Only one response runs at a time (see header): `active` holds the response.create
+  // that was sent and whose response.done hasn't arrived; later requests wait in `queue` (FIFO).
+  type Kind = RealtimeSession["currentSegment"];
+  interface Req {
+    kind: Kind;
+    seq: number;
+    /** response.create `response` override (undefined → bare response.create). */
+    response?: Record<string, unknown>;
+    /** Events sent right before the response.create (the notice's conversation item). */
+    before?: Record<string, unknown>[];
+    createEventId?: string;
+    responseId?: string;
+    /** From before the last beginTurn: events dropped, done resolves no waiters. */
+    stale: boolean;
+    /** cancelResponse() ran before response.created gave us the id: cancel on response.created. */
+    cancelPending: boolean;
+    /** speak() promise callbacks. */
+    resolve?: () => void;
+    reject?: (e: Error) => void;
+  }
+  let reqSeq = 0;
+  let active: Req | null = null;
+  let queue: Req[] = [];
+  const staleIds = new Set<string>();
+  const kindById = new Map<string, Kind>();
+  const cancelEventIds = new Set<string>();
+  let currentSegment: Kind = "ack";
   let waiters: { resolve: () => void; reject: (e: Error) => void }[] = [];
+
+  const isTurnKind = (k: Kind) => k === "ack" || k === "answer";
 
   const emitError = (err: Error) => {
     for (const cb of errorCbs) cb(err);
   };
-  const resolveWaiters = () => {
+  /** An ack/answer response is active or queued (not stale): what responseDone() waits for. */
+  const turnResponseOutstanding = () =>
+    (active !== null && !active.stale && isTurnKind(active.kind)) || queue.some((r) => isTurnKind(r.kind));
+  const settleWaiters = () => {
+    if (turnResponseOutstanding()) return;
     const w = waiters;
     waiters = [];
     for (const x of w) x.resolve();
@@ -166,19 +200,45 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
     waiters = [];
     for (const x of w) x.reject(err);
   };
-
-  const sendResponseCreate = (segment: Segment) => {
-    if (responseActive) {
-      deferredCreate = segment;
-      return;
-    }
-    responseActive = true;
-    requestedSegments.push(segment);
-    createEventIds.add(send({ type: "response.create" }));
+  /** Dropped (never sent) requests: speak() promises resolve, the drop is deliberate (cancel / new turn). */
+  const dropQueue = () => {
+    const q = queue;
+    queue = [];
+    for (const r of q) r.resolve?.();
+  };
+  /** Fatal: reject everything outstanding. */
+  const failAll = (err: Error) => {
+    const all = [...(active ? [active] : []), ...queue];
+    active = null;
+    queue = [];
+    for (const r of all) r.reject?.(err);
+    rejectWaiters(err);
   };
 
-  const segmentOf = (responseId: unknown): Segment =>
-    (typeof responseId === "string" && responseSegment.get(responseId)) || currentSegment;
+  const pump = () => {
+    if (active || closed) return;
+    const r = queue.shift();
+    if (!r) return;
+    active = r;
+    for (const ev of r.before ?? []) send(ev);
+    // metadata is echoed on response.created/done (API-NOTES: identifies parallel / out-of-band responses).
+    const response = { ...r.response, metadata: { kind: r.kind, seq: String(r.seq) } };
+    r.createEventId = send({ type: "response.create", response });
+  };
+  const enqueue = (r: Omit<Req, "seq" | "stale" | "cancelPending">) => {
+    queue.push({ ...r, seq: ++reqSeq, stale: false, cancelPending: false });
+    pump();
+  };
+
+  const sendCancel = (responseId: string) => {
+    cancelEventIds.add(send({ type: "response.cancel", response_id: responseId }));
+  };
+
+  /** Stale events are dropped. Events without a response_id are attributed to the active response. */
+  const isStale = (responseId: unknown): boolean =>
+    typeof responseId === "string" ? staleIds.has(responseId) : !!active?.stale;
+  const kindOf = (responseId: unknown): Kind =>
+    (typeof responseId === "string" && kindById.get(responseId)) || active?.kind || currentSegment;
 
   const markFirstToken = () => {
     if (!firstTokenMarked) {
@@ -196,21 +256,32 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
   const onEvent = (ev: ServerEvent) => {
     switch (ev.type) {
       case "response.created": {
-        const seg = requestedSegments.shift() ?? pendingSegment;
         const id = ev.response?.id;
-        if (typeof id === "string") responseSegment.set(id, seg);
-        currentSegment = seg;
+        if (!active || typeof id !== "string") break;
+        const seq = ev.response?.metadata?.seq;
+        if (seq !== undefined && seq !== String(active.seq)) {
+          log(`response.created for unexpected response ${id} (metadata seq ${seq}, active ${active.seq})`);
+          break;
+        }
+        active.responseId = id;
+        kindById.set(id, active.kind);
+        if (active.stale) staleIds.add(id);
+        else currentSegment = active.kind;
+        if (active.cancelPending) {
+          active.cancelPending = false;
+          sendCancel(id);
+        }
         break;
       }
       case "response.output_audio.delta": {
-        if (typeof ev.delta !== "string") break;
+        if (typeof ev.delta !== "string" || isStale(ev.response_id)) break;
         const pcm = Buffer.from(ev.delta, "base64");
-        markFirstToken();
-        const seg = segmentOf(ev.response_id);
-        if (seg === "ack" && !ackMarked) {
+        const kind = kindOf(ev.response_id);
+        if (isTurnKind(kind)) markFirstToken();
+        if (kind === "ack" && !ackMarked) {
           ackMarked = true;
           mark("ack.ttsFirstByte");
-        } else if (seg === "answer" && !answerMarked) {
+        } else if (kind === "answer" && !answerMarked) {
           answerMarked = true;
           mark("answer.ttsFirstByte");
         }
@@ -219,17 +290,19 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
       }
       case "response.output_audio_transcript.delta":
       case "response.output_text.delta": {
-        if (typeof ev.delta !== "string") break;
-        markFirstToken();
+        if (typeof ev.delta !== "string" || isStale(ev.response_id)) break;
+        if (isTurnKind(kindOf(ev.response_id))) markFirstToken();
         for (const cb of textCbs) cb(ev.delta);
         break;
       }
       case "response.output_item.added": {
+        if (isStale(ev.response_id)) break;
         const item = ev.item;
         if (item?.type === "function_call") markToolCall(String(item.call_id ?? item.id), item.name);
         break;
       }
       case "response.function_call_arguments.done": {
+        if (isStale(ev.response_id)) break;
         const callId = String(ev.call_id);
         markToolCall(callId, ev.name); // fallback if output_item.added lacked the item
         const call: ToolCall = { callId, name: String(ev.name ?? ""), args: safeJson(ev.arguments) };
@@ -240,26 +313,40 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
         const r = ev.response ?? {};
         addUsage(usage, r.usage);
         if (r.status && r.status !== "completed") log(`response ${r.id} status=${r.status}`, JSON.stringify(r.status_details ?? null));
-        if (typeof r.id === "string") responseSegment.delete(r.id);
-        responseActive = false;
-        resolveWaiters();
-        if (deferredCreate) {
-          const seg = deferredCreate;
-          deferredCreate = null;
-          sendResponseCreate(seg);
+        const id = typeof r.id === "string" ? r.id : undefined;
+        if (id) {
+          kindById.delete(id);
+          staleIds.delete(id);
         }
+        // Only the active response frees the slot (ids match, or response.created never gave us one).
+        if (!active || (id && active.responseId && active.responseId !== id)) break;
+        const done = active;
+        active = null;
+        if (r.status === "failed") {
+          done.reject?.(new Error(`OpenAI realtime: ${done.kind} response failed: ${JSON.stringify(r.status_details ?? null)}`));
+        } else done.resolve?.(); // completed, cancelled or incomplete: that response is over
+        pump();
+        settleWaiters();
         break;
       }
       case "error": {
         const e = ev.error ?? {};
-        const err = new Error(`OpenAI realtime error: ${e.type ?? "error"}/${e.code ?? ""}: ${e.message ?? JSON.stringify(e)}`);
+        const msg = `OpenAI realtime error: ${e.type ?? "error"}/${e.code ?? ""}: ${e.message ?? JSON.stringify(e)}`;
+        // response.cancel that raced the response's end ("no active response"): harmless, not surfaced.
+        if (typeof e.event_id === "string" && cancelEventIds.delete(e.event_id)) {
+          log(`ignored (response.cancel): ${msg}`);
+          break;
+        }
+        const err = new Error(msg);
         log(err.message);
-        // A failed response.create means no response.done will come: treat it as fatal for pending waiters.
-        if (typeof e.event_id === "string" && createEventIds.has(e.event_id)) {
-          createEventIds.delete(e.event_id);
-          responseActive = false;
-          requestedSegments.shift();
-          rejectWaiters(err);
+        // A failed response.create means no response.done will come: free the slot, fail that request.
+        if (active && typeof e.event_id === "string" && e.event_id === active.createEventId) {
+          const failed = active;
+          active = null;
+          if (failed.reject) failed.reject(err);
+          else if (!failed.stale) rejectWaiters(err);
+          pump();
+          settleWaiters();
         }
         emitError(err);
         break;
@@ -269,14 +356,53 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
     }
   };
 
+  const speakRequest = (text: string, kind: "filler" | "notice"): Omit<Req, "seq" | "stale" | "cancelPending"> => {
+    if (kind === "filler") {
+      return {
+        kind,
+        response: {
+          conversation: "none", // out-of-band: not written to the conversation
+          output_modalities: ["audio"],
+          tool_choice: "none",
+          reasoning: { effort: "minimal" },
+          instructions: `You are a voice. Say exactly the sentence you are given, word for word, nothing else: ${text}`,
+          input: [{ type: "message", role: "user", content: [{ type: "input_text", text: `Say exactly this and nothing else: ${text}` }] }],
+        },
+      };
+    }
+    return {
+      kind,
+      before: [
+        {
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{
+              type: "input_text",
+              text: `(System note: a background task you started for the user has finished. Tell the user in one or two short spoken sentences, naturally: ${text})`,
+            }],
+          },
+        },
+      ],
+      response: { tool_choice: "none" },
+    };
+  };
+
   const session: RealtimeSession = {
     beginTurn() {
       firstTokenMarked = false;
       ackMarked = false;
       answerMarked = false;
       toolCallMarked.clear();
-      pendingSegment = "ack";
       currentSegment = "ack";
+      // Whatever is still in flight belongs to the previous turn.
+      if (active) {
+        active.stale = true;
+        if (active.responseId) staleIds.add(active.responseId);
+      }
+      dropQueue();
+      settleWaiters();
       send({ type: "input_audio_buffer.clear" });
     },
     setMark(m) {
@@ -287,7 +413,6 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
       send({ type: "input_audio_buffer.append", audio: pcm.toString("base64") });
     },
     commitAndRespond(extraContext) {
-      pendingSegment = "ack";
       send({ type: "input_audio_buffer.commit" });
       if (extraContext) {
         send({
@@ -296,7 +421,7 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
         });
       }
       mark("llm.request");
-      sendResponseCreate("ack");
+      enqueue({ kind: "ack" });
     },
     onAudio(cb) {
       audioCbs.push(cb);
@@ -310,20 +435,25 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
     onError(cb) {
       errorCbs.push(cb);
     },
-    sendToolResult(callId, output) {
-      pendingSegment = "answer";
+    sendToolResult(callId, output, opts) {
       send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output } });
-      sendResponseCreate("answer");
+      if (opts?.respond !== false) enqueue({ kind: "answer" });
     },
-    speak() {
-      return Promise.reject(new Error("speak: not implemented")); // TEMP stub (realtime agent)
+    speak(text, kind) {
+      if (closed) return Promise.reject(new Error("openRealtime: session closed"));
+      return new Promise<void>((resolve, reject) => enqueue({ ...speakRequest(text, kind), resolve, reject }));
     },
     cancelResponse() {
-      send({ type: "response.cancel" }); // TEMP stub (realtime agent)
+      dropQueue();
+      if (active) {
+        if (active.responseId) sendCancel(active.responseId);
+        else active.cancelPending = true; // id arrives with response.created
+      }
+      settleWaiters();
     },
     responseDone() {
       if (closed) return Promise.reject(new Error("openRealtime: session closed"));
-      if (!responseActive && !deferredCreate) return Promise.resolve();
+      if (!turnResponseOutstanding()) return Promise.resolve();
       return new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
     },
     get currentSegment() {
@@ -335,7 +465,7 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
     close() {
       if (closed) return;
       closed = true;
-      rejectWaiters(new Error("openRealtime: session closed"));
+      failAll(new Error("openRealtime: session closed"));
       try {
         ws.close();
       } catch {
@@ -379,7 +509,7 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
     ws.on("error", (err) => {
       if (!ready) return fail(err);
       log("socket error:", err.message);
-      rejectWaiters(err);
+      failAll(err);
       emitError(err);
     });
     ws.on("close", (code, reason) => {
@@ -387,7 +517,7 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
       if (closed) return;
       closed = true;
       const err = new Error(`openRealtime: socket closed (${code} ${reason?.toString() ?? ""})`);
-      rejectWaiters(err);
+      failAll(err);
       emitError(err);
     });
   });

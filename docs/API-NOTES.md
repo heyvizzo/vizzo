@@ -85,6 +85,18 @@ The server answers with `session.updated`, which carries the full effective conf
 - For context items you can also use `role: "system"` (content type `input_text`), which the docs describe for "smaller updates" mid-conversation. Either role works for `commitAndRespond(extraContext)`. Pick one and keep it.
 - `response.create` can take an optional `response: {instructions, tools, tool_choice, output_modalities, reasoning, metadata, conversation, input, ...}` that overrides the session for that one response.
 
+### Out-of-band responses, metadata, cancel ✅ (docs + live, 2026-10-13)
+
+- **Out-of-band:** `response.conversation: "none"` → the response "will not add items to default conversation" (allowed values `"auto"` (default) | `"none"`). `response.input` (array of items, incl. `{type:"item_reference", id}`) "creates a new context for this Response instead of using the default conversation"; `input: []` clears the context. Both field names confirmed in the realtime-conversations guide ("Create responses outside the default conversation") and the client-events reference.
+- **Parallelism:** "Only one Response can write to the default Conversation at a time, but otherwise multiple Responses can be created in parallel." We still serialize everything in the adapter (one audio stream to play).
+- **`metadata`** (≤16 string key/values) on `response.create` is echoed on `response.created` / `response.done` → `response.metadata` ✅ live. The adapter tags every create with `{kind, seq}`.
+- **`reasoning: {effort: "minimal"}`** is accepted per response ✅ (enum `minimal|low|medium|high|xhigh`). Live, the 2.1 filler still reported `reasoning_tokens: 6`; mini reported none.
+- **`response.cancel`** takes an optional `response_id`; **without it, it only cancels "an in-progress response in the default conversation"**, so an out-of-band filler must be cancelled by id (the adapter always sends the id, waiting for `response.created` if needed). The server answers with `response.done` `status: "cancelled"`, `status_details: {type:"cancelled", reason:"client_cancelled"}` ✅ live. With nothing to cancel it returns an `error` and the session is unaffected (the adapter swallows errors tied to its cancel event_id).
+- Live filler (`conversation:"none"`, `input:[user "Say exactly this and nothing else: …"]`, `instructions` "say exactly…", `tool_choice:"none"`): said **verbatim** on both 2.1 and 2.1-mini ("Still checking the stylesheet."). `response.created.response.conversation_id` is `null` (in-band responses carry `conv_…`); no `conversation.item.added` is emitted, but a `conversation.item.done` still is. First audio ≈ 0.6–0.9 s after the create on an idle session; `usage.input_tokens` reported **0**.
+- Live notice (user `input_text` note + `response.create {tool_choice:"none"}`): paraphrased naturally ("The CSS refactor is done. Three files changed, and the build passes."), first audio ≈ 0.6–0.7 s.
+- Live cancel: after the first audio delta, 3 more audio deltas (~57 KB) of the cancelled response still arrived before its `response.done`; its transcript stops where it was cut. A new turn's `response.create` sent before that `done` is fine if serialized behind it (the adapter defers it); no stale audio reached the new turn. The cancelled partial assistant item stays in the conversation (not truncated to what was played; `conversation.item.truncate` would fix that, not done).
+- A single response can contain two spoken `message` items; their transcripts concatenate with no separator ("…colors.I'd love…").
+
 ### Server events ✅ (docs, not live; server-events reference)
 
 | What | Event | Payload fields |
@@ -232,6 +244,7 @@ Other events you'll see: `session.created`, `session.updated`, `conversation.ite
   - The first request after a while can be slow (one Haiku call took 20.9 s, the next 1.4 s).
 - ✅ Scribe: timestamped commit arrives ~15–20 ms after the plain one; release → final ≈ 200–380 ms on `hello.wav`.
 - ✅ OpenAI Realtime GA session/event shapes work as documented; tool name/call_id arrive on `response.output_item.added`.
+- ✅ OpenAI Realtime out-of-band filler responses (said verbatim), notices, `metadata` echo and `response.cancel {response_id}` + reuse after `beginTurn()`: see §OpenAI Realtime "Out-of-band responses, metadata, cancel" (`npm run smoke:realtime` cases 3–4).
 - ✅ ElevenLabs `output_format=pcm_24000` works on both the v4 Turbo dialogue WebSocket and the Flash stream-input WebSocket (output verified as speech, not noise).
 
 ## Sources
