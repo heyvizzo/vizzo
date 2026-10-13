@@ -346,11 +346,15 @@ function renderMeta(v: TurnView, run: Pick<RunRecord, "metrics" | "costUsd" | "e
 
 /** Show the turn's itemized cost (plus any background task it started). */
 function renderCost(v: TurnView, run: Pick<RunRecord, "costUsd" | "costItems">, turnId: string): void {
-  const jobCosts = [...jobs.values()].filter((c) => c.info.turnId === turnId).map(jobCost);
+  const jobCosts = jobsOfTurn(turnId).map(jobCost);
   v.cost = { items: run.costItems ?? [{ label: "total", usd: run.costUsd }], total: run.costUsd, jobs: jobCosts };
   if (!v.costBox) { v.costBox = el("div", "costbox"); v.meta.after(v.costBox); }
   renderTurnCost(v.costBox, v.cost);
 }
+
+/** The turn's background tasks that have (or will have) a cost: running, or finished with a cost reported. */
+const jobsOfTurn = (turnId: string) =>
+  [...jobs.values()].filter((c) => c.info.turnId === turnId && (c.info.state === "running" || c.info.costUsd !== undefined));
 
 const jobCost = (c: { info: JobInfo }): TurnCost["jobs"][number] => ({
   label: "background task", items: c.info.costItems ?? [], total: c.info.costUsd ?? 0, running: c.info.state === "running",
@@ -360,7 +364,7 @@ const jobCost = (c: { info: JobInfo }): TurnCost["jobs"][number] => ({
 function refreshTurnCost(turnId: string): void {
   const v = views.get(turnId);
   if (!v?.cost || !v.costBox) return;
-  v.cost.jobs = [...jobs.values()].filter((c) => c.info.turnId === turnId).map(jobCost);
+  v.cost.jobs = jobsOfTurn(turnId).map(jobCost);
   renderTurnCost(v.costBox, v.cost);
 }
 
