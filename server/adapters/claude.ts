@@ -138,8 +138,9 @@ export function formatPointingForPrompt(targets: PointingTarget[]): string {
     const s = best.sample;
     if (!s) { lines.push(`Pointing: "${word}" → (no element resolved)`); continue; }
     const label = s.label ? ` "${s.label}"` : "";
+    const container = s.container && s.container !== s.label ? ` in "${s.container}"` : "";
     const src = s.dataSource ? ` [data-source=${s.dataSource}]` : "";
-    lines.push(`Pointing: "${word}" → <${tagFromPath(s.elementPath)}>${label}${src}`);
+    lines.push(`Pointing: "${word}" → <${tagFromPath(s.elementPath)}>${label}${container}${src}`);
   }
   return lines.length ? lines.join("\n") : "Pointing: none (the user was not pointing at anything we could resolve)";
 }
