@@ -50,4 +50,4 @@ Raw runs: `docs/report-data/bench-tts.json`.
 
 **It costs nothing** (no per-character bill; shown as saved vs ElevenLabs' $0.04 / 1K characters) and works offline.
 
-**The trade-off is voice quality.** Only the compact system voices are installed here (Samantha for English, Ioana for Romanian); they sound noticeably more robotic than ElevenLabs. Installing a Premium/Enhanced voice (System Settings → Accessibility → Spoken Content → System voice → Manage Voices, e.g. "Ava (Premium)" or "Zoe (Premium)") makes the helper pick it automatically — it chooses the highest-quality voice per language at start.
+**The trade-off is voice quality.** Only the compact system voices are installed here (Samantha for English, Ioana for Romanian); they sound noticeably more robotic than ElevenLabs. Installing a Premium/Enhanced voice (System Settings → Accessibility → **Read & Speak** → System voice → Manage Voices… — called "Spoken Content" before macOS 26 — e.g. "Ava (Premium)" or "Zoe (Premium)"; restart `npm run dev` afterwards) makes the helper pick it automatically — it chooses the highest-quality voice per language at start.
