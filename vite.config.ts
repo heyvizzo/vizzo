@@ -6,7 +6,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/ws": { target: "ws://localhost:8787", ws: true },
+      // Regex key: a plain "/ws" prefix would also proxy the web/ws.ts module itself and break every page in dev.
+      "^/ws$": { target: "ws://localhost:8787", ws: true },
       "/api": { target: "http://localhost:8787" },
     },
   },
