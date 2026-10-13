@@ -1,6 +1,6 @@
 // Cursor-lab sessions and their fixture files (ARCHITECTURE §6.1): Uxx.wav, Uxx.cursor.json, Uxx.labels.json.
-import { isPointingWord, normalizeWord } from "../../shared/pointing.ts";
-import type { CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
+import { isPointingWord, normalizeWord, POINTING_LANGUAGES, type PointingLanguage } from "../../shared/pointing.ts";
+import type { CursorRest, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
 import { clickKind } from "./pageContext.ts";
 
 export interface LabelTarget { elementPath: string | null; dataSource: string | null; label: string | null }
@@ -38,6 +38,8 @@ export interface CursorFile {
   preselected?: PageSelection | null;
   /** Highlights made during the recording, in order (tStart / t relative to tAudioStart). Optional. */
   highlights?: PageHighlight[];
+  /** Spoken language Scribe detected (stt.final `language`, e.g. "en", "ro"). Optional. */
+  language?: string;
 }
 
 /** Uxx.labels.json */
@@ -59,11 +61,15 @@ export interface LabSession {
   wav?: Blob;
   /** What the server's resolver sent (live turns only). */
   serverTargets?: PointingTarget[];
+  /** The cursor rests the server sent (live turns only; times relative to tAudioStart). Not saved: rests are derived. */
+  serverRests?: CursorRest[];
   viewport?: { width: number; height: number };
   /** What the user clicked / highlighted during the turn (PageEvents), times relative to tAudioStart. */
   clicks?: PageClick[];
   preselected?: PageSelection | null;
   highlights?: PageHighlight[];
+  /** Spoken language Scribe detected, when known. */
+  language?: string;
 }
 
 /** The session's page events (empty lists / null when missing). */
@@ -85,11 +91,16 @@ export function toRelativeSamples(samples: readonly CursorSample[], tAudioStart:
   return samples.filter((s) => s.t >= from && s.t <= to).map((s) => ({ ...s, t: s.t - tAudioStart }));
 }
 
-/** One unlabeled entry per pointing word; keeps existing labels whose wordIndex still matches. */
-export function labelsFor(words: readonly Word[], existing: readonly PointingLabel[] = []): PointingLabel[] {
+/**
+ * One unlabeled entry per pointing word (in any of `languages`, default all); keeps existing labels whose
+ * wordIndex still matches.
+ */
+export function labelsFor(
+  words: readonly Word[], existing: readonly PointingLabel[] = [], languages: readonly PointingLanguage[] = POINTING_LANGUAGES,
+): PointingLabel[] {
   const out: PointingLabel[] = [];
   words.forEach((w, i) => {
-    if (!isPointingWord(w.text)) return;
+    if (!isPointingWord(w.text, languages)) return;
     const word = normalizeWord(w.text);
     const prev = existing.find((l) => l.wordIndex === i && l.word === word);
     out.push({ wordIndex: i, word, start: w.start, end: w.end, target: prev?.target ?? null });
@@ -102,7 +113,7 @@ export function toCursorFile(s: LabSession): CursorFile {
     version: 1, kind: "cursor", id: s.id, createdAt: s.createdAt, transcript: s.transcript,
     words: s.words, samples: s.samples, ...(s.viewport ? { viewport: s.viewport } : {}),
     ...(s.clicks?.length ? { clicks: s.clicks } : {}), ...(s.preselected ? { preselected: s.preselected } : {}),
-    ...(s.highlights?.length ? { highlights: s.highlights } : {}),
+    ...(s.highlights?.length ? { highlights: s.highlights } : {}), ...(s.language ? { language: s.language } : {}),
   };
 }
 
@@ -168,6 +179,7 @@ export function parseCursorFile(text: string): CursorFile {
     words: v.words, samples: v.samples,
     ...(isObj(v.viewport) && isNum(v.viewport.width) && isNum(v.viewport.height)
       ? { viewport: { width: v.viewport.width, height: v.viewport.height } } : {}),
+    ...(typeof v.language === "string" && v.language ? { language: v.language } : {}),
     ...pageFields(v),
   };
 }
@@ -237,7 +249,7 @@ export function sessionsFromFiles(files: readonly LoadedFile[]): { sessions: Lab
       sessions.push({
         id, createdAt: c.createdAt, transcript: c.transcript, words: c.words, samples: c.samples,
         labels: labelsFor(c.words, lab), wav: g.wav?.blob, viewport: c.viewport,
-        ...sessionEvents(c),
+        ...sessionEvents(c), ...(c.language ? { language: c.language } : {}),
       });
     } catch (e) {
       errors.push(`${id}: ${(e as Error).message}`);

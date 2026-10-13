@@ -299,6 +299,7 @@ The cursor lab saves (and loads, by file name) three files per session; `Uxx` is
     words: Word[];               // as received in stt.final (seconds from tAudioStart)
     samples: CursorSample[];     // t = ms RELATIVE to tAudioStart (negative = before audio start); 500 ms pre-roll before press, 300 ms after release
     viewport?: { width: number; height: number };  // demo scroller size at record time
+    language?: string;           // spoken language Scribe detected (stt.final `language`, e.g. "en", "ro"); left out when unknown
     // Page events (PageEvents, shared/protocol.ts). All optional (left out when empty); every time is ms RELATIVE to tAudioStart.
     clicks?: PageClick[];                // click EVENTS: { ...ElementRef, kind: "single"|"double"|"triple"|"multi" (4+), count,
                                          //   t (first press), tEnd (last release), times: number[] (every press, length = count), x, y }
@@ -308,7 +309,7 @@ The cursor lab saves (and loads, by file name) three files per session; `Uxx` is
   ```
   Older files load too: a click without `kind`/`count`/`times` becomes a single click (`count 1, times [t], tEnd t`), and the old `selection` field (the turn's last highlighted text) becomes the one entry of `highlights` with `tStart = t`. A missing `via` is fine. Saving always writes the new fields (never `selection`).
   Replaying a session re-times its page events onto the replay's `tAudioStart` and sends them as `turn.context` (`{ type, turnId, clicks, preselected, highlights }`) right before `turn.release`.
-  `samples` is exactly what `startReplay({cursor})` takes. Resolvers run on it with `tAudioStart = 0`.
+  `samples` is exactly what `startReplay({cursor})` takes. Resolvers run on it with `tAudioStart = 0`. Cursor rests (`computeRests`) aren't saved: the lab derives them from `words` + `samples` (and the dwellMode picks) like the picks.
 - `Uxx.labels.json`:
   ```ts
   { version: 1; kind: "labels"; id: "U04";

@@ -14,3 +14,5 @@ export const CLICK_COLOR = "#22d3ee";
 export const HIGHLIGHT_COLOR = "#6ea8fe";
 /** Text already highlighted when the recording started (the recorder paints it amber). */
 export const PRESELECTED_COLOR = "#fbbf24";
+/** Cursor rests (@1, @2…): where the pointer stayed on one element while the user spoke (language-agnostic). */
+export const REST_COLOR = "#f472b6";

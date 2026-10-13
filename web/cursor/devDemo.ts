@@ -1,9 +1,12 @@
-// Dev-only canned session for the cursor lab (`/cursor.html?demo=1`, or `?demo=title`): a fake turn
-// "Make this title match that column" that points at a card title and a table heading, with every kind
-// of page event: a single, a double, a triple and a 5× click, a sentence already highlighted when the
-// recording started, and two highlights made during it (two table rows by drag, a phrase by
-// double-click), so the inspector, overlay, picks, LLM context and timeline can be seen (and
-// screenshotted) without a mic or server.
+// Dev-only canned sessions for the cursor lab (`/cursor.html?demo=1`, or `?demo=title`): a fake turn
+// "Make this title match that column, like the Embeds one." that points at a card title and a table
+// heading, then rests on the Embeds title (cursor rest @1, no pointing word), with every kind of page
+// event: a single, a double, a triple and a 5× click, a sentence already highlighted when the recording
+// started, and two highlights made during it (two table rows by drag, a phrase by double-click), so the
+// inspector, overlay, picks, rests, LLM context and timeline can be seen (and screenshotted) without a
+// mic or server.
+// `?demo=ro`: a Romanian turn "Mută butonul ăsta acolo, sub primul titlu." (the hero button → a card
+// title, then a rest on the first card title while saying "primul titlu"), detected language "ro".
 import type { CursorSample, PageClick, PageHighlight, Word } from "../../shared/protocol.ts";
 import { clickKind } from "./pageContext.ts";
 import { describeElement, type ElLike } from "./dom.ts";
@@ -14,7 +17,27 @@ const center = (el: Element) => {
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 };
 
-export function cannedSession(root: HTMLElement, scroller: HTMLElement): LabSession | null {
+/** Rest on each stop's element center from `from` to `to` (ms), moving linearly in between; slight jitter. */
+function trail(stops: { el: Element; from: number; to: number }[], t0: number, t1: number, scroller: HTMLElement, root: HTMLElement): CursorSample[] {
+  const describeAt = (x: number, y: number) => describeElement(document.elementFromPoint(x, y) as ElLike | null, root as unknown as ElLike);
+  const pts = stops.map((s) => ({ ...s, ...center(s.el) }));
+  const samples: CursorSample[] = [];
+  for (let t = t0; t <= t1; t += 16) {
+    const i = pts.findIndex((p) => t <= p.to);
+    const cur = pts[i === -1 ? pts.length - 1 : i]!;
+    const prev = i > 0 ? pts[i - 1]! : null;
+    const k = !prev || t >= cur.from ? 1 : (t - prev.to) / (cur.from - prev.to);
+    const a = prev ?? cur;
+    const jitter = Math.sin(t / 37) * 1.5; // a resting hand isn't perfectly still
+    const x = Math.round(a.x + (cur.x - a.x) * k + jitter);
+    const y = Math.round(a.y + (cur.y - a.y) * k);
+    samples.push({ t, x, y, scrollX: scroller.scrollLeft, scrollY: scroller.scrollTop, ...describeAt(x, y) });
+  }
+  return samples;
+}
+
+export function cannedSession(root: HTMLElement, scroller: HTMLElement, variant: "en" | "ro" = "en"): LabSession | null {
+  if (variant === "ro") return romanianSession(root, scroller);
   const title = root.querySelector(".card h3");
   const th = root.querySelectorAll(".pricing-table th")[3];
   const para = root.querySelector(".card p");
@@ -25,20 +48,17 @@ export function cannedSession(root: HTMLElement, scroller: HTMLElement): LabSess
   const visibleBottom = Math.min(sr.bottom, window.innerHeight);
   scroller.scrollTop += th.getBoundingClientRect().bottom - visibleBottom + 24;
 
-  const describeAt = (x: number, y: number) => describeElement(document.elementFromPoint(x, y) as ElLike | null, root as unknown as ElLike);
-  const a = center(title);
-  const b = center(th);
-  const samples: CursorSample[] = [];
-  for (let t = -400; t <= 1900; t += 16) {
-    const k = t < 650 ? 0 : t > 1000 ? 1 : (t - 650) / 350;
-    const jitter = Math.sin(t / 37) * 1.5; // a resting hand isn't perfectly still
-    const x = Math.round(a.x + (b.x - a.x) * k + jitter);
-    const y = Math.round(a.y + (b.y - a.y) * k);
-    samples.push({ t, x, y, scrollX: scroller.scrollLeft, scrollY: scroller.scrollTop, ...describeAt(x, y) });
-  }
+  // Then it rests on the Embeds title while saying "the Embeds one" (no pointing word: cursor rest @1).
+  const embedsTitle = root.querySelector(".card--wide h3");
+  const samples = trail([
+    { el: title, from: -400, to: 650 }, { el: th, from: 1000, to: 1500 },
+    ...(embedsTitle ? [{ el: embedsTitle, from: 1800, to: 2900 }] : []),
+  ], -400, 2900, scroller, root);
   const words: Word[] = [
     { text: "Make", start: 0.0, end: 0.2 }, { text: "this", start: 0.25, end: 0.45 }, { text: "title", start: 0.5, end: 0.75 },
-    { text: "match", start: 0.8, end: 1.0 }, { text: "that", start: 1.1, end: 1.3 }, { text: "column.", start: 1.35, end: 1.7 },
+    { text: "match", start: 0.8, end: 1.0 }, { text: "that", start: 1.1, end: 1.3 }, { text: "column,", start: 1.35, end: 1.7 },
+    { text: "like", start: 1.8, end: 1.95 }, { text: "the", start: 2.0, end: 2.1 }, { text: "Embeds", start: 2.15, end: 2.5 },
+    { text: "one.", start: 2.55, end: 2.75 },
   ];
   const ref = (el: Element) => describeElement(el as unknown as ElLike, root as unknown as ElLike);
   /** A click event on `el` with presses at `times` (release 90 ms after the last). */
@@ -82,6 +102,31 @@ export function cannedSession(root: HTMLElement, scroller: HTMLElement): LabSess
   return {
     id: "DEMO", createdAt: new Date().toISOString(), transcript: words.map((w) => w.text).join(" "), words, samples, labels,
     viewport: { width: scroller.clientWidth, height: scroller.clientHeight }, clicks, preselected, highlights,
+  };
+}
+
+/** "Mută butonul ăsta acolo, sub primul titlu.": the hero button, a card title, then a rest on the first card title. */
+function romanianSession(root: HTMLElement, scroller: HTMLElement): LabSession | null {
+  const cta = root.querySelector(".cta");
+  const titles = root.querySelectorAll(".card h3");
+  const first = titles[0], second = titles[1];
+  if (!cta || !first || !second) return null;
+  // Scroll so the button sits near the top of the pane, clear of the sticky header (the card titles below it).
+  scroller.scrollTop += cta.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 150;
+  const samples = trail([
+    { el: cta, from: -400, to: 950 }, { el: second, from: 1150, to: 1600 }, { el: first, from: 1800, to: 2800 },
+  ], -400, 2800, scroller, root);
+  const words: Word[] = [
+    { text: "Mută", start: 0.0, end: 0.25 }, { text: "butonul", start: 0.3, end: 0.7 }, { text: "ăsta", start: 0.75, end: 0.95 },
+    { text: "acolo,", start: 1.1, end: 1.4 }, { text: "sub", start: 1.6, end: 1.75 }, { text: "primul", start: 1.8, end: 2.1 },
+    { text: "titlu.", start: 2.15, end: 2.5 },
+  ];
+  const labels = labelsFor(words);
+  if (labels[0]) labels[0].target = describeElement(cta as unknown as ElLike, root as unknown as ElLike);
+  if (labels[1]) labels[1].target = describeElement(second as unknown as ElLike, root as unknown as ElLike);
+  return {
+    id: "DEMO-RO", createdAt: new Date().toISOString(), transcript: words.map((w) => w.text).join(" "), words, samples, labels,
+    viewport: { width: scroller.clientWidth, height: scroller.clientHeight }, language: "ro",
   };
 }
 

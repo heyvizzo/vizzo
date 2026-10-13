@@ -8,17 +8,18 @@
 import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
-import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type TtsModel } from "../../shared/config.ts";
-import type { LlmPrompt, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
+import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type SpeechLanguage, type TtsModel } from "../../shared/config.ts";
+import type { CursorRest, LlmPrompt, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
 import { bindPushToTalk } from "../audio/ptt.ts";
 import { mountDemo } from "../cursor/demoLoader.ts";
+import { describeElement, type ElLike } from "../cursor/dom.ts";
 import { renderOverlay } from "../cursor/overlay.ts";
 import { Sampler } from "../cursor/sampler.ts";
 import { createPageContextRecorder } from "../cursor/pageContext.ts";
-import { clickVerb, relTime } from "../../shared/pointing.ts";
+import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
 import { renderPrompt } from "./promptView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
@@ -30,6 +31,9 @@ const TICK_MS = 250;
 const SHOWN_ALGORITHM = "dwellMode";
 const STORE_KEY = "chat.settings.v1";
 const LONG_TASK_CHOICES = [10, 20, 30, 60];
+const LANGUAGES: { id: SpeechLanguage; label: string }[] = [
+  { id: "auto", label: "Auto (en/ro)" }, { id: "en", label: "English" }, { id: "ro", label: "Română" },
+];
 /** Dev-only static sample conversation (see renderDemo). */
 const DEMO = import.meta.env.DEV && new URLSearchParams(location.search).has("demo");
 
@@ -41,12 +45,16 @@ const APPROACHES: { id: ChatApproach; label: string; note: string }[] = [
 ];
 const labelOf = (a: Approach): string => APPROACHES.find((x) => x.id === a)?.label ?? a;
 
-interface Settings { approach: ChatApproach; realtimeModel: RealtimeModel; routerMode: RouterMode; ttsModel: TtsModel; longTaskSeconds: number }
+interface Settings {
+  approach: ChatApproach; realtimeModel: RealtimeModel; routerMode: RouterMode; ttsModel: TtsModel; longTaskSeconds: number; language: SpeechLanguage;
+}
 const settings: Settings = {
   approach: "pipeline", realtimeModel: DEFAULT_CONFIG.realtimeModel, routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, longTaskSeconds: 20,
+  language: "auto",
 };
 try { Object.assign(settings, JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}")); } catch { /* storage unavailable */ }
 if (!LONG_TASK_CHOICES.includes(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
+if (!LANGUAGES.some((l) => l.id === settings.language)) settings.language = "auto";
 const saveSettings = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch { /* ignore */ } };
 
 // ── layout ─────────────────────────────────────────
@@ -70,6 +78,9 @@ app.innerHTML = `
       </select></label>
       <label data-for="pipeline">Voice <select id="tts">
         <option value="eleven_v4_turbo">v4 Turbo</option><option value="eleven_flash_v2_5">Flash v2.5</option>
+      </select></label>
+      <label title="Spoken language: Scribe transcription and the pointing words (“this”, “ăsta”…). Auto detects English or Romanian.">Language <select id="language">
+        ${LANGUAGES.map((l) => `<option value="${l.id}">${l.label}</option>`).join("")}
       </select></label>
     </div>
     <div class="head-row opts">
@@ -120,10 +131,12 @@ const rtModel = $<HTMLSelectElement>("rt-model");
 const router = $<HTMLSelectElement>("router");
 const tts = $<HTMLSelectElement>("tts");
 const longTask = $<HTMLSelectElement>("long-task");
+const language = $<HTMLSelectElement>("language");
 rtModel.onchange = () => { settings.realtimeModel = rtModel.value as RealtimeModel; saveSettings(); };
 router.onchange = () => { settings.routerMode = router.value as RouterMode; saveSettings(); };
 tts.onchange = () => { settings.ttsModel = tts.value as TtsModel; saveSettings(); };
 longTask.onchange = () => { settings.longTaskSeconds = Number(longTask.value); saveSettings(); };
+language.onchange = () => { settings.language = language.value as SpeechLanguage; saveSettings(); };
 
 function renderSettings(): void {
   for (const [id, b] of segButtons) b.setAttribute("aria-pressed", String(id === settings.approach));
@@ -132,6 +145,7 @@ function renderSettings(): void {
   router.value = settings.routerMode;
   tts.value = settings.ttsModel;
   longTask.value = String(settings.longTaskSeconds);
+  language.value = settings.language;
   for (const el of document.querySelectorAll<HTMLElement>(".opts [data-for]")) {
     el.hidden = !el.dataset.for!.split(" ").includes(settings.approach);
   }
@@ -150,6 +164,7 @@ function config(): RunConfig {
     fillers: true,
     backgroundLongTasks: true,
     longTaskSeconds: settings.longTaskSeconds,
+    language: settings.language,
   };
 }
 
@@ -157,6 +172,8 @@ function config(): RunConfig {
 interface TurnView {
   root: HTMLElement;
   user: HTMLElement;
+  /** The transcript with its reference markers ("move it [@1] over there [1]"), under the user's bubble. */
+  annot: HTMLElement;
   chips: HTMLElement;
   badges: HTMLElement;
   decision: HTMLElement;
@@ -167,6 +184,10 @@ interface TurnView {
   meta: HTMLElement;
   /** "Prompt" section, created on the first llm.prompt for the turn. */
   prompts?: { root: HTMLDetailsElement; summary: HTMLElement; list: HTMLElement; n: number };
+  /** stt.final words and the pointing references, for the annotated transcript. */
+  words?: Word[];
+  targets?: PointingTarget[];
+  rests?: CursorRest[];
 }
 /** Every turn view by turnId (job cards are placed after the turn that started them). */
 const views = new Map<string, TurnView>();
@@ -183,6 +204,8 @@ function addTurnView(turnId: string, approach: ChatApproach): TurnView {
   const root = el("div", "turn");
   root.dataset.turn = turnId;
   const user = el("div", "bubble user pending", "listening…");
+  const annot = el("div", "annot");
+  annot.hidden = true;
   const chips = el("div", "chips");
   const badges = el("div", "badges");
   badges.hidden = true;
@@ -197,9 +220,9 @@ function addTurnView(turnId: string, approach: ChatApproach): TurnView {
   const detailPre = el("pre");
   detail.append(el("summary", undefined, "Opus's detailed answer"), detailPre);
   const meta = el("div", "meta");
-  root.append(user, chips, badges, bot, detail, meta);
+  root.append(user, annot, chips, badges, bot, detail, meta);
   messages.append(root);
-  const v = { root, user, chips, badges, decision, bot, botText, detail, detailPre, meta };
+  const v: TurnView = { root, user, annot, chips, badges, decision, bot, botText, detail, detailPre, meta };
   views.set(turnId, v);
   scrollDown();
   return v;
@@ -231,15 +254,52 @@ function shortTarget(t: PointingTarget): string {
   return s.label || s.elementPath?.split(">").pop()?.trim() || "(unknown)";
 }
 
-function renderChips(v: TurnView, targets: PointingTarget[], approach: ChatApproach): void {
+/** The final transcript in the user's bubble, with the detected language as a small tag. */
+function renderUserText(v: TurnView, text: string, words: Word[], lang?: string): void {
+  v.user.classList.remove("pending");
+  v.user.textContent = text || "(nothing heard)";
+  if (lang) {
+    const tag = el("span", "lang", lang);
+    tag.title = `Language detected by Scribe: ${lang}`;
+    v.user.append(tag);
+  }
+  v.words = words;
+  renderAnnot(v);
+}
+
+/** "move it [@1] over there [1]": what references the model got, once there are words and any markers. */
+function renderAnnot(v: TurnView): void {
+  const text = v.words ? annotateTranscript(v.words, (v.targets ?? []).filter((t) => t.algorithm === SHOWN_ALGORITHM), v.rests ?? []) : null;
+  v.annot.textContent = text ?? "";
+  v.annot.title = text ? "The transcript with the references the model got: [n] pointing words, [@n] cursor rests" : "";
+  v.annot.hidden = !text;
+}
+
+/** Seconds from the turn's first audio sample: "1.2–1.9 s". */
+function restSpan(r: CursorRest, tAudioStart: number | undefined): string {
+  const a = relTime(r.tStart, tAudioStart), b = relTime(r.tEnd, tAudioStart);
+  return a && b ? `${a.replace(" s", "")}–${b}` : `${Math.round(r.tEnd - r.tStart)} ms`;
+}
+
+function renderChips(v: TurnView, targets: PointingTarget[], approach: ChatApproach, rests: CursorRest[] = [], tAudioStart?: number): void {
   v.chips.replaceChildren();
+  v.targets = targets;
+  v.rests = rests;
   for (const t of targets.filter((x) => x.algorithm === SHOWN_ALGORITHM)) {
     const c = el("span", "chip");
     c.append(el("b", undefined, `${t.ref !== undefined ? `[${t.ref}] ` : ""}“${t.word}”`), ` → ${shortTarget(t)}`);
     if (approach === "realtime") c.title = "Approach A doesn't use pointing; shown for reference";
     v.chips.append(c);
   }
+  for (const r of rests) {
+    const c = el("span", "chip rest");
+    c.append(el("b", undefined, `[@${r.ref}]`), ` rested on ${r.sample.label || r.sample.elementPath?.split(">").pop()?.trim() || "(element)"}`);
+    c.title = `${describeRef(r.sample) || "(element)"} · ${restSpan(r, tAudioStart)}${r.whole ? " · whole time" : ""}`;
+    if (r.whole) c.append(el("span", "whole", " · whole time"));
+    v.chips.append(c);
+  }
   if (approach === "realtime" && v.chips.childElementCount) v.chips.append(el("span", "chip", "not sent to A"));
+  renderAnnot(v);
 }
 
 /** What was clicked / highlighted during the turn (with times from when you started speaking), under the pointing chips. */
@@ -405,6 +465,7 @@ const sampler = new Sampler(demoRoot, scroller);
 const pageRec = createPageContextRecorder(demoRoot);
 let player: Player | null = null;
 let lastTargets: PointingTarget[] = [];
+let lastRests: CursorRest[] = [];
 /** Rough "is something audible" estimate from bytes pushed vs time. */
 const playback = new PlaybackClock();
 /** Whose audio was pushed last, so a barge-in only tags a turn whose reply was actually cut off. */
@@ -414,12 +475,14 @@ let noticeJobId: string | null = null;
 /** Notices the user stopped or talked over: ignore the rest of their frames/messages. */
 const stoppedNotices = new Set<string>();
 
-void mountDemo(demoRoot).then(() => sampler.start());
+/** ?demo=1: draws the sample turn's pointing targets and rests once the demo page is mounted. */
+let demoOverlay: (() => void) | null = null;
+void mountDemo(demoRoot).then(() => { sampler.start(); demoOverlay?.(); });
 scroller.addEventListener("scroll", () => drawOverlay(), { passive: true });
 window.addEventListener("resize", () => drawOverlay());
 
 function drawOverlay(): void {
-  renderOverlay(layer, scroller, lastTargets, [], new Set([SHOWN_ALGORITHM]));
+  renderOverlay(layer, scroller, lastTargets, [], new Set([SHOWN_ALGORITHM]), null, lastRests);
 }
 
 async function enableAudio(): Promise<void> {
@@ -551,6 +614,7 @@ function press(): void {
   };
   turn = t;
   lastTargets = [];
+  lastRests = [];
   drawOverlay();
   sock.send({ type: "turn.start", turnId, config: config(), tPress: now });
   pageRec.start(now - PRE_ROLL_MS);
@@ -658,12 +722,12 @@ sock.on((msg: ServerMsg) => {
       v.user.textContent = msg.text || "…";
       break;
     case "stt.final":
-      v.user.classList.remove("pending");
-      v.user.textContent = msg.text || "(nothing heard)";
+      renderUserText(v, msg.text, msg.words, msg.language);
       break;
     case "pointing.resolved":
       lastTargets = msg.targets;
-      renderChips(v, msg.targets, t.approach);
+      lastRests = msg.rests ?? [];
+      renderChips(v, msg.targets, t.approach, lastRests, t.tAudioStart);
       drawOverlay();
       break;
     case "decision":
@@ -734,6 +798,7 @@ function clearConversation(): void {
   renderJobsPill();
   $("empty").hidden = false;
   lastTargets = [];
+  lastRests = [];
   drawOverlay();
 }
 
@@ -813,6 +878,41 @@ function renderDemo(): void {
   const t4 = turnOf("demo-4", "realtime", "Summarise the pricing table for me.",
     "The pricing table has three tiers. The Starter plan is", { intent: "question", estimateS: 12, background: false });
   addTag(t4, "interrupted");
+
+  // Romanian, with two pointing words and a cursor rest; drawn on the demo page too (once it's mounted).
+  const t6 = turnOf("demo-6", "pipeline", "", "Gata: am mutat butonul „Get started” în cardul Drag-and-drop, sub titlul Live queries.",
+    { intent: "task", estimateS: 6, background: false });
+  const roWords: Word[] = [
+    { text: "Mută", start: 0.0, end: 0.25 }, { text: "butonul", start: 0.3, end: 0.7 }, { text: "ăsta", start: 0.75, end: 0.95 },
+    { text: "acolo,", start: 1.1, end: 1.4 }, { text: "sub", start: 1.6, end: 1.75 }, { text: "primul", start: 1.8, end: 2.1 },
+    { text: "titlu.", start: 2.15, end: 2.5 },
+  ];
+  renderUserText(t6, "Mută butonul ăsta acolo, sub primul titlu.", roWords, "ro");
+  const ref = (sel: string, label: string) => {
+    const e = demoRoot.querySelector(sel);
+    return { ...sample(label), ...(e ? describeElement(e as unknown as ElLike, demoRoot as unknown as ElLike) : {}) };
+  };
+  const roTargets = (): PointingTarget[] => [
+    { word: "ăsta", wordStart: 0.75, algorithm: SHOWN_ALGORITHM, sample: ref(".cta", "Get started button"), ref: 1, wordIndex: 2 },
+    { word: "acolo", wordStart: 1.1, algorithm: SHOWN_ALGORITHM, sample: ref(".card:nth-of-type(2) h3", "Card title: Drag-and-drop"), ref: 2, wordIndex: 3 },
+  ];
+  const roRests = (): CursorRest[] => [
+    { ref: 1, tStart: 1800, tEnd: 2800, sample: ref(".card h3", "Card title: Live queries"), wordIndex: 6, whole: false },
+  ];
+  renderChips(t6, roTargets(), "pipeline", roRests(), 0);
+  renderMeta(t6, { metrics: metrics(530, 2210, null), costUsd: 0.0016 });
+
+  // English, no pointing word: only a cursor rest (the pointer stayed on the image the whole time).
+  const t7 = turnOf("demo-7", "hybrid", "", "Sure, I'll make the Embeds card span the full width.", { intent: "task", estimateS: 4, background: false });
+  const enWords: Word[] = [
+    { text: "Make", start: 0.0, end: 0.2 }, { text: "it", start: 0.25, end: 0.35 }, { text: "a", start: 0.4, end: 0.45 },
+    { text: "bit", start: 0.5, end: 0.65 }, { text: "wider.", start: 0.7, end: 1.1 },
+  ];
+  renderUserText(t7, "Make it a bit wider.", enWords, "en");
+  renderChips(t7, [], "hybrid", [{ ref: 1, tStart: -200, tEnd: 1300, sample: sample("Card: Embeds"), wordIndex: 1, whole: true }], 0);
+  renderMeta(t7, { metrics: metrics(470, 470, null), costUsd: 0.0007 });
+
+  demoOverlay = () => { lastTargets = roTargets(); lastRests = roRests(); renderChips(t6, lastTargets, "pipeline", lastRests, 0); drawOverlay(); };
 
   turnOf("demo-5", "pipeline", "Audit every page for accessibility issues.",
     "On it. I'll keep going in the background and read you the results when I'm done.",
