@@ -266,7 +266,13 @@ const saying = (t: number, words: Word[], tAudioStart: number | undefined): stri
  * Clicks: sorted by time, the latest MAX_CLICK_LINES; the word nearest the first click (CLICK_WORD_MAX_MS).
  * Highlights: in order, the latest MAX_HIGHLIGHT_LINES, numbered; the word nearest the highlight's end.
  */
-export function formatPageContext(ev: PageEvents | null | undefined, words: Word[], tAudioStart: number | undefined): string {
+export function formatPageContext(ev: PageEvents | null | undefined, words: Word[], tAudioStart: number | undefined, ...legacy: unknown[]): string {
+  // TEMPORARY: old call shape (clicks[], selection, words, tAudioStart) from the not-yet-updated Cursor lab.
+  if (Array.isArray(ev)) {
+    const sel = words as unknown as PageEvents["preselected"];
+    return formatPageContext({ clicks: (ev as PageClick[]).map(legacyClick), preselected: null, highlights: sel ? [{ ...sel, tStart: sel.t }] : [] },
+      (tAudioStart as unknown as Word[]) ?? [], legacy[0] as number | undefined);
+  }
   if (!ev) return "";
   const lines = sortClicks(ev.clicks ?? []).map((c) =>
     `${clickVerb(c)}: ${describeRef(c)}${when(c.t, c.kind === "single" ? c.t : c.tEnd, tAudioStart)}${saying(c.t, words, tAudioStart)}`);
@@ -282,3 +288,10 @@ export function formatPageContext(ev: PageEvents | null | undefined, words: Word
   });
   return lines.join("\n");
 }
+
+// ── TEMPORARY compatibility for the Cursor lab until its update for PageEvents lands ──────────────
+function legacyClick(c: PageClick): PageClick {
+  return c.kind ? c : { ...c, kind: "single", count: 1, tEnd: c.t, times: [c.t] };
+}
+/** @deprecated use sortClicks */
+export const dedupeClicks = (clicks: readonly PageClick[], max = MAX_CLICK_LINES): PageClick[] => sortClicks(clicks, max);
