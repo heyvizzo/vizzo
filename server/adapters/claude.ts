@@ -151,13 +151,15 @@ export function buildRouterParams(transcript: string, pointing: PointingTarget[]
   };
 }
 
-export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointing, mode, onSpokenDelta }) => {
+export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointing, mode, onSpokenDelta, onSpokenEnd }) => {
   const params = buildRouterParams(transcript, pointing, mode);
   const ack = new JsonStringFieldExtractor("ack");
   let firstToken = false;
   let toolIndex = -1;
   let json = "";
   let spokenText = "";
+  let ackEnded = false;
+  const endAck = (): void => { if (!ackEnded) { ackEnded = true; onSpokenEnd?.("ack"); } };
   const first = (): void => { if (!firstToken) { firstToken = true; mark("llm.firstToken"); } };
 
   mark("llm.request", { model: params.model, mode });
@@ -173,12 +175,13 @@ export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointin
         if (ev.delta.type === "text_delta") {
           first();
           spokenText += ev.delta.text;
-          onSpokenDelta(ev.delta.text);
+          onSpokenDelta(ev.delta.text, "answer");
         } else if (ev.delta.type === "input_json_delta" && ev.index === toolIndex) {
           first();
           json += ev.delta.partial_json;
           const out = ack.feed(ev.delta.partial_json);
-          if (out) onSpokenDelta(out);
+          if (out) onSpokenDelta(out, "ack");
+          if (ack.done) endAck();
         }
       }
     }
@@ -219,7 +222,8 @@ export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointin
     return { delegate: { question: `${transcript}\n${formatPointingForPrompt(pointing)}` }, usage };
   }
   // If the extractor fell behind the final value (shouldn't happen), speak the remainder.
-  if (input.ack.startsWith(ack.value) && input.ack.length > ack.value.length) onSpokenDelta(input.ack.slice(ack.value.length));
+  if (input.ack.startsWith(ack.value) && input.ack.length > ack.value.length) onSpokenDelta(input.ack.slice(ack.value.length), "ack");
+  endAck();
   return { delegate: { question: input.question }, usage };
 };
 

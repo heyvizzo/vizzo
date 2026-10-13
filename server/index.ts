@@ -1,37 +1,75 @@
 import "dotenv/config";
 import { createServer } from "node:http";
+import { pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 import { Session } from "./session.ts";
 import { loadRuns } from "./results.ts";
+import type { Orchestrator } from "./orchestrators/types.ts";
+import type { RunConfig } from "../shared/config.ts";
 
-const PORT = Number(process.env.PORT ?? 8787);
+export interface StartServerOpts {
+  /** Override the approach → orchestrator table (smoke:e2e --fake). */
+  orchestrators?: Partial<Record<RunConfig["approach"], Orchestrator>>;
+  /** Append runs to results/*.jsonl (default true). */
+  persist?: boolean;
+  quiet?: boolean;
+}
 
-const http = createServer(async (req, res) => {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  if (req.method === "GET" && url.pathname === "/api/results") {
-    res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify(await loadRuns()));
-  }
-  if (req.method === "GET" && url.pathname === "/api/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify({
-      ok: true,
-      keys: {
-        anthropic: !!process.env.ANTHROPIC_API_KEY,
-        openai: !!process.env.OPENAI_API_KEY,
-        elevenlabs: !!process.env.ELEVENLABS_API_KEY,
-        elevenVoice: !!process.env.ELEVENLABS_VOICE_ID,
-      },
-    }));
-  }
-  res.writeHead(404).end();
-});
+export interface RunningServer { port: number; close(): Promise<void> }
 
-const wss = new WebSocketServer({ server: http, path: "/ws" });
-wss.on("connection", (ws) => {
-  console.log("[ws] connected");
-  new Session(ws);
-  ws.on("close", () => console.log("[ws] closed"));
-});
+/** Start the HTTP + /ws server. Port 0 picks a free port. */
+export function startServer(port: number, opts: StartServerOpts = {}): Promise<RunningServer> {
+  const log = opts.quiet ? () => {} : (...a: unknown[]) => console.log(...a);
+  const http = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (req.method === "GET" && url.pathname === "/api/results") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(await loadRuns()));
+    }
+    if (req.method === "GET" && url.pathname === "/api/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({
+        ok: true,
+        keys: {
+          anthropic: !!process.env.ANTHROPIC_API_KEY,
+          openai: !!process.env.OPENAI_API_KEY,
+          elevenlabs: !!process.env.ELEVENLABS_API_KEY,
+          elevenVoice: !!process.env.ELEVENLABS_VOICE_ID,
+        },
+      }));
+    }
+    res.writeHead(404).end();
+  });
 
-http.listen(PORT, () => console.log(`[server] http://localhost:${PORT}  ws://localhost:${PORT}/ws`));
+  const wss = new WebSocketServer({ server: http, path: "/ws" });
+  wss.on("connection", (ws) => {
+    log("[ws] connected");
+    new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist });
+    ws.on("close", () => log("[ws] closed"));
+  });
+
+  return new Promise((resolve, reject) => {
+    http.once("error", reject);
+    http.listen(port, () => {
+      const addr = http.address();
+      const actual = typeof addr === "object" && addr ? addr.port : port;
+      log(`[server] http://localhost:${actual}  ws://localhost:${actual}/ws`);
+      resolve({
+        port: actual,
+        close: () => new Promise<void>((res) => {
+          for (const c of wss.clients) c.terminate();
+          wss.close();
+          http.close(() => res());
+        }),
+      });
+    });
+  });
+}
+
+// `npm run dev:server` / `tsx server/index.ts`: listen on PORT (default 8787).
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  startServer(Number(process.env.PORT ?? 8787)).catch((e) => {
+    console.error("[server] failed to start", e);
+    process.exit(1);
+  });
+}
