@@ -102,6 +102,21 @@ export interface LlmPrompt {
   settings?: Record<string, unknown>;
 }
 
+/** What a model call returned, raw (debug view). One per Claude call; one per response for Realtime. */
+export interface LlmResponse {
+  target: PromptTarget;
+  model?: string;
+  /** Realtime: which response of the turn ("ack", "filler", "answer", "notice"). */
+  label?: string;
+  stopReason?: string | null;
+  usage?: unknown;
+  /** From sending the request to the final message / response.done. */
+  durationMs?: number;
+  /** The final message / response.done payload as received. */
+  raw?: unknown;
+  error?: string;
+}
+
 /** Everything the user did on the page during a turn (ClientMsg turn.context). */
 export interface PageEvents {
   clicks: PageClick[];
@@ -176,7 +191,9 @@ export type ServerMsg =
   /** The voice layer's decision for this turn, as soon as it's known. background: Opus runs as a job. */
   | { type: "decision"; turnId: string; intent: RouteIntent; estimateS: number | null; background: boolean }
   /** A model call's exact prompt. jobId: sent by a background job (after its turn ended). */
-  | { type: "llm.prompt"; turnId: string; jobId?: string; prompt: LlmPrompt }
+  | { type: "llm.prompt"; turnId: string; jobId?: string; callId: string; prompt: LlmPrompt }
+  /** The raw result of the call with the same callId. */
+  | { type: "llm.response"; turnId: string; jobId?: string; callId: string; response: LlmResponse }
   /** Background job lifecycle (chat mode, long tasks). Not tied to the active turn. */
   | { type: "job"; job: JobInfo }
   /** Frames a spoken job result: binary audio between start and end belongs to it (sent only when no turn is active). */

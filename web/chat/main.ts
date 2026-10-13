@@ -9,7 +9,7 @@ import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type SpeechLanguage, type TtsModel } from "../../shared/config.ts";
-import type { CursorRest, LlmPrompt, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
+import type { CursorRest, LlmPrompt, LlmResponse, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -20,7 +20,7 @@ import { renderOverlay } from "../cursor/overlay.ts";
 import { Sampler } from "../cursor/sampler.ts";
 import { createPageContextRecorder } from "../cursor/pageContext.ts";
 import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
-import { renderPrompt } from "./promptView.ts";
+import { addResponse, renderPrompt } from "./promptView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
@@ -361,7 +361,7 @@ const jobs = new Map<string, JobCard>();
 const droppedJobs = new Set<string>();
 
 /** Prompts of background jobs whose card doesn't exist yet. */
-const pendingJobPrompts = new Map<string, LlmPrompt[]>();
+const pendingJobPrompts = new Map<string, { prompt: LlmPrompt; callId: string }[]>();
 
 /** The "Prompt" section of a turn or job card: what each model call was sent. */
 function promptSection(host: HTMLElement): NonNullable<TurnView["prompts"]> {
@@ -373,24 +373,41 @@ function promptSection(host: HTMLElement): NonNullable<TurnView["prompts"]> {
   return { root, summary, list, n: 0 };
 }
 
-function pushPrompt(sec: NonNullable<TurnView["prompts"]>, p: LlmPrompt): void {
-  sec.list.append(renderPrompt(p));
+/** Rendered calls by callId, so responses land under their prompt. */
+const calls = new Map<string, HTMLDetailsElement>();
+/** Responses that arrived before their prompt was rendered (job cards not created yet). */
+const pendingResponses = new Map<string, LlmResponse[]>();
+
+function pushPrompt(sec: NonNullable<TurnView["prompts"]>, p: LlmPrompt, callId?: string): void {
+  const call = renderPrompt(p);
+  sec.list.append(call);
+  if (callId) {
+    calls.set(callId, call);
+    for (const r of pendingResponses.get(callId) ?? []) addResponse(call, r);
+    pendingResponses.delete(callId);
+  }
   sec.n++;
-  sec.summary.textContent = `Prompt · ${sec.n} model call${sec.n === 1 ? "" : "s"}`;
+  sec.summary.textContent = `Prompts & responses · ${sec.n} model call${sec.n === 1 ? "" : "s"}`;
+}
+
+function onResponse(msg: Extract<ServerMsg, { type: "llm.response" }>): void {
+  const call = calls.get(msg.callId);
+  if (call) addResponse(call, msg.response);
+  else pendingResponses.set(msg.callId, [...(pendingResponses.get(msg.callId) ?? []), msg.response]);
 }
 
 function addPrompt(msg: Extract<ServerMsg, { type: "llm.prompt" }>): void {
   if (msg.jobId) {
     const card = jobs.get(msg.jobId);
-    if (!card) { pendingJobPrompts.set(msg.jobId, [...(pendingJobPrompts.get(msg.jobId) ?? []), msg.prompt]); return; }
+    if (!card) { pendingJobPrompts.set(msg.jobId, [...(pendingJobPrompts.get(msg.jobId) ?? []), { prompt: msg.prompt, callId: msg.callId }]); return; }
     card.prompts ??= promptSection(card.root);
-    pushPrompt(card.prompts, msg.prompt);
+    pushPrompt(card.prompts, msg.prompt, msg.callId);
     return;
   }
   const v = views.get(msg.turnId);
   if (!v) return;
   v.prompts ??= promptSection(v.root);
-  pushPrompt(v.prompts, msg.prompt);
+  pushPrompt(v.prompts, msg.prompt, msg.callId);
 }
 
 function createJobCard(info: JobInfo): JobCard {
@@ -422,7 +439,7 @@ function upsertJob(info: JobInfo): void {
   if (!c) {
     c = createJobCard(info);
     jobs.set(info.jobId, c);
-    for (const p of pendingJobPrompts.get(info.jobId) ?? []) { c.prompts ??= promptSection(c.root); pushPrompt(c.prompts, p); }
+    for (const p of pendingJobPrompts.get(info.jobId) ?? []) { c.prompts ??= promptSection(c.root); pushPrompt(c.prompts, p.prompt, p.callId); }
     pendingJobPrompts.delete(info.jobId);
     if (c.root === messages.lastElementChild) scrollDown();
   }
@@ -701,6 +718,7 @@ const INTENT_STATUS: Record<RouteIntent, string> = {
 
 sock.on((msg: ServerMsg) => {
   if (msg.type === "llm.prompt") return addPrompt(msg);
+  if (msg.type === "llm.response") return onResponse(msg);
   if (msg.type === "job") return upsertJob(msg.job);
   if (msg.type === "notice") return onNotice(msg);
   if (!("turnId" in msg) || !msg.turnId) {
@@ -793,6 +811,8 @@ setInterval(() => {
 function clearConversation(): void {
   messages.querySelectorAll(".turn, .job, .note").forEach((n) => n.remove());
   views.clear();
+  calls.clear();
+  pendingResponses.clear();
   for (const id of jobs.keys()) droppedJobs.add(id);
   jobs.clear();
   renderJobsPill();

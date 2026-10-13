@@ -6,7 +6,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { BetaMessage, BetaMessageStreamParams } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { MODELS, type RouterMode } from "../../shared/config.ts";
 import { formatPointingLine } from "../../shared/pointing.ts";
-import type { Intent, LlmPrompt, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
+import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
 import { kindFor, parseEstimate, RouteInputStream, SpokenLineParser, type RouteFields } from "./claudeParse.ts";
 import type { GenerateFillers, RouteDecision, RouteWithHaiku, SolveWithOpus } from "./types.ts";
 import { trimDetail, type ChatTurn } from "../conversation.ts";
@@ -55,6 +55,19 @@ export function promptInfo(target: LlmPrompt["target"], params: AnyParams, syste
     settings: Object.fromEntries(Object.entries({
       max_tokens: params.max_tokens, output_config: params.output_config, betas: params.betas, speed: params.speed, fallbacks: params.fallbacks,
     }).filter(([, v]) => v !== undefined)),
+  };
+}
+
+/** The final message as a debug response (or the error), with the time since the request. */
+export function responseInfo(
+  target: LlmPrompt["target"], t0: number, final: { model?: string; stop_reason?: string | null; usage?: unknown } | null, err?: unknown,
+): LlmResponse {
+  return {
+    target,
+    ...(final?.model ? { model: final.model } : {}),
+    ...(final ? { stopReason: final.stop_reason ?? null, usage: final.usage, raw: final } : {}),
+    durationMs: Math.round(performance.now() - t0),
+    ...(err !== undefined ? { error: err instanceof Error ? err.message : String(err) } : {}),
   };
 }
 
@@ -303,7 +316,7 @@ export function buildRouterParams(
 }
 
 export const routeWithHaiku: RouteWithHaiku = async ({
-  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, onDecision, onSpokenDelta, onSpokenEnd, onPrompt,
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse,
 }) => {
   const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language });
   onPrompt?.(promptInfo("router", params as AnyParams, ["router.md"]));
@@ -322,6 +335,7 @@ export const routeWithHaiku: RouteWithHaiku = async ({
   const first = (): void => { if (!firstToken) { firstToken = true; mark("llm.firstToken"); } };
 
   mark("llm.request", { model: params.model, mode });
+  const t0 = performance.now();
   const stream = getClient().messages.stream(params);
   let streamError: unknown = null;
   let final: Anthropic.Message | null = null;
@@ -338,7 +352,9 @@ export const routeWithHaiku: RouteWithHaiku = async ({
       // Text blocks can't occur with a forced tool choice; ignore them if they ever do.
     }
     final = await stream.finalMessage();
+    onResponse?.(responseInfo("router", t0, final));
   } catch (err) {
+    onResponse?.(responseInfo("router", t0, null, err));
     // Typed API errors (auth, rate limit, 5xx…) propagate. Anything else here is the SDK failing
     // to parse eagerly-streamed tool JSON; we handle that below like an invalid input.
     if (err instanceof Anthropic.APIError || toolIndex < 0) throw err;
@@ -436,11 +452,13 @@ export function buildFillersParams(
 
 const MAX_FILLERS = 3;
 
-export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, onPrompt }) => {
+export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, onPrompt, onResponse }) => {
+  const t0 = performance.now();
   try {
     const fp = buildFillersParams(transcript, question, intent, pointing, language);
     onPrompt?.(promptInfo("fillers", fp as AnyParams, ["fillers.md"]));
     const msg = await getClient().messages.create(fp);
+    onResponse?.(responseInfo("fillers", t0, msg));
     if (msg.usage) logUsage("haiku fillers", msg.usage);
     if (msg.stop_reason === "refusal") {
       log("[claude] haiku fillers refused; no fillers");
@@ -452,6 +470,7 @@ export const generateFillers: GenerateFillers = async ({ transcript, question, i
     if (!lines.length) log(`[claude] haiku fillers: no usable lines (stop_reason=${msg.stop_reason})`);
     return { lines, usage: msg.usage ?? null };
   } catch (err) {
+    onResponse?.(responseInfo("fillers", t0, null, err));
     log(`[claude] haiku fillers failed: ${err instanceof Error ? err.message : String(err)}`);
     return { lines: [], usage: null };
   }
@@ -500,7 +519,8 @@ export function buildOpusParams(
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, language }) => {
+export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language }) => {
+  const t0 = performance.now();
   let text = "";
   let firstToken = false;
   let spokenReady = false;
@@ -533,14 +553,20 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
 
   let final: Anthropic.Beta.Messages.BetaMessage;
   try {
-    final = await run(fast);
+    try {
+      final = await run(fast);
+    } catch (err) {
+      // Fast mode has its own rate limit: on a 429 before any output, retry at standard speed.
+      if (!(fast && err instanceof Anthropic.RateLimitError && !firstToken)) throw err;
+      fastFellBack = true;
+      log("[claude] opus fast mode 429; falling back to standard speed");
+      final = await run(false);
+    }
   } catch (err) {
-    // Fast mode has its own rate limit: on a 429 before any output, retry at standard speed.
-    if (!(fast && err instanceof Anthropic.RateLimitError && !firstToken)) throw err;
-    fastFellBack = true;
-    log("[claude] opus fast mode 429; falling back to standard speed");
-    final = await run(false);
+    onResponse?.(responseInfo("opus", t0, null, err));
+    throw err;
   }
+  onResponse?.(responseInfo("opus", t0, final));
 
   if (!spokenReady) parser.end();
   const usage = final.usage;

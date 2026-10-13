@@ -7,6 +7,7 @@ import type { RunConfig } from "../../shared/config.ts";
 import type { Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
 import { getConversation, type ChatTurn } from "../conversation.ts";
 import { idleRealtime } from "./shared.ts";
+import { tracer } from "./trace.ts";
 import type { ConnectionCache, ConnectionChannel, OrchestratorDeps } from "./types.ts";
 
 const KEY = "jobs";
@@ -65,7 +66,7 @@ export function startJob(
   deps.solveWithOpus({
     mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.opusFast,
     history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language,
-    onPrompt: (prompt) => { if (!reg.cancelled) channel.send({ type: "llm.prompt", turnId: spec.turnId, jobId: job.jobId, prompt }); },
+    ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId)(),
     onSpokenLine: (l) => { spoken = l.trim(); },
     onDelta: (d) => { text += d; },
   }).then(

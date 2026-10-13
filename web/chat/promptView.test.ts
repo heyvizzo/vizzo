@@ -26,3 +26,17 @@ describe("promptView", () => {
     expect(t.trimEnd().endsWith('Clicked: <th> "Price / month"')).toBe(true);
   });
 });
+
+describe("response view", () => {
+  it("summarizes Anthropic usage (cache read/write) and OpenAI Realtime usage (cached, audio)", async () => {
+    const { responseSummary, usageSummary, responseBadge } = await import("./promptView.ts");
+    expect(usageSummary({ input_tokens: 182, output_tokens: 816, cache_read_input_tokens: 9215, cache_creation_input_tokens: 0 })).toBe("in 182 (cache read 9,215) · out 816");
+    expect(usageSummary({ input_tokens: 1003, output_tokens: 202, input_token_details: { cached_tokens: 960, audio_tokens: 38 }, output_token_details: { audio_tokens: 120 } }))
+      .toBe("in 1,003 (cache read 960, audio 38) · out 202 (audio 120)");
+    expect(usageSummary(null)).toBe("");
+    const r = { target: "opus" as const, stopReason: "end_turn", usage: { input_tokens: 182, output_tokens: 816 }, durationMs: 7748 };
+    expect(responseSummary(r)).toBe("↳ response · stop: end_turn · in 182 · out 816 · 7.7 s");
+    expect(responseSummary({ target: "router", error: "529 overloaded", durationMs: 300 })).toBe("↳ error · 529 overloaded · 0.3 s");
+    expect(responseBadge({ target: "realtime", label: "answer", stopReason: "completed", durationMs: 2100 })).toBe("✓ answer completed 2.1 s");
+  });
+});

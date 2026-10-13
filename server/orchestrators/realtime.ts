@@ -20,6 +20,7 @@ import { FillerScheduler } from "./fillers.ts";
 import { DEFAULT_LONG_TASK_SECONDS, languageName } from "../adapters/claude.ts";
 import { startJob } from "./jobs.ts";
 import type { Intent, LlmPrompt, RouteIntent } from "../../shared/protocol.ts";
+import { tracer } from "./trace.ts";
 import type { ChatTurn } from "../conversation.ts";
 import { errMessage, sleep, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
@@ -60,7 +61,10 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
     let decided = false;
     let writer: SegmentWriter | null = null;
     let audioBytes = 0;
-    const emitPrompt = (prompt: LlmPrompt) => { if (!base.isFinished) ctx.send({ type: "llm.prompt", turnId: ctx.turnId, prompt }); };
+    const trace = tracer((m) => { if (!base.isFinished) ctx.send(m); }, ctx.turnId);
+    /** The Realtime call of this turn: its prompt, then one response per response.done. */
+    const rtCall = trace();
+    let rtT0 = 0;
     let textSeg: Segment = "ack";
     // hybrid
     let finalArrived = false;
@@ -96,6 +100,14 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       },
       onToolCall: (call) => handleTool(call),
       onError: (e) => base.fail("openai", e),
+      onResponseDone: ({ label, stale, response }) => {
+        if (stale || !rtT0) return;
+        const r = response as { status?: string; usage?: unknown };
+        rtCall.onResponse({
+          target: "realtime", model: cfg.realtimeModel, label, stopReason: r.status ?? null, usage: r.usage,
+          durationMs: Math.round(performance.now() - rtT0), raw: response,
+        });
+      },
     };
 
     function acquire(): Promise<RealtimeLease> {
@@ -176,7 +188,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (cfg.fillers && deps.generateFillers) {
         fillers = new FillerScheduler(
           base,
-          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, language: base.language, onPrompt: emitPrompt })
+          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, language: base.language, ...trace() })
             .then((r) => { fillerUsage = r.usage; return r.lines; }),
           async (line) => {
             await s.speak(line, "filler");
@@ -187,7 +199,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       }
       opusRuns.push(
         deps.solveWithOpus({
-          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, language: base.language, onPrompt: emitPrompt,
+          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, language: base.language, ...trace(),
           onSpokenLine: sendResult, onDelta: (d) => base.opus(d),
         })
           .then((r) => {
@@ -252,7 +264,8 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], historyRecapTurns: unseen.length };
       }
       responding = true;
-      emitPrompt(realtimePrompt(cfg.realtimeModel, audioBytes, context, cfg.memory ? getConversation(ctx.connection).filter((t) => l.seenTurns.has(t.turnId) && t.turnId !== ctx.turnId) : null));
+      rtT0 = performance.now();
+      rtCall.onPrompt(realtimePrompt(cfg.realtimeModel, audioBytes, context, cfg.memory ? getConversation(ctx.connection).filter((t) => l.seenTurns.has(t.turnId) && t.turnId !== ctx.turnId) : null));
       l.session.commitAndRespond(context);
 
       for (let i = 0; i < MAX_RESPONSES; i++) {

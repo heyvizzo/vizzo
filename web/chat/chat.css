@@ -108,3 +108,11 @@ details.pcall pre, details.psys pre { margin: 0; white-space: pre-wrap; overflow
 .chip.rest { border-style: dashed; border-color: #9d3f72; }
 .chip.rest b { color: #f472b6; }
 .chip.rest .whole { color: #f9a8d4; }
+
+/* Responses under each call */
+.pbadge { color: var(--ok); }
+details.pcall.err .pbadge { color: var(--err); }
+.presps { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; border-top: 1px dashed var(--line); padding-top: 6px; }
+details.presp > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: #9fd8b5; }
+details.presp.err > summary { color: var(--err); }
+details.presp pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.4 ui-monospace, monospace; color: #cfd6e4; max-height: 360px; overflow: auto; background: #0f1218; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }

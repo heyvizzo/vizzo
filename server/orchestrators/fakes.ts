@@ -4,7 +4,7 @@ import type { GenerateFillers,
   OpenRealtime, OpenScribe, OpenTts, RealtimeSession, RealtimeUsage, RouteWithHaiku, SolveWithOpus, SttStream, ToolCall, TtsStream,
 } from "../adapters/types.ts";
 import type { Mark } from "../clock.ts";
-import type { LlmPrompt, RouteIntent, Word } from "../../shared/protocol.ts";
+import type { LlmPrompt, LlmResponse, RouteIntent, Word } from "../../shared/protocol.ts";
 import type { OrchestratorDeps } from "./types.ts";
 
 export interface FakeTiming {
@@ -179,6 +179,7 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     const textCbs: ((d: string) => void)[] = [];
     const toolCbs: ((c: ToolCall) => void)[] = [];
     const errCbs: ((e: Error) => void)[] = [];
+    const doneCbs: Parameters<RealtimeSession["onResponseDone"]>[0][] = [];
     const usage: RealtimeUsage = {
       responses: [],
       totals: { inputTokens: 0, outputTokens: 0, inputText: 0, inputAudio: 0, cachedText: 0, cachedAudio: 0, cached: 0, outputText: 0, outputAudio: 0 },
@@ -228,6 +229,7 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
           u.outputText += 10; u.outputAudio += 40;
         }
         active = null;
+        for (const cb of doneCbs) cb({ label: seg, stale: me.cancelled, response: { object: "realtime.response", status: me.cancelled ? "cancelled" : "completed", usage: marks(seg) ? usage.responses.at(-1) : null } });
         done?.();
         const next = queue.shift();
         if (next) respond(next.seg, next.text, next.done);
@@ -251,6 +253,7 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
       onText(cb) { textCbs.push(cb); },
       onToolCall(cb) { toolCbs.push(cb); },
       onError(cb) { errCbs.push(cb); },
+      onResponseDone(cb) { doneCbs.push(cb); },
       sendToolResult(callId, output, opts) {
         if (opts?.respond === false) { log.sentToolResults.push({ callId, output, respond: false }); return; }
         log.sentToolResults.push({ callId, output });
@@ -286,7 +289,10 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
   const fakePrompt = (target: LlmPrompt["target"], text: string): LlmPrompt =>
     ({ target, model: `fake-${target}`, system: [{ label: `${target}.md`, text: "(fake instructions)", cached: true }], messages: [{ role: "user", text, label: "this turn" }] });
 
-  const routeWithHaiku: RouteWithHaiku = async ({ mark, mode, transcript, onDecision, onSpokenDelta, onSpokenEnd, onPrompt }) => {
+  const fakeResponse = (target: LlmPrompt["target"], stopReason: string, usage: unknown): LlmResponse =>
+    ({ target, model: `fake-${target}`, stopReason, usage, durationMs: 1, raw: { type: "message", stop_reason: stopReason, usage } });
+
+  const routeWithHaiku: RouteWithHaiku = async ({ mark, mode, transcript, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse }) => {
     onPrompt?.(fakePrompt("router", `Transcript: "${transcript}"`));
     mark("llm.request", { mode });
     await wait(t.llmFirstMs);
@@ -300,21 +306,24 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     if (routed === "clarify" || routed === "answer") {
       for (const w of (routed === "clarify" ? CLARIFY : DIRECT_ANSWER).split(/(?<= )/)) { onSpokenDelta(w, "answer"); await wait(t.chunkMs); }
       onSpokenEnd?.("answer");
+      onResponse?.(fakeResponse("router", "tool_use", usage));
       return { delegate: null, decision, usage };
     }
     for (const w of ACK.split(/(?<= )/)) { onSpokenDelta(w, "ack"); await wait(t.chunkMs); }
     onSpokenEnd?.("ack");
     await wait(t.llmFirstMs); // the `question` field
+    onResponse?.(fakeResponse("router", "tool_use", usage));
     return { delegate: { question: "Why is the features section a CSS grid?", intent: routed, estimateS }, decision, usage };
   };
 
-  const generateFillers: GenerateFillers = async ({ question, onPrompt }) => {
+  const generateFillers: GenerateFillers = async ({ question, onPrompt, onResponse }) => {
     onPrompt?.(fakePrompt("fillers", question));
     await wait(t.llmFirstMs);
+    onResponse?.(fakeResponse("fillers", "tool_use", { input_tokens: 300, output_tokens: 30 }));
     return { lines: sc.fillerLines ?? FILLER_LINES, usage: { input_tokens: 300, output_tokens: 30 } };
   };
 
-  const solveWithOpus: SolveWithOpus = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt }) => {
+  const solveWithOpus: SolveWithOpus = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt, onResponse }) => {
     onPrompt?.(fakePrompt("opus", `Question: ${question}`));
     mark("opus.request", { fast });
     await wait(t.opusFirstMs);
@@ -328,6 +337,7 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     onDelta(text.slice(`SPOKEN: ${SPOKEN_LINE}\n`.length));
     await wait(t.opusFirstMs);
     mark("opus.done", { stopReason: "end_turn" });
+    onResponse?.(fakeResponse("opus", "end_turn", { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000 }));
     return { text, usage: { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000, cache_creation_input_tokens: 0, speed: fast ? "fast" : "standard" } };
   };
 

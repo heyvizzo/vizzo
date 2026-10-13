@@ -71,6 +71,8 @@ export interface RealtimeListener {
   onText(delta: string): void;
   onToolCall(call: ToolCall): void;
   onError(err: Error): void;
+  /** Debug view: each response.done (optional). */
+  onResponseDone?(r: Parameters<Parameters<RealtimeSession["onResponseDone"]>[0]>[0]): void;
 }
 
 class RealtimeHolder {
@@ -82,6 +84,7 @@ class RealtimeHolder {
     session.onAudio((b) => this.listener?.onAudio(b));
     session.onText((d) => this.listener?.onText(d));
     session.onToolCall((c) => this.listener?.onToolCall(c));
+    session.onResponseDone((r) => this.listener?.onResponseDone?.(r));
     session.onError((e) => {
       // Treat any error as fatal for the session: the next turn reopens a fresh one.
       this.dead = true;

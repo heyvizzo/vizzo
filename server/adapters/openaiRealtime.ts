@@ -144,6 +144,7 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
   const textCbs: ((d: string) => void)[] = [];
   const toolCbs: ((c: ToolCall) => void)[] = [];
   const errorCbs: ((e: Error) => void)[] = [];
+  const doneCbs: Parameters<RealtimeSession["onResponseDone"]>[0][] = [];
   const usage = emptyUsage();
 
   // Per-turn mark state.
@@ -314,6 +315,11 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
         addUsage(usage, r.usage);
         if (r.status && r.status !== "completed") log(`response ${r.id} status=${r.status}`, JSON.stringify(r.status_details ?? null));
         const id = typeof r.id === "string" ? r.id : undefined;
+        const label = (id && kindById.get(id)) || active?.kind || currentSegment;
+        const stale = !!id && staleIds.has(id);
+        for (const cb of doneCbs) {
+          try { cb({ label, stale, response: r }); } catch (e) { log("onResponseDone callback failed", String(e)); }
+        }
         if (id) {
           kindById.delete(id);
           staleIds.delete(id);
@@ -431,6 +437,9 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
     },
     onToolCall(cb) {
       toolCbs.push(cb);
+    },
+    onResponseDone(cb) {
+      doneCbs.push(cb);
     },
     onError(cb) {
       errorCbs.push(cb);

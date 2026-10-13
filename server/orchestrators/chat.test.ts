@@ -164,3 +164,26 @@ describe("prompt capture (llm.prompt)", () => {
   });
 });
 
+
+describe("response capture (llm.response)", () => {
+  type P = Extract<ServerMsg, { type: "llm.prompt" }>;
+  type R = Extract<ServerMsg, { type: "llm.response" }>;
+  it("every B call's response carries its prompt's callId", async () => {
+    const s = setup({ approach: "pipeline" });
+    await run(createPipelineOrchestrator(deps({ estimateS: 8 }, 300)), s.ctx);
+    const prompts = s.events.filter((e): e is P => e.type === "llm.prompt");
+    const responses = s.events.filter((e): e is R => e.type === "llm.response");
+    expect(responses.map((r) => r.response.target)).toEqual(["router", "fillers", "opus"]);
+    for (const r of responses) expect(prompts.find((p) => p.callId === r.callId)?.prompt.target).toBe(r.response.target);
+    expect(responses[2]!.response).toMatchObject({ stopReason: "end_turn", usage: { cache_read_input_tokens: 5000 } });
+  });
+
+  it("A: one Realtime response per response.done (ack, answer), all on the Realtime call", async () => {
+    const s = setup({ approach: "realtime", fillers: false });
+    await run(createRealtimeOrchestrator(deps({ estimateS: 8 })), s.ctx);
+    const rtPrompt = s.events.find((e): e is P => e.type === "llm.prompt" && e.prompt.target === "realtime")!;
+    const rt = s.events.filter((e): e is R => e.type === "llm.response" && e.response.target === "realtime");
+    expect(rt.map((r) => r.response.label)).toEqual(["ack", "answer"]);
+    expect(rt.every((r) => r.callId === rtPrompt.callId)).toBe(true);
+  });
+});

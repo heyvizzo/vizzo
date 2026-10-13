@@ -1,7 +1,7 @@
 // Adapter interfaces (ARCHITECTURE §4). Orchestrators depend only on these.
 import type { Mark } from "../clock.ts";
 import type { ChatTurn } from "../conversation.ts";
-import type { Intent, LlmPrompt, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
+import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
 import type { RealtimeModel, RouterMode, TtsModel } from "../../shared/config.ts";
 
 export type { Mark };
@@ -87,6 +87,11 @@ export interface RealtimeSession {
    * model remembers telling the user. Serialized with other responses like any response.create.
    */
   speak(text: string, kind: "filler" | "notice"): Promise<void>;
+  /**
+   * Every response.done as received (`label`: ack / filler / answer / notice; `stale`: from before the
+   * last beginTurn). Debug view.
+   */
+  onResponseDone(cb: (r: { label: "ack" | "filler" | "answer" | "notice"; stale: boolean; response: unknown }) => void): void;
   /** response.cancel the active response (if any) and drop a deferred response.create. Keeps the session usable. */
   cancelResponse(): void;
   /**
@@ -115,6 +120,8 @@ export interface RouteWithHaikuOpts {
   longTaskSeconds?: number;
   /** Called with the exact prompt right before it's sent (debug view). */
   onPrompt?: (p: LlmPrompt) => void;
+  /** Called with the raw result (or error) of that request (debug view). */
+  onResponse?: (r: LlmResponse) => void;
   /**
    * Fires once, as soon as the router's `intent` (and `estimate_seconds`, if given) are parsed, i.e. before
    * `say` streams, so the caller knows whether the spoken text is an ack or the whole reply.
@@ -141,6 +148,8 @@ export type GenerateFillers = (opts: {
   /** The language the user spoke: lines are written in it. */
   language?: string;
   onPrompt?: (p: LlmPrompt) => void;
+  /** Called with the raw result (or error) of that request (debug view). */
+  onResponse?: (r: LlmResponse) => void;
 }) => Promise<{ lines: string[]; usage: unknown }>;
 
 export interface SolveWithOpusOpts {
@@ -155,6 +164,8 @@ export interface SolveWithOpusOpts {
   intent?: Intent;
   /** Called with the exact prompt right before it's sent (debug view). */
   onPrompt?: (p: LlmPrompt) => void;
+  /** Called with the raw result (or error) of that request (debug view). */
+  onResponse?: (r: LlmResponse) => void;
   /** Fires once the SPOKEN: line is complete. */
   onSpokenLine: (line: string) => void;
   /** Full answer stream. */
