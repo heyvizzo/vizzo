@@ -27,13 +27,14 @@ const args = process.argv.slice(2);
 const FAKE = args.includes("--fake");
 const onlyIdx = args.indexOf("--only");
 const ONLY = onlyIdx >= 0 ? (args[onlyIdx + 1] as Approach) : null;
-const env = (k: string) => !!process.env[k];
+// "A|B" means either key will do.
+const env = (k: string) => k.split("|").some((name) => !!process.env[name]);
 
 type Main = Exclude<Approach, "cursor-only">;
 const REQUIRED_KEYS: Record<Main, string[]> = {
   realtime: ["OPENAI_API_KEY"],
-  pipeline: ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ANTHROPIC_API_KEY"],
-  hybrid: ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "ANTHROPIC_API_KEY"],
+  pipeline: ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "OPENROUTER_API_KEY|ANTHROPIC_API_KEY"],
+  hybrid: ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "OPENROUTER_API_KEY|ANTHROPIC_API_KEY"],
 };
 
 const wav = parseWav(readFileSync(new URL("../fixtures/smoke/hello.wav", import.meta.url)));

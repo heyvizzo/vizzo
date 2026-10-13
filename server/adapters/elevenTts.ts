@@ -136,7 +136,7 @@ export function sniffNonPcm(buf: Buffer): string | null {
   if (buf.length >= 4 && buf.subarray(0, 4).toString("latin1") === "RIFF") return "WAV (RIFF header)";
   if (buf.length >= 3 && buf.subarray(0, 3).toString("latin1") === "ID3") return "MP3 (ID3 tag)";
   if (buf.length >= 4 && buf.subarray(0, 4).toString("latin1") === "OggS") return "Ogg";
-  if (buf.length >= 2 && buf[0] === 0xff && (buf[1]! & 0xe0) === 0xe0 && buf.length < 4096) return "MP3 frame sync (maybe)";
+  // No bare MP3 frame-sync check: 0xFF 0xEx is an ordinary PCM16 sample and misfired on real pcm_24000 output.
   return null;
 }
 

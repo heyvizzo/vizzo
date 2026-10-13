@@ -21,9 +21,45 @@ let log: (msg: string) => void = (msg) => console.info(msg);
 export function setClient(c: ClaudeClient | null): void { client = c; }
 /** Redirect the adapter's one-line usage logs (default: console.info). */
 export function setLogger(fn: (msg: string) => void): void { log = fn; }
+
+// ── Provider: OpenRouter (Anthropic-compatible Messages API) or Anthropic directly ──
+
+export type ClaudeProvider = "openrouter" | "anthropic";
+
+/** CLAUDE_PROVIDER wins; otherwise OpenRouter whenever OPENROUTER_API_KEY is set. */
+export function claudeProvider(): ClaudeProvider {
+  const p = process.env.CLAUDE_PROVIDER;
+  if (p === "openrouter" || p === "anthropic") return p;
+  return process.env.OPENROUTER_API_KEY ? "openrouter" : "anthropic";
+}
+
+export function hasClaudeCredentials(): boolean {
+  return claudeProvider() === "openrouter" ? !!process.env.OPENROUTER_API_KEY : !!process.env.ANTHROPIC_API_KEY;
+}
+
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
+const OPENROUTER_MODELS: Record<string, string> = {
+  [MODELS.haiku]: "anthropic/claude-haiku-5.5",
+  [MODELS.opus]: "anthropic/claude-opus-5.5",
+};
+
+/** Model ID for the active provider. */
+export function modelId(model: string): string {
+  return claudeProvider() === "openrouter" ? (OPENROUTER_MODELS[model] ?? model) : model;
+}
+
 function getClient(): ClaudeClient {
   // maxRetries: 2 is the SDK default; fast-mode requests override it to 0 (see solveWithOpus).
-  return (client ??= new Anthropic());
+  if (client) return client;
+  if (claudeProvider() === "openrouter") {
+    return (client = new Anthropic({
+      baseURL: OPENROUTER_BASE_URL,
+      apiKey: null,
+      authToken: process.env.OPENROUTER_API_KEY ?? null,
+      defaultHeaders: { "X-Title": "Realtime Voice Latency Lab" },
+    }));
+  }
+  return (client = new Anthropic());
 }
 
 export class ClaudeRefusalError extends Error {
@@ -135,7 +171,7 @@ export function validateRouterInput(v: unknown): RouterInput | null {
 
 export function buildRouterParams(transcript: string, pointing: PointingTarget[], mode: "forced" | "auto"): Anthropic.MessageStreamParams {
   return {
-    model: MODELS.haiku,
+    model: modelId(MODELS.haiku),
     max_tokens: 2048,
     output_config: { effort: "low" },
     // No temperature/top_p/top_k: non-default values are a 400 on Haiku 5.5.
@@ -235,7 +271,7 @@ const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 export function buildOpusParams(question: string, pointing: PointingTarget[], fast: boolean): BetaMessageStreamParams {
   const p = prompts();
   return {
-    model: MODELS.opus,
+    model: modelId(MODELS.opus),
     max_tokens: 16000,
     output_config: { effort: "medium" }, // explicit: Opus 5.5 can't disable thinking; effort is the control
     system: [
@@ -246,8 +282,11 @@ export function buildOpusParams(question: string, pointing: PointingTarget[], fa
       role: "user",
       content: `Question: ${question}\n\nPointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}`,
     }],
-    betas: fast ? [FAST_BETA, FALLBACK_BETA] : [FALLBACK_BETA],
-    fallbacks: "default",
+    // OpenRouter rejects `fallbacks: "default"` (400), so the refusal fallback is Anthropic-direct only.
+    // It accepts `speed: "fast"` but serves standard speed (usage.speed === "standard"); cost follows usage.speed.
+    ...(claudeProvider() === "anthropic"
+      ? { betas: fast ? [FAST_BETA, FALLBACK_BETA] : [FALLBACK_BETA], fallbacks: "default" as const }
+      : fast ? { betas: [FAST_BETA] } : {}),
     ...(fast ? { speed: "fast" as const } : {}),
   };
 }

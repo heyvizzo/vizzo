@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 import { Session } from "./session.ts";
+import { claudeProvider, hasClaudeCredentials } from "./adapters/claude.ts";
 import { loadRuns } from "./results.ts";
 import type { Orchestrator } from "./orchestrators/types.ts";
 import type { RunConfig } from "../shared/config.ts";
@@ -44,7 +45,8 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       return res.end(JSON.stringify({
         ok: true,
         keys: {
-          anthropic: !!process.env.ANTHROPIC_API_KEY,
+          claude: hasClaudeCredentials(),
+          claudeProvider: claudeProvider(),
           openai: !!process.env.OPENAI_API_KEY,
           elevenlabs: !!process.env.ELEVENLABS_API_KEY,
           elevenVoice: !!process.env.ELEVENLABS_VOICE_ID,

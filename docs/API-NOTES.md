@@ -223,6 +223,17 @@ Other events you'll see: `session.created`, `session.updated`, `conversation.ite
 - v4 family: `POST https://api.elevenlabs.io/v1/text-to-dialogue/stream?output_format=pcm_24000`, body `{"inputs":[{"text":"…","voice_id":"…"}],"model_id":"eleven_v4_turbo","previous_text":"…"}` (`previous_text` / `future_text` ≤100 chars, "not supported by every model"; keep the total under 2,000 chars). 🔧 The models page only promises v4 Turbo on the TTD **WebSocket** (and plain `eleven_v4` on the TTD HTTP API), so whether HTTP TTD accepts `eleven_v4_turbo` is **unconfirmed**. Only use it if the WebSocket path fails, and check it with one request first.
 - The adapter interface in ARCHITECTURE §4 (`model: "eleven_v4_turbo" | "eleven_flash_v2_5"`) still works. `elevenTts.ts` switches protocol on `model`.
 
+## Live checks (2026-10-13, with real keys)
+
+- **Claude goes through OpenRouter**, not the Anthropic API. OpenRouter serves an Anthropic-compatible Messages API at `https://openrouter.ai/api` (`/v1/messages`), so the Anthropic SDK works with `baseURL` + `authToken: OPENROUTER_API_KEY`. Model IDs: `anthropic/claude-haiku-5.5`, `anthropic/claude-opus-5.5` (same prices as Anthropic). `server/adapters/claude.ts` picks OpenRouter whenever `OPENROUTER_API_KEY` is set (`CLAUDE_PROVIDER=anthropic` forces direct).
+  - ✅ Works: streaming, forced `tool_choice`, `eager_input_streaming` (`input_json_delta`), `output_config.effort`, `cache_control` (second Opus run read 9,215 cached tokens).
+  - ❌ `fallbacks: "default"` → 400 (OpenRouter expects an array). The refusal fallback is Anthropic-direct only; `stop_reason` is still checked.
+  - ⚠️ `speed: "fast"` is accepted but `usage.speed` comes back `"standard"`: **Opus fast mode does not apply via OpenRouter.** Cost follows `usage.speed`.
+  - The first request after a while can be slow (one Haiku call took 20.9 s, the next 1.4 s).
+- ✅ Scribe: timestamped commit arrives ~15–20 ms after the plain one; release → final ≈ 200–380 ms on `hello.wav`.
+- ✅ OpenAI Realtime GA session/event shapes work as documented; tool name/call_id arrive on `response.output_item.added`.
+- ✅ ElevenLabs `output_format=pcm_24000` works on both the v4 Turbo dialogue WebSocket and the Flash stream-input WebSocket (output verified as speech, not noise).
+
 ## Sources
 - Anthropic: bundled `claude-api` skill (models, Haiku 5.5 / Opus 5.5 migration notes)
 - OpenAI pricing: https://developers.openai.com/api/docs/pricing

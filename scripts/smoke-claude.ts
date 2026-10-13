@@ -1,17 +1,18 @@
 // Smoke test for the Claude adapter (T6): real API calls, prints marks with ms timings.
 // Runs the Haiku router (forced + auto) and Opus (fast off/on, then fast off again to show
 // cache reads) on U3's transcript with a fake pointing target at the card grid.
-// Without ANTHROPIC_API_KEY it prints SKIP and exits 0.
+// Uses OpenRouter when OPENROUTER_API_KEY is set (else ANTHROPIC_API_KEY). Without credentials it prints SKIP and exits 0.
 import "dotenv/config";
 import { performance } from "node:perf_hooks";
 import type { MarkName } from "../shared/marks.ts";
 import type { PointingTarget } from "../shared/protocol.ts";
-import { formatPointingForPrompt, routeWithHaiku, setLogger, solveWithOpus } from "../server/adapters/claude.ts";
+import { claudeProvider, formatPointingForPrompt, hasClaudeCredentials, modelId, routeWithHaiku, setLogger, solveWithOpus } from "../server/adapters/claude.ts";
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.log("SKIP smoke:claude: ANTHROPIC_API_KEY is not set (add it to .env to run against the real API).");
+if (!hasClaudeCredentials()) {
+  console.log("SKIP smoke:claude: set OPENROUTER_API_KEY (or ANTHROPIC_API_KEY) in .env to run against the real API.");
   process.exit(0);
 }
+console.log(`provider: ${claudeProvider()} · models: ${modelId("claude-haiku-5-5")}, ${modelId("claude-opus-5-5")}`);
 
 const U3 = "Why is this section built with a grid instead of flexbox?";
 const POINTING: PointingTarget[] = [{
