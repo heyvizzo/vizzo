@@ -1,7 +1,7 @@
 import type { RunConfig } from "../../shared/config.ts";
 import type { CursorSample, PointingTarget, ServerMsg, Usage } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
-import type { OpenRealtime, OpenScribe, OpenTts, RouteWithHaiku, SolveWithOpus } from "../adapters/types.ts";
+import type { GenerateFillers, OpenRealtime, OpenScribe, OpenTts, RouteWithHaiku, SolveWithOpus } from "../adapters/types.ts";
 
 /**
  * Per-browser-connection cache (T7 addition). Lives as long as the Session's WebSocket; every entry's
@@ -14,6 +14,21 @@ export interface ConnectionCache {
   set<T>(key: string, value: T, dispose?: (value: T) => void): void;
   /** Disposes and removes the entry, if any. */
   delete(key: string): void;
+}
+
+/**
+ * Connection-level output, not tied to a turn (background jobs and their spoken notices).
+ * Provided by the Session; absent in unit tests that don't need it.
+ */
+export interface ConnectionChannel {
+  send(msg: ServerMsg): void;
+  sendAudio(pcm24k: Buffer): void;
+  /** Resolves once no turn is active (after a short grace period). */
+  whenIdle(): Promise<void>;
+  /** No turn is active right now. */
+  isIdle(): boolean;
+  /** Register how to stop the notice being spoken (null when it's over). Called on turn.start / speech.stop. */
+  setNoticeAbort(abort: (() => void) | null): void;
 }
 
 /** What a Session gives an orchestrator for one turn. */
@@ -29,6 +44,8 @@ export interface TurnContext {
   tAudioStart: () => number | undefined;
   /** T7 addition: state that outlives the turn (one per browser connection). */
   connection: ConnectionCache;
+  /** Connection-level output for background jobs (chat mode). Without it, long tasks run inline. */
+  channel?: ConnectionChannel;
 }
 
 /** Handlers for one turn. Created on turn.start. */
@@ -65,6 +82,8 @@ export interface OrchestratorDeps {
   openTts: OpenTts;
   routeWithHaiku: RouteWithHaiku;
   solveWithOpus: SolveWithOpus;
+  /** Progress lines for the wait on short tasks (chat mode). Optional: no fillers without it. */
+  generateFillers?: GenerateFillers;
   /** ElevenLabs voice id (default: process.env.ELEVENLABS_VOICE_ID). */
   voiceId?: string;
   /** Overall per-turn timeout from turn.start (default 60 s). */

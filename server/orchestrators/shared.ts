@@ -165,10 +165,15 @@ export async function acquireRealtime(
     turnUsage: () => diffUsage(holder.session.usage, base),
     release: (inFlight) => {
       if (holder.listener === listener) holder.listener = null;
-      // The adapter has no response.cancel: an in-flight response would leak audio into the next turn,
-      // so drop the session instead (and on any error, which already marked it dead).
-      if ((inFlight || holder.dead) && ctx.connection.get(CACHE_KEY) === current) ctx.connection.delete(CACHE_KEY);
-      else if (inFlight || holder.dead) holder.session.close();
+      if (holder.dead) {
+        // Errored: drop it; the next turn reopens (and gets a history recap).
+        if (ctx.connection.get(CACHE_KEY) === current) ctx.connection.delete(CACHE_KEY);
+        else holder.session.close();
+      } else if (inFlight) {
+        // Interrupted mid-response: cancel it and keep the session. The next beginTurn() marks the
+        // cancelled response stale, so none of its late audio leaks into the next turn.
+        holder.session.cancelResponse();
+      }
     },
   };
 }
@@ -177,3 +182,25 @@ export async function acquireRealtime(
 export function dropRealtime(conn: TurnContext["connection"]): void {
   conn.delete(CACHE_KEY);
 }
+
+/** The connection's Realtime session when it's open, healthy and not in use by a turn (background notices). */
+export function idleRealtime(conn: TurnContext["connection"]): {
+  session: RealtimeSession;
+  seenTurns: Set<string>;
+  /** Route the session's output to `l` (null to detach). Returns false if a turn took the session meanwhile. */
+  attach(l: RealtimeListener | null): boolean;
+} | null {
+  const holder = conn.get<CacheEntry>(CACHE_KEY)?.holder;
+  if (!holder || holder.dead || holder.listener) return null;
+  let mine: RealtimeListener | null = null;
+  return {
+    session: holder.session,
+    seenTurns: holder.seenTurns,
+    attach(l) {
+      if (holder.listener && holder.listener !== mine) return false;
+      holder.listener = mine = l;
+      return true;
+    },
+  };
+}
+

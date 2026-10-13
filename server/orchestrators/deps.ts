@@ -2,7 +2,7 @@
 import { openScribe } from "../adapters/scribe.ts";
 import { openRealtime } from "../adapters/openaiRealtime.ts";
 import { openTts } from "../adapters/elevenTts.ts";
-import { routeWithHaiku, solveWithOpus } from "../adapters/claude.ts";
+import { generateFillers, routeWithHaiku, solveWithOpus } from "../adapters/claude.ts";
 import type { OrchestratorDeps } from "./types.ts";
 
-export const realDeps: OrchestratorDeps = { openScribe, openRealtime, openTts, routeWithHaiku, solveWithOpus };
+export const realDeps: OrchestratorDeps = { openScribe, openRealtime, openTts, routeWithHaiku, solveWithOpus, generateFillers };

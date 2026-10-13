@@ -171,3 +171,17 @@ export function formatPointingContext(targets: PointingTarget[], algorithm = "dw
     })
     .join("\n");
 }
+
+/**
+ * Clicks and highlighted text from the turn, as lines for the LLM context (empty string if none).
+ * Each click names the word being said closest to it, e.g.
+ *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] (while saying "this")`
+ *   `Selected text: "Charts refresh as rows land." in <p> … [data-source=…]`
+ * Implemented by the pointer-detection task; stub returns "".
+ */
+export function formatPageContext(
+  _clicks: import("./protocol.ts").PageClick[], _selection: import("./protocol.ts").PageSelection | null,
+  _words: Word[], _tAudioStart: number | undefined,
+): string {
+  return "";
+}

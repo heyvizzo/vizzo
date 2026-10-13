@@ -41,9 +41,23 @@ export interface CursorSample {
   elementPath: string | null;
   /** Closest [data-source] attribute, "file:line". */
   dataSource: string | null;
-  /** Closest [data-label] or accessible name. */
+  /** The most specific meaningful element's own label: its short text (a card title, a th), data-label or accessible name. */
   label: string | null;
+  /** Label of the enclosing labeled component when the element is more specific than it (e.g. the card around a title). */
+  container?: string | null;
 }
+
+/** An element on the page, described like a CursorSample (see web/cursor/dom.ts describeElement). */
+export interface ElementRef {
+  elementPath: string | null;
+  dataSource: string | null;
+  label: string | null;
+  container?: string | null;
+}
+/** A click on the page during a turn (client clock). */
+export interface PageClick extends ElementRef { t: number; x: number; y: number }
+/** Text highlighted on the page during a turn (the latest non-empty selection, client clock). */
+export interface PageSelection extends ElementRef { t: number; text: string }
 
 export interface PointingTarget { word: string; wordStart: number; algorithm: string; sample: CursorSample | null }
 
@@ -57,6 +71,8 @@ export type ClientMsg =
   | { type: "cursor.samples"; turnId: string; samples: CursorSample[] }
   /** tAudioStart: client time of the first captured audio sample (ARCHITECTURE §6). */
   | { type: "turn.audioStart"; turnId: string; tAudioStart: number }
+  /** What the user clicked and highlighted on the page during the turn. Sent right before turn.release. */
+  | { type: "turn.context"; turnId: string; clicks: PageClick[]; selection: PageSelection | null }
   | { type: "turn.release"; turnId: string; tRelease: number }
   | { type: "audio.played"; turnId: string; segment: Segment; tPlayed: number }
   /** reason "interrupt": the user started talking over the reply; "stop": the user stopped it (Esc). */

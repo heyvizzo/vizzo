@@ -8,6 +8,8 @@ import type { Mark } from "../clock.ts";
 import type { TurnContext, TurnResult } from "./types.ts";
 
 export const DEFAULT_TURN_TIMEOUT_MS = 60_000;
+/** PCM16 mono 24 kHz. */
+const BYTES_PER_MS = 48;
 
 export type CleanupReason = "done" | "cancel" | "error";
 
@@ -39,6 +41,15 @@ export class SegmentOutput {
   /** Labels of segments that sent audio, in order. */
   readonly sent: Segment[] = [];
 
+  /**
+   * Estimated time (performance.now() ms) the client finishes playing the audio sent so far: playback is
+   * gapless and starts when audio arrives, so each chunk extends max(playEnd, now) by its duration.
+   */
+  playEnd = 0;
+
+  /** True when every segment created so far has ended (nothing queued or open). */
+  get idle(): boolean { return this.queue.length === 0; }
+
   /** @internal */ isHead(w: Writer): boolean { return this.queue[0] === w; }
   /** @internal */ emit(w: Writer, pcm: Buffer): void {
     if (!w.started) {
@@ -46,6 +57,7 @@ export class SegmentOutput {
       this.sent.push(w.label);
       this.ctx.send({ type: "audio.segment", turnId: this.ctx.turnId, segment: w.label, state: "start" });
     }
+    this.playEnd = Math.max(this.playEnd, performance.now()) + pcm.length / BYTES_PER_MS;
     this.ctx.sendAudio(pcm);
   }
   /** @internal */ ended(w: Writer): void {

@@ -16,8 +16,16 @@ import type { RealtimeSession, ToolCall } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
 import { acquireRealtime, LazyScribe, type RealtimeLease, type RealtimeListener } from "./shared.ts";
 import { formatHistoryRecap, getConversation } from "../conversation.ts";
+import { FillerScheduler } from "./fillers.ts";
+import { startJob } from "./jobs.ts";
+import type { Intent, RouteIntent } from "../../shared/protocol.ts";
 import { errMessage, sleep, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
+
+/** Tool result for a long task handed to a background job: the model already said it'll get back to the user. */
+export const BACKGROUND_TOOL_RESULT = "Started as a background task. The user will be told the result when it's done. Don't say anything more now.";
+/** Tool result recorded when the user interrupts before Opus answered (keeps the conversation valid). */
+export const CANCELLED_TOOL_RESULT = "Cancelled: the user interrupted before the answer was ready.";
 
 /** Appended to the spoken line in the tool result; the model is told to speak only the first paragraph. */
 export const TOOL_RESULT_NOTE = "(The detailed answer is being shown on the user's screen. Speak only the paragraph above.)";
@@ -43,6 +51,11 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
     let pendingTool: Promise<void> | null = null;
     const opusRuns: Promise<void>[] = [];
     let opusUsage: unknown = undefined;
+    let fillerUsage: unknown = undefined;
+    let fillers: FillerScheduler | null = null;
+    /** ask_opus call still waiting for its output (answered inline): on interrupt it gets CANCELLED_TOOL_RESULT. */
+    let openCall: string | null = null;
+    let decided = false;
     let writer: SegmentWriter | null = null;
     let textSeg: Segment = "ack";
     // hybrid
@@ -52,7 +65,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
     const base = new TurnBase(ctx, {
       timeoutMs: deps.turnTimeoutMs,
       collectUsage: () => ({
-        ...(opusUsage !== undefined ? { anthropic: { opus: opusUsage } } : {}),
+        ...(opusUsage !== undefined || fillerUsage ? { anthropic: { ...(opusUsage !== undefined ? { opus: opusUsage } : {}), ...(fillerUsage ? { fillers: fillerUsage } : {}) } } : {}),
         ...(lease ? { openai: lease.turnUsage() } : {}),
         ...(scribe ? { scribeSeconds: scribe.seconds } : {}),
       }),
@@ -85,7 +98,12 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (!leaseP) {
         const t0 = performance.now();
         leaseP = tag("openai", acquireRealtime(ctx, deps, base.mark, listener, warm)).then((l) => {
-          base.onCleanup((reason) => l.release(reason !== "done" && responding && !responsesDone));
+          base.onCleanup((reason) => {
+            fillers?.stop();
+            // Interrupted while Opus was still working: close the pending call so the conversation stays valid.
+            if (reason !== "done" && openCall) { l.session.sendToolResult(openCall, CANCELLED_TOOL_RESULT, { respond: false }); openCall = null; }
+            l.release(reason !== "done" && responding && !responsesDone);
+          });
           if (base.isFinished) throw new Error("turn already finished");
           lease = l;
           session = l.session;
@@ -101,6 +119,13 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       return leaseP;
     }
 
+    function decide(intent: RouteIntent, estimateS: number | null, background: boolean): void {
+      if (decided || base.isFinished) return;
+      decided = true;
+      base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], intent, estimateS, background };
+      ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background });
+    }
+
     function handleTool(call: ToolCall): void {
       const s = session;
       if (base.isFinished || !s) return;
@@ -110,22 +135,50 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         return;
       }
       toolSeen = true;
-      const args = (call.args ?? {}) as { question?: unknown; pointing_context?: unknown };
+      const args = (call.args ?? {}) as { question?: unknown; pointing_context?: unknown; intent?: unknown; estimated_seconds?: unknown };
+      const intent: Intent = args.intent === "task" ? "task" : "question";
+      const est = Number(args.estimated_seconds);
+      const estimateS = Number.isFinite(est) && est > 0 ? Math.round(est) : null;
       const q = typeof args.question === "string" && args.question.trim() ? args.question.trim() : base.transcript || "(question not captured)";
       const question = typeof args.pointing_context === "string" && args.pointing_context.trim()
         ? `${q}\n(Voice model's note on what the user pointed at: ${args.pointing_context.trim()})`
         : q;
+      const background = !!ctx.channel && cfg.memory && cfg.backgroundLongTasks && estimateS !== null && estimateS > cfg.longTaskSeconds;
+      decide(intent, estimateS, background);
+      if (background) {
+        // Long task: the model already said it'll get back to the user. Record the call's output without
+        // a new response, and let Opus run as a job that outlives this turn.
+        s.sendToolResult(call.callId, BACKGROUND_TOOL_RESULT, { respond: false });
+        pendingTool = Promise.resolve();
+        const job = startJob(ctx.connection, ctx.channel!, deps, {
+          turnId: ctx.turnId, config: cfg, intent, question, estimateS, pointing: base.pointing,
+          history: cfg.memory ? getConversation(ctx.connection).slice() : [],
+        });
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
+        return;
+      }
+      openCall = call.callId;
       let sent = false;
       let resolveTool!: () => void;
       pendingTool = new Promise<void>((r) => (resolveTool = r));
       const sendResult = (line: string) => {
         if (sent || base.isFinished) return;
         sent = true;
+        openCall = null;
+        fillers?.stop();
         s.sendToolResult(call.callId, `${line.trim()}\n\n${TOOL_RESULT_NOTE}`);
         resolveTool();
       };
+      if (cfg.fillers && deps.generateFillers) {
+        fillers = new FillerScheduler(
+          base,
+          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing })
+            .then((r) => { fillerUsage = r.usage; return r.lines; }),
+          (line) => s.speak(line, "filler"),
+        );
+      }
       opusRuns.push(
-        deps.solveWithOpus({ mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, onSpokenLine: sendResult, onDelta: (d) => base.opus(d) })
+        deps.solveWithOpus({ mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, onSpokenLine: sendResult, onDelta: (d) => base.opus(d) })
           .then((r) => {
             opusUsage = r.usage;
             // Normally onSpokenLine already fired; if not, speak the start of the answer.
@@ -179,6 +232,11 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         if (base.isFinished) return;
       }
       responsesDone = true;
+      fillers?.stop();
+      if (fillers) {
+        await fillers.done;
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], fillers: fillers.spoken.length };
+      }
       writer?.end();
       await Promise.all(opusRuns);
       if (scribe) {
@@ -189,6 +247,8 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         }
       }
       if (base.isFinished) return;
+      // No tool call: the model either answered directly or asked a follow-up (it asks with a question mark).
+      if (!toolSeen) decide(/\?\s*$/.test(base.voiceText) ? "clarify" : "answer", null, false);
       const ackIsAnswer = !toolSeen && base.output.sent.includes("ack");
       base.finish(ackIsAnswer ? { ackIsAnswer } : {});
     }

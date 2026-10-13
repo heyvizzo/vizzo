@@ -9,12 +9,14 @@
 // Labels: forced mode → the router's speech is always the "ack". Auto mode → `kind` on the first
 // spoken delta decides: "ack" (it called ask_opus) or "answer" (it answered directly). The first TTS
 // socket is opened before the label is known, so its *.ttsFirstByte mark is renamed to the final label.
-import type { Segment } from "../../shared/protocol.ts";
+import type { RouteIntent, Segment } from "../../shared/protocol.ts";
 import type { TtsStream } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
 import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
+import { FillerScheduler } from "./fillers.ts";
+import { startJob } from "./jobs.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
 class Tagged extends Error {
@@ -92,12 +94,17 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
     const ttsStreams: SegmentTts[] = [];
     let haikuUsage: unknown = undefined;
     let opusUsage: unknown = undefined;
+    let fillerUsage: unknown = undefined;
 
     const base = new TurnBase(ctx, {
       timeoutMs: deps.turnTimeoutMs,
       collectUsage: () => ({
         ...(haikuUsage !== undefined || opusUsage !== undefined
-          ? { anthropic: { ...(haikuUsage !== undefined ? { haiku: haikuUsage } : {}), ...(opusUsage !== undefined ? { opus: opusUsage } : {}) } }
+          ? { anthropic: {
+            ...(haikuUsage !== undefined ? { haiku: haikuUsage } : {}),
+            ...(opusUsage !== undefined ? { opus: opusUsage } : {}),
+            ...(fillerUsage ? { fillers: fillerUsage } : {}),
+          } }
           : {}),
         elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0),
         scribeSeconds: scribe.seconds,
@@ -126,7 +133,8 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       base.sttFinal(fin.text, fin.words);
       const pointing = base.resolvePointing(fin.words);
 
-      let label: Segment | null = cfg.routerMode === "forced" ? "ack" : null;
+      // The router's intent decides the label: question/task → its speech is the "ack"; clarify/answer → "answer".
+      let label: Segment | null = null;
       let spoken: SegmentTts | null = null;
       let labelConflict = false;
       const ensureSpoken = (l: Segment): SegmentTts => {
@@ -137,12 +145,23 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         }
         return spoken;
       };
+      const canBackground = cfg.memory && cfg.backgroundLongTasks && !!ctx.channel;
+      let background = false;
+      let decided = false;
+      const decide = (intent: RouteIntent, estimateS: number | null): void => {
+        if (decided || base.isFinished) return;
+        decided = true;
+        background = canBackground && (intent === "question" || intent === "task") && estimateS !== null && estimateS > cfg.longTaskSeconds;
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], intent, estimateS, background };
+        ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background });
+      };
       const route = await tag("haiku", deps.routeWithHaiku({
         mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history,
+        onDecision: (d) => decide(d.intent, d.estimateS),
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;
           if (!label) label = kind;
-          else if (kind !== label && cfg.routerMode === "auto") labelConflict = true; // text, then a tool call
+          else if (kind !== label) labelConflict = true;
           ensureSpoken(label).pushText(d);
           base.voice(d);
         },
@@ -150,6 +169,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       }));
       haikuUsage = route.usage;
       if (base.isFinished) return;
+      decide(route.decision.intent, route.decision.estimateS);
       const first = spoken as SegmentTts | null;
       first?.flush();
       if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // pre-warmed but nothing was said
@@ -157,25 +177,55 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       firstDone.catch(() => {});
 
       let answerDone: Promise<void> = Promise.resolve();
-      if (route.delegate) {
-        // Warm: open the answer socket now, so it's ready by the time Opus's spoken line is.
+      const delegate = route.delegate;
+      if (delegate && background) {
+        // Long task: the ack said "I'll get back to you"; Opus runs as a job that outlives this turn.
+        const job = startJob(ctx.connection, ctx.channel!, deps, {
+          turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question,
+          estimateS: delegate.estimateS, pointing, history: history ?? [],
+        });
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
+      } else if (delegate) {
+        // Warm: open the answer socket now, so it's ready by the time Opus's spoken line is. Its segment
+        // is only created when the line arrives, so filler segments queue before it.
         let answerTts: SegmentTts | null = warm ? openTts("answer") : null;
-        if (answerTts) answerTts.setLabel("answer");
         let spokenLine = false;
+        const sep = () => (base.voiceText && !/\s$/.test(base.voiceText) ? " " : "");
+        const fillers = cfg.fillers && deps.generateFillers
+          ? new FillerScheduler(
+            base,
+            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing })
+              .then((r) => { fillerUsage = r.usage; return r.lines; }),
+            async (line) => {
+              const t = openTts("filler");
+              t.setLabel("filler");
+              base.voice(sep() + line);
+              t.pushText(line);
+              t.flush();
+              await t.done();
+            },
+          )
+          : null;
         const opus = await tag("opus", deps.solveWithOpus({
-          mark: base.mark, question: route.delegate.question, pointing, fast: cfg.opusFast, history,
+          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent,
           onDelta: (d) => base.opus(d),
           onSpokenLine: (line) => {
             if (base.isFinished || spokenLine) return;
             spokenLine = true;
+            fillers?.stop();
             answerTts ??= openTts("answer");
             answerTts.setLabel("answer");
-            base.voice((base.voiceText && !/\s$/.test(base.voiceText) ? " " : "") + line);
+            base.voice(sep() + line);
             answerTts.pushText(line);
             answerTts.flush();
           },
         }));
         opusUsage = opus.usage;
+        fillers?.stop();
+        if (fillers) {
+          base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], fillers: fillers.spoken.length };
+          await fillers.done;
+        }
         if (answerTts) {
           answerDone = answerTts.done();
           answerDone.catch(() => {});

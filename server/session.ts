@@ -16,6 +16,9 @@ import { computeCost } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
 import { getConversation, resetConversation } from "./conversation.ts";
 import { dropRealtime } from "./orchestrators/shared.ts";
+import { cancelJobs } from "./orchestrators/jobs.ts";
+import type { ConnectionChannel } from "./orchestrators/types.ts";
+import { isMarkedSegment } from "../shared/marks.ts";
 
 export const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
   realtime: realtimeOrchestrator,
@@ -26,6 +29,8 @@ export const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>>
 
 /** How long to wait after the orchestrator finishes for audio.played reports. */
 const PLAYED_GRACE_MS = 3000;
+/** After a turn ends, how long the connection must stay quiet before a background notice may speak. */
+const IDLE_GRACE_MS = 800;
 
 interface Turn {
   turnId: string;
@@ -56,6 +61,35 @@ export class Session {
 
   private orchestrators: Partial<Record<RunConfig["approach"], Orchestrator>>;
   private persist: boolean;
+  private idleWaiters: (() => void)[] = [];
+  private noticeAbort: (() => void) | null = null;
+
+  /** Connection-level output for background jobs (orchestrators/jobs.ts). */
+  private channel: ConnectionChannel = {
+    send: (m) => this.send(m),
+    sendAudio: (pcm) => this.sendAudio(pcm),
+    isIdle: () => this.turn === null,
+    whenIdle: () => new Promise<void>((resolve) => {
+      const check = () => {
+        if (this.turn) return void this.idleWaiters.push(check);
+        // Stay quiet for a moment after a turn, and re-check in case a new one started meanwhile.
+        setTimeout(() => (this.turn ? this.idleWaiters.push(check) : resolve()), IDLE_GRACE_MS);
+      };
+      check();
+    }),
+    setNoticeAbort: (abort) => { this.noticeAbort = abort; },
+  };
+
+  private clearTurn(): void {
+    this.turn = null;
+    for (const w of this.idleWaiters.splice(0)) w();
+  }
+
+  private stopNotice(): void {
+    const abort = this.noticeAbort;
+    this.noticeAbort = null;
+    abort?.();
+  }
 
   /**
    * `orchestrators` overrides the routing table and `persist: false` skips appending runs to results/
@@ -109,6 +143,7 @@ export class Session {
         this.echo = msg.on;
         return;
       case "turn.start":
+        this.stopNotice(); // the user talks over a background notice: stop it
         return this.startTurn(msg.turnId, msg.config, msg.tPress, msg.fixtureId);
       case "cursor.samples":
         if (this.turn?.turnId === msg.turnId) this.turn.samples.push(...msg.samples);
@@ -125,20 +160,38 @@ export class Session {
       case "audio.played": {
         const t = this.turn;
         if (t?.turnId !== msg.turnId) return;
-        t.marks[msg.segment === "ack" ? "ack.played" : "answer.played"] ??= msg.tPlayed;
+        if (isMarkedSegment(msg.segment)) t.marks[`${msg.segment}.played`] ??= msg.tPlayed;
         t.segmentsPlayed.add(msg.segment);
         t.onPlayed?.();
         return;
       }
-      case "turn.cancel":
-        if (this.turn?.turnId === msg.turnId) {
-          this.turn.handlers?.cancel();
-          this.turn = null;
+      case "turn.cancel": {
+        const t = this.turn;
+        if (t?.turnId !== msg.turnId) return;
+        const h = t.handlers;
+        this.clearTurn();
+        h?.cancel();
+        // Chat mode: keep what was said so far, so "no, I meant…" makes sense next turn.
+        if (msg.reason && t.config.memory && h) {
+          void h.done.then((r) => {
+            if (!r.transcript && !r.voiceText) return;
+            getConversation(this.connection).push({
+              turnId: t.turnId, approach: t.config.approach, user: r.transcript,
+              assistant: `${r.voiceText.trim()} [${msg.reason === "interrupt" ? "interrupted" : "stopped"} by the user]`.trim(),
+              detail: "",
+            });
+          }, () => {});
         }
+        return;
+      }
+      case "speech.stop":
+        this.stopNotice();
         return;
       case "conversation.reset":
         this.turn?.handlers?.cancel();
-        this.turn = null;
+        this.clearTurn();
+        this.stopNotice();
+        cancelJobs(this.connection);
         resetConversation(this.connection);
         dropRealtime(this.connection);
         return;
@@ -180,10 +233,11 @@ export class Session {
         cursorSamples: () => turn.samples,
         tAudioStart: () => turn.tAudioStart,
         connection: this.connection,
+        channel: this.channel,
       });
     } catch (e) {
       this.send({ type: "error", turnId, source: "orchestrator", message: String(e) });
-      this.turn = null;
+      this.clearTurn();
       return;
     }
     turn.handlers.done
@@ -217,7 +271,7 @@ export class Session {
       usage, costUsd: computeCost(turn.config, usage), clock: this.clock, markMeta: turn.markMeta, error: result.error,
     };
     this.send({ type: "turn.done", turnId: turn.turnId, run });
-    this.turn = null;
+    this.clearTurn();
     if (this.persist) appendRun(run).catch((e) => console.error("[results] append failed", e));
   }
 }
