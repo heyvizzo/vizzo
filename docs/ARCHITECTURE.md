@@ -43,7 +43,7 @@ realtime-voice/
 │  ├─ lab/                    # latency lab UI: controls, waterfall, results table
 │  └─ cursor/                 # sampler, resolvers, timeline viz, labeling
 ├─ scripts/smoke-*.ts         # one standalone smoke test per adapter
-├─ fixtures/utterances/       # Uxx.wav + Uxx.cursor.json + Uxx.labels.json
+├─ fixtures/utterances/       # Uxx.wav + Uxx.cursor.json + Uxx.labels.json (shapes in §6.1)
 ├─ results/                   # *.jsonl (gitignored)
 ├─ .env.example               # ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 └─ package.json
@@ -226,8 +226,41 @@ Algorithms (all of them run, and each is shown in its own color):
 
 Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders to tune them against labeled sessions.
 
-**Server-side resolution:** in approaches B and C, the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn. The result is formatted into the LLM context as:
-`Pointing: "this" → <button> "Get started" [data-source=web/cursor/demo.html:42]`.
+**Precise rules (as implemented in `shared/pointing.ts`, T9):**
+- A word is a pointing word if, lowercased with every non-letter stripped (`"This,"` → `"this"`), it matches `POINTING_WORDS`.
+- Window = `[tAudioStart + start·1000 − preMs, tAudioStart + end·1000 + postMs]`, inclusive. Defaults `preMs = 300`, `postMs = 200` (`DEFAULT_WINDOW`, same as `DEFAULT_CONFIG`).
+- **Speed** of a sample = viewport pointer distance `hypot(Δx, Δy)` to the previous sample in the *whole* trail ÷ Δt (px/ms). Scrolling is not hand motion and doesn't count. The first sample of the trail (or Δt ≤ 0) has no speed and is never a `dwell` candidate.
+- `atStart`: closest sample to the word start over the whole trail (no window); null only if there are no samples.
+- `dwell`: lowest speed in the window; exact ties → closest to the word start. If no in-window sample has a speed, the closest in-window sample. Null if the window is empty.
+- `mode`: most frequent non-null `elementPath` in the window (ties → the element seen closest to the word start); returns that element's sample closest to the word start.
+- `dwellMode`: candidates are window samples with speed ≤ `minSpeed + DWELL_TIE_EPS` (**0.05 px/ms = 50 px/s**, i.e. "also basically still"). Prefer candidates on the `mode` element, then closest to the word start.
+- `resolvePointing` returns one `PointingTarget` per (pointing word × algorithm), in word order then `atStart, dwell, mode, dwellMode`. `word` is the normalized word, `wordStart` is `word.start` (**seconds** from turn audio start).
+
+**Server-side resolution:** in approaches B and C (and `cursor-only`), the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn and `config.preMs/postMs`. `formatPointingContext(targets, "dwellMode")` formats it for the LLM context, one line per pointing word (tag = last `elementPath` segment; missing parts are omitted; no pick → `(nothing)`):
+`Pointing: "this" → <button> "Get started" [data-source=web/cursor/demo/demo.html:42]`.
+
+**Cursor lab specifics.** The demo page (`web/cursor/demo/demo.html`) is injected into the lab's own document (no iframe) inside a scroll container `#demo-scroller > #demo-root`; its CSS is wrapped in `@scope (#demo-root)`. In the cursor lab, `CursorSample.scrollX/scrollY` are that container's `scrollLeft/scrollTop` (not `window.scrollX/Y`), and `elementPath`/`dataSource`/`label` are null when the pointer is outside the demo. `elementPath` is a `querySelector`-valid path: `tag#id` for the nearest CSS-safe id, else `tag:nth-of-type(n)` segments (e.g. `div#demo-root > main > article:nth-of-type(2) > h3`).
+
+### 6.1 Fixture files (`fixtures/utterances/`)
+
+The cursor lab saves (and loads, by file name) three files per session; `Uxx` is the session id.
+
+- `Uxx.wav`: 16-bit mono 24 kHz PCM WAV of the turn's captured audio (`createWavRecorder`). Sample 0 is `tAudioStart`.
+- `Uxx.cursor.json`:
+  ```ts
+  { version: 1; kind: "cursor"; id: "U04"; createdAt: string /* ISO */; transcript: string;
+    words: Word[];               // as received in stt.final (seconds from tAudioStart)
+    samples: CursorSample[];     // t = ms RELATIVE to tAudioStart (negative = before audio start); 500 ms pre-roll before press, 300 ms after release
+    viewport?: { width: number; height: number } }  // demo scroller size at record time
+  ```
+  `samples` is exactly what `startReplay({cursor})` takes. Resolvers run on it with `tAudioStart = 0`.
+- `Uxx.labels.json`:
+  ```ts
+  { version: 1; kind: "labels"; id: "U04";
+    labels: { wordIndex: number /* into words[] */; word: string /* normalized */; start: number; end: number /* s */;
+              target: { elementPath: string | null; dataSource: string | null; label: string | null } | null /* null = unlabeled */ }[] }
+  ```
+  One entry per pointing word. A pick is **correct** if `pick.dataSource === target.dataSource` (when the target has one; targets are the `[data-source]` elements, so a pick on a child of the card counts), otherwise if the `elementPath`s are equal. Accuracy = correct / labeled words, per algorithm.
 
 ## 7. Orchestrator sketches
 
@@ -236,6 +269,8 @@ Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders
 **B (`pipeline.ts`).** `turn.start` → `openScribe` (pre-warmed) + open TTS → stream audio to Scribe → `release` → `commit()` → `final()` → resolve pointing → `routeWithHaiku` (its spoken deltas go to TTS as the `ack` segment) → if delegated: `solveWithOpus`, sending `onSpokenLine` to a fresh TTS flush as the `answer` segment.
 
 **C (`hybrid.ts`).** Same as A, except audio is **also** sent to Scribe. On `release`: commit both, wait for Scribe `final()` for up to `hybridWaitMs`, resolve pointing, then `commitAndRespond(pointingContext)`. If Scribe times out, respond without the context and record `meta.pointingMissed = true`.
+
+**cursor-only (`cursorOnly.ts`, T9).** For the cursor lab: `turn.start` → `openScribe` → stream audio → `release` → `commit()` → `final()` → `stt.final` → `resolvePointing` → mark `pointing.resolved`, send `pointing.resolved` → mark `turn.end`. No LLM, no TTS. Usage records `scribeSeconds`.
 
 **Pre-warming.** Open the vendor sockets on `turn.start` (or keep them alive per connection) so connection setup isn't counted in latency. Record cold-vs-warm as a config flag.
 

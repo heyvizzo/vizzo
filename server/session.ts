@@ -10,6 +10,7 @@ import type { Orchestrator, TurnHandlers, TurnResult } from "./orchestrators/typ
 import { realtimeOrchestrator } from "./orchestrators/realtime.ts";
 import { pipelineOrchestrator } from "./orchestrators/pipeline.ts";
 import { hybridOrchestrator } from "./orchestrators/hybrid.ts";
+import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
 import { computeCost } from "./cost.ts";
 
@@ -17,6 +18,7 @@ const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
   realtime: realtimeOrchestrator,
   pipeline: pipelineOrchestrator,
   hybrid: hybridOrchestrator,
+  "cursor-only": cursorOnlyOrchestrator,
 };
 
 /** How long to wait after the orchestrator finishes for audio.played reports. */
