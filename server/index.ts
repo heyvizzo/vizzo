@@ -6,6 +6,7 @@ import { Session } from "./session.ts";
 import { loadRuns } from "./results.ts";
 import type { Orchestrator } from "./orchestrators/types.ts";
 import type { RunConfig } from "../shared/config.ts";
+import { listFixtureFiles, readFixtureFile } from "./fixtureFiles.ts";
 
 export interface StartServerOpts {
   /** Override the approach → orchestrator table (smoke:e2e --fake). */
@@ -25,6 +26,18 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
     if (req.method === "GET" && url.pathname === "/api/results") {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify(await loadRuns()));
+    }
+    if (req.method === "GET" && url.pathname === "/api/fixtures") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(await listFixtureFiles()));
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/api/fixtures/")) {
+      let name = "";
+      try { name = decodeURIComponent(url.pathname.slice("/api/fixtures/".length)); } catch { /* malformed → 404 */ }
+      const file = await readFixtureFile(name);
+      if (!file) return res.writeHead(404).end();
+      res.writeHead(200, { "content-type": file.type, "cache-control": "no-cache" });
+      return res.end(file.data);
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
       res.writeHead(200, { "content-type": "application/json" });
