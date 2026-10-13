@@ -14,7 +14,8 @@ export interface SttStream {
   commit(): void;
   onPartial(cb: (text: string) => void): void;
   /** Resolves on committed_transcript_with_timestamps (3 s fallback to plain committed_transcript, empty words). */
-  final(): Promise<{ text: string; words: Word[] }>;
+  /** `language`: the language Scribe detected (as sent, e.g. "en" / "ron"), when given. */
+  final(): Promise<{ text: string; words: Word[]; language?: string }>;
   /** Idempotent. Rejects a still-pending final(). */
   close(): void;
   /** Audio seconds sent to the vendor so far, for cost. */

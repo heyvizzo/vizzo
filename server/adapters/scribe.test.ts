@@ -68,8 +68,9 @@ describe("buildScribeUrl", () => {
     expect(u.searchParams.get("audio_format")).toBe("pcm_24000");
     expect(u.searchParams.get("commit_strategy")).toBe("manual");
     expect(u.searchParams.get("include_timestamps")).toBe("true");
-    expect(u.searchParams.get("language_code")).toBe("en");
+    expect(u.searchParams.get("language_code")).toBeNull(); // auto-detect unless pinned
     expect(u.searchParams.getAll("keyterms")).toEqual(["Opus", "Vite"]);
+    expect(new URL(buildScribeUrl([], "ro")).searchParams.get("language_code")).toBe("ro");
   });
 });
 
@@ -182,6 +183,7 @@ describe("openScribe", () => {
         { text: "Hello", start: 0.1, end: 0.4 },
         { text: "world.", start: 0.45, end: 0.9 },
       ],
+      language: "en",
     });
     const fin = marks.filter((m) => m.name === "stt.final");
     expect(fin).toHaveLength(1);

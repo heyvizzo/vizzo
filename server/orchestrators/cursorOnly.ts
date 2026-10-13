@@ -1,6 +1,6 @@
 // cursor-only approach (TASKS T9): Scribe STT + pointing resolution, no LLM, no TTS.
 import { SAMPLE_RATE } from "../../shared/config.ts";
-import { resolvePointing } from "../../shared/pointing.ts";
+import { computeRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
 import type { PointingTarget } from "../../shared/protocol.ts";
 import { openScribe } from "../adapters/scribe.ts";
 import type { OpenScribe, SttStream } from "../adapters/types.ts";
@@ -23,7 +23,8 @@ export function createCursorOnlyOrchestrator(open: OpenScribe = openScribe): Orc
     const run = async (): Promise<TurnResult> => {
       let s: SttStream;
       try {
-        s = await Promise.race([open({ mark: ctx.mark }), cancelledP]);
+        const lang = config.language;
+        s = await Promise.race([open({ mark: ctx.mark, ...(lang && lang !== "auto" ? { language: lang } : {}) }), cancelledP]);
       } catch (e) {
         if (!cancelled) ctx.send({ type: "error", turnId, source: "scribe", message: String(e) });
         throw e;
@@ -38,16 +39,18 @@ export function createCursorOnlyOrchestrator(open: OpenScribe = openScribe): Orc
         for (const b of pending.splice(0)) s.pushAudio(b);
         await Promise.race([released, cancelledP]);
         s.commit();
-        const { text, words } = await Promise.race([s.final(), cancelledP]);
-        ctx.send({ type: "stt.final", turnId, text, words });
+        const { text, words, language } = await Promise.race([s.final(), cancelledP]);
+        const lang = normalizeLanguage(language);
+        ctx.send({ type: "stt.final", turnId, text, words, ...(lang ? { language: lang } : {}) });
 
         const tAudioStart = ctx.tAudioStart();
         let pointing: PointingTarget[] = [];
         let error: string | undefined;
         if (tAudioStart === undefined) error = "no turn.audioStart received; pointing skipped";
-        else pointing = resolvePointing(words, tAudioStart, ctx.cursorSamples(), { preMs: config.preMs, postMs: config.postMs });
-        ctx.mark("pointing.resolved", { targets: pointing.length });
-        ctx.send({ type: "pointing.resolved", turnId, targets: pointing });
+        else pointing = resolvePointing(words, tAudioStart, ctx.cursorSamples(), { preMs: config.preMs, postMs: config.postMs }, languagesFor(config.language));
+        const rests = computeRests(words, tAudioStart, ctx.cursorSamples(), pointing);
+        ctx.mark("pointing.resolved", { targets: pointing.length, rests: rests.length });
+        ctx.send({ type: "pointing.resolved", turnId, targets: pointing, rests });
         ctx.mark("turn.end");
         return {
           transcript: text, pointing, voiceText: "", opusText: "",

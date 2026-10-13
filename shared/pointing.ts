@@ -26,6 +26,20 @@ export const POINTING_LEXICON: Record<PointingLanguage, ReadonlySet<string>> = {
   ]),
 };
 
+/** Pointing word lists for a language setting: auto → both (people mix English terms into Romanian). */
+export function languagesFor(setting: "auto" | "en" | "ro" | undefined): PointingLanguage[] {
+  return setting === "en" ? ["en"] : setting === "ro" ? ["ro"] : ["en", "ro"];
+}
+
+/** Scribe/ISO language codes → "en" / "ro" / other 2-letter code ("eng" → "en", "ron"/"rum" → "ro"). */
+export function normalizeLanguage(code: string | null | undefined): string | undefined {
+  if (!code) return undefined;
+  const c = code.toLowerCase().split(/[-_]/)[0]!;
+  if (c === "eng" || c === "en") return "en";
+  if (c === "ron" || c === "rum" || c === "ro" || c === "mol") return "ro";
+  return c.length === 3 ? c : c.slice(0, 2);
+}
+
 /** Lowercase, drop diacritics and everything that isn't a letter: `"Această,"` → `"aceasta"`. */
 export function foldWord(text: string): string {
   return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}]/gu, "");

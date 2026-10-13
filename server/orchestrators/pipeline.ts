@@ -16,7 +16,6 @@ import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
-import { annotateTranscript } from "../../shared/pointing.ts";
 import { startJob } from "./jobs.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
@@ -131,7 +130,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       if (!voiceId) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
       const fin = await tag("scribe", scribe.final());
       if (base.isFinished) return;
-      base.sttFinal(fin.text, fin.words);
+      base.sttFinal(fin.text, fin.words, fin.language);
       const pointing = base.resolvePointing(fin.words);
       const pageContext = base.pageContext() || undefined;
 
@@ -159,7 +158,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background });
       };
       const route = await tag("haiku", deps.routeWithHaiku({
-        mark: base.mark, transcript: annotateTranscript(fin.words, pointing) ?? fin.text, pointing, mode: cfg.routerMode, history, pageContext,
+        mark: base.mark, transcript: base.markedTranscript(), pointing, mode: cfg.routerMode, history, pageContext, language: base.language,
         longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined,
         onDecision: (d) => decide(d.intent, d.estimateS),
         onPrompt: emitPrompt,
@@ -187,7 +186,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         // Long task: the ack said "I'll get back to you"; Opus runs as a job that outlives this turn.
         const job = startJob(ctx.connection, ctx.channel!, deps, {
           turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question,
-          estimateS: delegate.estimateS, pointing, history: history ?? [], pageContext,
+          estimateS: delegate.estimateS, pointing, history: history ?? [], pageContext, language: base.language,
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
       } else if (delegate) {
@@ -199,7 +198,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         const fillers = cfg.fillers && deps.generateFillers
           ? new FillerScheduler(
             base,
-            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, onPrompt: emitPrompt })
+            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, language: base.language, onPrompt: emitPrompt })
               .then((r) => { fillerUsage = r.usage; return r.lines; }),
             async (line) => {
               const t = openTts("filler");
@@ -212,7 +211,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           )
           : null;
         const opus = await tag("opus", deps.solveWithOpus({
-          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext,
+          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext, language: base.language,
           onDelta: (d) => base.opus(d),
           onPrompt: emitPrompt,
           onSpokenLine: (line) => {

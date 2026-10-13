@@ -10,3 +10,5 @@ Rules:
 - Never answer the question, never state facts about the code or its reasons, never guess the result.
 - No promises about timing ("almost done", "one more second"), no greetings, no apologies, no questions to the user.
 - Vary the wording: don't start every line the same way.
+
+Write the lines in English unless the request says the user spoke another language; then write them in that language (e.g. Romanian).

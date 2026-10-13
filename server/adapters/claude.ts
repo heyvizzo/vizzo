@@ -58,6 +58,15 @@ export function promptInfo(target: LlmPrompt["target"], params: AnyParams, syste
   };
 }
 
+// ── Spoken language ─────────────────────────────────────────────────────────
+
+const LANGUAGE_NAMES: Record<string, string> = { en: "English", ro: "Romanian" };
+export const languageName = (code: string): string => LANGUAGE_NAMES[code] ?? code;
+/** A per-turn instruction line when the user didn't speak English ("" otherwise). */
+export function languageLine(language: string | undefined, what: string): string {
+  return language && language !== "en" ? `The user spoke ${languageName(language)}: write ${what} in ${languageName(language)}.` : "";
+}
+
 // ── Provider: OpenRouter (Anthropic-compatible Messages API) or Anthropic directly ──
 
 export type ClaudeProvider = "openrouter" | "anthropic";
@@ -266,11 +275,13 @@ const MODE_LINE: Record<RouterMode, string> = {
 
 export function buildRouterParams(
   transcript: string, pointing: PointingTarget[], mode: RouterMode, history: ChatTurn[] = [],
-  extra: { pageContext?: string; longTaskSeconds?: number } = {},
+  extra: { pageContext?: string; longTaskSeconds?: number; language?: string } = {},
 ): Anthropic.MessageStreamParams {
   // Per-turn context goes in the user message so the cached system prompt stays byte-identical.
   const lines = [`${MODE_LINE[mode]}`, `Transcript: "${transcript}"`, formatPointingForPrompt(pointing)];
   if (extra.pageContext) lines.push(extra.pageContext);
+  const lang = languageLine(extra.language, "`say` (and a clarifying question)");
+  if (lang) lines.push(lang);
   if (extra.longTaskSeconds !== undefined && extra.longTaskSeconds !== DEFAULT_LONG_TASK_SECONDS) {
     lines.push(`Long-task threshold for this conversation: ${extra.longTaskSeconds} seconds (use it instead of ${DEFAULT_LONG_TASK_SECONDS}).`);
   }
@@ -292,9 +303,9 @@ export function buildRouterParams(
 }
 
 export const routeWithHaiku: RouteWithHaiku = async ({
-  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, onDecision, onSpokenDelta, onSpokenEnd, onPrompt,
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, onDecision, onSpokenDelta, onSpokenEnd, onPrompt,
 }) => {
-  const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds });
+  const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language });
   onPrompt?.(promptInfo("router", params as AnyParams, ["router.md"]));
   const route = new RouteInputStream(
     {
@@ -405,7 +416,10 @@ export const FILLERS_TOOL: Anthropic.Tool = {
   },
 };
 
-export function buildFillersParams(transcript: string, question: string, intent: Intent, pointing: PointingTarget[]): Anthropic.MessageCreateParamsNonStreaming {
+export function buildFillersParams(
+  transcript: string, question: string, intent: Intent, pointing: PointingTarget[], language?: string,
+): Anthropic.MessageCreateParamsNonStreaming {
+  const lang = languageLine(language, "the lines");
   return {
     model: modelId(MODELS.haiku),
     max_tokens: 512,
@@ -415,16 +429,16 @@ export function buildFillersParams(transcript: string, question: string, intent:
     tool_choice: { type: "tool", name: FILLERS_TOOL.name, disable_parallel_tool_use: true },
     messages: [{
       role: "user",
-      content: `Intent: ${intent === "task" ? "task (the user wants something changed)" : "question (the user wants information)"}\nUser said: "${transcript}"\nRequest passed to the colleague: ${question}\n${formatPointingForPrompt(pointing)}`,
+      content: `Intent: ${intent === "task" ? "task (the user wants something changed)" : "question (the user wants information)"}\nUser said: "${transcript}"\nRequest passed to the colleague: ${question}\n${formatPointingForPrompt(pointing)}${lang ? `\n${lang}` : ""}`,
     }],
   };
 }
 
 const MAX_FILLERS = 3;
 
-export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, onPrompt }) => {
+export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, onPrompt }) => {
   try {
-    const fp = buildFillersParams(transcript, question, intent, pointing);
+    const fp = buildFillersParams(transcript, question, intent, pointing, language);
     onPrompt?.(promptInfo("fillers", fp as AnyParams, ["fillers.md"]));
     const msg = await getClient().messages.create(fp);
     if (msg.usage) logUsage("haiku fillers", msg.usage);
@@ -449,8 +463,11 @@ const FAST_BETA = "fast-mode-2026-02-01";
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 /** The last user message for Opus. Tasks are framed as change requests here, so the system blocks never change (cache). */
-export function opusUserMessage(question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string): string {
-  const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}${pageContext ? `\n${pageContext}` : ""}`;
+export function opusUserMessage(
+  question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string, language?: string,
+): string {
+  const lang = languageLine(language, "the SPOKEN line and the detailed answer");
+  const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}${pageContext ? `\n${pageContext}` : ""}${lang ? `\n\n${lang}` : ""}`;
   if (intent === "task") {
     return `Request type: TASK. This is a change request: the user wants something changed. You can't edit files in this session, so describe the change you would make, using the task format.\n\nTask: ${question}\n\n${pointed}`;
   }
@@ -459,7 +476,7 @@ export function opusUserMessage(question: string, pointing: PointingTarget[], in
 
 export function buildOpusParams(
   question: string, pointing: PointingTarget[], fast: boolean, history: ChatTurn[] = [], intent: Intent = "question",
-  pageContext?: string,
+  pageContext?: string, language?: string,
 ): BetaMessageStreamParams {
   const p = prompts();
   return {
@@ -472,7 +489,7 @@ export function buildOpusParams(
     ],
     messages: [...historyMessages(history, true), {
       role: "user",
-      content: opusUserMessage(question, pointing, intent, pageContext),
+      content: opusUserMessage(question, pointing, intent, pageContext, language),
     }],
     // OpenRouter rejects `fallbacks: "default"` (400), so the refusal fallback is Anthropic-direct only.
     // It accepts `speed: "fast"` but serves standard speed (usage.speed === "standard"); cost follows usage.speed.
@@ -483,7 +500,7 @@ export function buildOpusParams(
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt }) => {
+export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, language }) => {
   let text = "";
   let firstToken = false;
   let spokenReady = false;
@@ -496,7 +513,7 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
   });
 
   const run = async (useFast: boolean): Promise<Anthropic.Beta.Messages.BetaMessage> => {
-    const params = buildOpusParams(question, pointing, useFast, history, intent, pageContext);
+    const params = buildOpusParams(question, pointing, useFast, history, intent, pageContext, language);
     if (!fastFellBack) onPrompt?.(promptInfo("opus", params as AnyParams, ["opus.md", "fixture codebase"]));
     mark("opus.request", { model: params.model, fast: useFast, ...(intent === "task" ? { intent } : {}), ...(fastFellBack ? { fastFallback: true } : {}) });
     // Fast mode: no SDK retries, so a 429 falls back to standard speed right away.

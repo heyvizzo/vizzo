@@ -155,7 +155,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         s.sendToolResult(call.callId, BACKGROUND_TOOL_RESULT, { respond: false });
         pendingTool = Promise.resolve();
         const job = startJob(ctx.connection, ctx.channel!, deps, {
-          turnId: ctx.turnId, config: cfg, intent, question, estimateS, pointing: base.pointing, pageContext: base.pageContext() || undefined,
+          turnId: ctx.turnId, config: cfg, intent, question, estimateS, pointing: base.pointing, pageContext: base.pageContext() || undefined, language: base.language,
           history: cfg.memory ? getConversation(ctx.connection).slice() : [],
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
@@ -176,7 +176,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (cfg.fillers && deps.generateFillers) {
         fillers = new FillerScheduler(
           base,
-          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, onPrompt: emitPrompt })
+          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, language: base.language, onPrompt: emitPrompt })
             .then((r) => { fillerUsage = r.usage; return r.lines; }),
           async (line) => {
             await s.speak(line, "filler");
@@ -187,7 +187,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       }
       opusRuns.push(
         deps.solveWithOpus({
-          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, onPrompt: emitPrompt,
+          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, language: base.language, onPrompt: emitPrompt,
           onSpokenLine: sendResult, onDelta: (d) => base.opus(d),
         })
           .then((r) => {
@@ -199,9 +199,9 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       );
     }
 
-    function onFinal(fin: { text: string; words: import("../../shared/protocol.ts").Word[] }): void {
+    function onFinal(fin: { text: string; words: import("../../shared/protocol.ts").Word[]; language?: string }): void {
       finalArrived = true;
-      base.sttFinal(fin.text, fin.words);
+      base.sttFinal(fin.text, fin.words, fin.language);
       pointingMarked = true;
       base.resolvePointing(fin.words, hybrid && responding ? { pointingMissed: true, late: true } : {});
     }
@@ -220,7 +220,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (hybrid) {
         if (finalArrived) {
           const lines = formatPointingContext(base.pointing);
-          const marked = annotateTranscript(base.words, base.pointing);
+          const marked = annotateTranscript(base.words, base.pointing, base.rests);
           context = [marked ? `Transcript with pointing references: "${marked}"` : "", lines].filter(Boolean).join("\n") || undefined;
         }
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], pointingInjected: !!context, pointingMissed: !finalArrived };

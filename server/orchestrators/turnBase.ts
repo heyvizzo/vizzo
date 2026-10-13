@@ -2,8 +2,8 @@ import { isMarkedSegment } from "../../shared/marks.ts";
 // Shared per-turn plumbing for the A/B/C orchestrators: ordered audio segments, text accumulation,
 // socket cleanup, the overall turn timeout and "finish exactly once" semantics.
 import type { MarkName } from "../../shared/marks.ts";
-import { formatPageContext, resolvePointing } from "../../shared/pointing.ts";
-import type { PointingTarget, Segment, Usage, Word } from "../../shared/protocol.ts";
+import { annotateTranscript, computeRests, formatPageContext, formatRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
+import type { CursorRest, PointingTarget, Segment, Usage, Word } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
 import type { TurnContext, TurnResult } from "./types.ts";
 
@@ -156,10 +156,24 @@ export class TurnBase {
   /** Words of the final transcript (for aligning clicks). */
   words: Word[] = [];
 
-  sttFinal(text: string, words: Word[]): void {
+  /** Detected spoken language ("en", "ro", …), or the pinned one; undefined until known. */
+  language: string | undefined = undefined;
+  /** Where the cursor rested while the user spoke (language-agnostic pointing hints). */
+  rests: CursorRest[] = [];
+
+  sttFinal(text: string, words: Word[], detected?: string): void {
     this.transcript = text;
     this.words = words;
-    if (!this.finished) this.ctx.send({ type: "stt.final", turnId: this.ctx.turnId, text, words });
+    const pinned = this.ctx.config.language;
+    this.language = normalizeLanguage(detected) ?? (pinned && pinned !== "auto" ? pinned : undefined);
+    if (!this.finished) {
+      this.ctx.send({ type: "stt.final", turnId: this.ctx.turnId, text, words, ...(this.language ? { language: this.language } : {}) });
+    }
+  }
+
+  /** The transcript with pointing [n] and cursor-rest [@n] markers, or the plain transcript. */
+  markedTranscript(): string {
+    return annotateTranscript(this.words, this.pointing, this.rests) ?? this.transcript;
   }
 
   /** Server-side pointing resolution (ARCHITECTURE §6): resolve, mark `pointing.resolved`, notify the client. */
@@ -167,18 +181,25 @@ export class TurnBase {
     if (this.finished) return [];
     const tAudioStart = this.ctx.tAudioStart();
     const { preMs, postMs } = this.ctx.config;
-    const targets = tAudioStart === undefined ? [] : resolvePointing(words, tAudioStart, this.ctx.cursorSamples(), { preMs, postMs });
+    const samples = this.ctx.cursorSamples();
+    const targets = tAudioStart === undefined ? [] : resolvePointing(words, tAudioStart, samples, { preMs, postMs }, languagesFor(this.ctx.config.language));
     this.pointing = targets;
-    this.mark("pointing.resolved", { targets: targets.length, ...(tAudioStart === undefined ? { noAudioStart: true } : {}), ...meta });
-    this.ctx.send({ type: "pointing.resolved", turnId: this.ctx.turnId, targets });
+    this.rests = computeRests(words, tAudioStart, samples, targets);
+    this.mark("pointing.resolved", { targets: targets.length, rests: this.rests.length, ...(tAudioStart === undefined ? { noAudioStart: true } : {}), ...meta });
+    this.ctx.send({ type: "pointing.resolved", turnId: this.ctx.turnId, targets, rests: this.rests });
     return targets;
   }
 
-  /** Clicks / highlighted text from this turn as LLM context lines ("" if none). Call after stt.final for word alignment. */
+  /**
+   * Extra pointing context as LLM lines ("" if none): where the cursor rested (@n), then clicks and
+   * highlighted text. Call after resolvePointing for word alignment.
+   */
   pageContext(words: Word[] = this.words): string {
+    const tAudioStart = this.ctx.tAudioStart();
     const ev = this.ctx.pageEvents?.();
-    if (!ev || (!ev.clicks.length && !ev.preselected && !ev.highlights.length)) return "";
-    return formatPageContext(ev, words, this.ctx.tAudioStart(), this.pointing);
+    const lines = [formatRests(this.rests, words, tAudioStart)];
+    if (ev && (ev.clicks.length || ev.preselected || ev.highlights.length)) lines.push(formatPageContext(ev, words, tAudioStart, this.pointing));
+    return lines.filter(Boolean).join("\n");
   }
 
   onCleanup(fn: (reason: CleanupReason) => void): void {

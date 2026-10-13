@@ -49,14 +49,15 @@ export interface ScribeDeps {
 
 const defaultFactory: WsFactory = (url, headers) => new WebSocket(url, { headers });
 
-export function buildScribeUrl(keyterms?: string[]): string {
+export function buildScribeUrl(keyterms?: string[], language?: string): string {
   const qs = new URLSearchParams({
     model_id: "scribe_v2_realtime",
     audio_format: "pcm_24000",
     commit_strategy: "manual",
     include_timestamps: "true",
-    language_code: "en",
   });
+  // Omitted → Scribe detects the language (and returns it on the timestamped commit).
+  if (language) qs.set("language_code", language);
   // Repeated query param; docs limit: ≤50 terms, ≤20 chars each.
   for (const k of (keyterms ?? []).map((s) => s.trim()).filter((s) => s && s.length <= 20).slice(0, 50)) {
     qs.append("keyterms", k);
@@ -73,7 +74,7 @@ export function filterWords(words: unknown): Word[] {
     .map((w) => ({ text: w.text as string, start: Number(w.start), end: Number(w.end) }));
 }
 
-type FinalResult = { text: string; words: Word[] };
+type FinalResult = { text: string; words: Word[]; language?: string };
 
 export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
   const factory = deps.wsFactory ?? defaultFactory;
@@ -89,7 +90,7 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
         return;
       }
       const { mark } = opts;
-      const ws = factory(buildScribeUrl(opts.keyterms), { "xi-api-key": key });
+      const ws = factory(buildScribeUrl(opts.keyterms, opts.language), { "xi-api-key": key });
 
       let opened = false;
       let ready = false; // session_started received
@@ -198,8 +199,11 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
           case "committed_transcript_with_timestamps": {
             const words = filterWords(ev.words);
             finish(
-              { text: typeof ev.text === "string" ? ev.text : words.map((w) => w.text).join(" "), words },
-              { timestamped: true, ...(plain ? { plainToTimestampedMs: Math.round(serverNow() - plain.t) } : {}) },
+              {
+                text: typeof ev.text === "string" ? ev.text : words.map((w) => w.text).join(" "), words,
+                ...(typeof ev.language_code === "string" && ev.language_code ? { language: ev.language_code } : {}),
+              },
+              { timestamped: true, ...(typeof ev.language_code === "string" ? { language: ev.language_code } : {}), ...(plain ? { plainToTimestampedMs: Math.round(serverNow() - plain.t) } : {}) },
             );
             return;
           }

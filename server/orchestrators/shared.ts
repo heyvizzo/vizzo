@@ -24,7 +24,8 @@ export class LazyScribe {
 
   open(): Promise<SttStream> {
     if (!this.p) {
-      this.p = this.base.track(this.deps.openScribe({ mark: this.base.mark })).then((s) => {
+      const lang = this.base.ctx.config.language;
+      this.p = this.base.track(this.deps.openScribe({ mark: this.base.mark, ...(lang && lang !== "auto" ? { language: lang } : {}) })).then((s) => {
         this.stream = s;
         s.onPartial((t) => this.base.sttPartial(t));
         for (const b of this.buf.splice(0)) s.pushAudio(b);
@@ -43,7 +44,7 @@ export class LazyScribe {
   }
 
   /** Commit (now, or as soon as the socket opens) and wait for the final transcript. */
-  async final(): Promise<{ text: string; words: import("../../shared/protocol.ts").Word[] }> {
+  async final(): Promise<{ text: string; words: import("../../shared/protocol.ts").Word[]; language?: string }> {
     const s = await this.open();
     if (!this.committed) { this.committed = true; s.commit(); }
     return s.final();

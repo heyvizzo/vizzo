@@ -21,6 +21,7 @@ export interface JobSpec {
   pointing: PointingTarget[];
   history: ChatTurn[];
   pageContext?: string;
+  language?: string;
 }
 
 class JobRegistry {
@@ -63,7 +64,7 @@ export function startJob(
 
   deps.solveWithOpus({
     mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.opusFast,
-    history: spec.history, intent: spec.intent, pageContext: spec.pageContext,
+    history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language,
     onPrompt: (prompt) => { if (!reg.cancelled) channel.send({ type: "llm.prompt", turnId: spec.turnId, jobId: job.jobId, prompt }); },
     onSpokenLine: (l) => { spoken = l.trim(); },
     onDelta: (d) => { text += d; },
