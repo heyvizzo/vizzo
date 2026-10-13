@@ -288,8 +288,8 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     await wait(t.llmFirstMs);
     if (sc.failIn === "haiku") throw new Error("fake haiku: 529 overloaded");
     const usage = { input_tokens: 900, output_tokens: 40, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
-    mark("llm.toolCall", { name: "route" });
     mark("llm.firstToken");
+    mark("llm.toolCall", { name: "route" });
     const routed: RouteIntent = intent === "clarify" ? "clarify" : mode === "forced" || sc.delegate ? intent : "answer";
     const decision = { intent: routed, estimateS: routed === "question" || routed === "task" ? estimateS : null };
     onDecision?.(decision);

@@ -174,7 +174,11 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
           base,
           deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing })
             .then((r) => { fillerUsage = r.usage; return r.lines; }),
-          (line) => s.speak(line, "filler"),
+          async (line) => {
+            await s.speak(line, "filler");
+            // Close the filler's segment so the next line (or the answer) starts a new one after a pause.
+            if (writer?.label === "filler") { writer.end(); writer = null; }
+          },
         );
       }
       opusRuns.push(
@@ -232,6 +236,8 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         await tag("openai", l.session.responseDone());
         if (base.isFinished) return;
         if (!pendingTool) break;
+        // The ack has finished: close its segment, so fillers can follow once it has played.
+        if (writer && writer.label === "ack") { writer.end(); writer = null; }
         const p = pendingTool;
         pendingTool = null;
         await p; // tool result sent → the adapter issues response.create for the answer

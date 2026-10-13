@@ -18,7 +18,7 @@ import { ConnectionState } from "../connection.ts";
 import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING, SPOKEN_LINE, type FakeScenario } from "./fakes.ts";
 import { createHybridOrchestrator } from "./hybrid.ts";
 import { createPipelineOrchestrator } from "./pipeline.ts";
-import { createRealtimeOrchestrator, TOOL_RESULT_NOTE } from "./realtime.ts";
+import { CANCELLED_TOOL_RESULT, createRealtimeOrchestrator, TOOL_RESULT_NOTE } from "./realtime.ts";
 import type { Orchestrator, OrchestratorDeps, TurnContext, TurnResult } from "./types.ts";
 import type { RealtimeUsage } from "../adapters/types.ts";
 
@@ -132,9 +132,10 @@ describe("realtime orchestrator (A)", () => {
     expect(allClosed(d.log)).toBe(true);
   });
 
-  it("cancel mid-response closes and drops the reused session", async () => {
+  it("cancel while Opus works: response cancelled, pending call closed, session kept for the next turn", async () => {
     const conn = new ConnectionState();
-    const orch = createRealtimeOrchestrator(createFakeDeps({ ...FAST_TIMING, opusFirstMs: 50 }, DEFAULT_SCENARIO));
+    const d = createFakeDeps({ ...FAST_TIMING, opusFirstMs: 50 }, DEFAULT_SCENARIO);
+    const orch = createRealtimeOrchestrator(d);
     const h = harness({ approach: "realtime" }, conn);
     const t = orch(h.ctx);
     await new Promise((r) => setTimeout(r, 5));
@@ -143,7 +144,9 @@ describe("realtime orchestrator (A)", () => {
     t.cancel();
     const r = await t.done;
     expect(r.error).toBe("cancelled");
-    expect(conn.get("realtime")).toBeUndefined();
+    expect(conn.get("realtime")).toBeDefined();
+    expect(d.log.cancels).toBe(1);
+    expect(d.log.sentToolResults).toEqual([{ callId: expect.any(String), output: CANCELLED_TOOL_RESULT, respond: false }]);
   });
 
   it("realtime error → error {source: openai}, done with error, never hangs", async () => {
