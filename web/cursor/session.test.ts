@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { CursorSample, Word } from "../../shared/protocol.ts";
 import {
-  labelsFor, nextSessionId, parseCursorFile, parseLabelsFile, sessionsFromFiles, toCursorFile, toLabelsFile, toRelativeSamples,
+  labelsFor, nextSessionId, parseCursorFile, parseLabelsFile, sessionEvents, sessionsFromFiles, shiftEvents, toCursorFile, toLabelsFile,
+  toRelativeSamples,
   type LabSession,
 } from "./session.ts";
 import { scoreSessions, targetMatches } from "./scoring.ts";
@@ -48,19 +49,61 @@ describe("session files", () => {
     expect(c.words).toEqual(words);
     expect(c.samples).toEqual(samples);
     expect(l.labels).toEqual(s.labels);
-    expect(c.clicks).toBeUndefined(); // older files: no clicks/selection
+    expect(c.clicks).toBeUndefined(); // no page events: the fields are left out
+    expect(c.highlights).toBeUndefined();
   });
 
-  it("round-trips clicks and selection (optional fields)", () => {
+  it("round-trips click events, the pre-existing highlight and highlights (optional fields)", () => {
     const s = session();
-    s.clicks = [{ t: 120, x: 5, y: 6, ...card(2), container: "Feature card grid" }];
-    s.selection = { t: -40, text: "Charts refresh", ...card(1), container: null };
-    const c = parseCursorFile(JSON.stringify(toCursorFile(s)));
+    s.clicks = [
+      { ...card(2), container: "Feature card grid", kind: "double", count: 2, t: 120, tEnd: 330, times: [120, 260], x: 5, y: 6 },
+      { ...card(3), container: null, kind: "multi", count: 5, t: 900, tEnd: 1550, times: [900, 1050, 1200, 1350, 1480], x: 9, y: 9 },
+    ];
+    s.preselected = { t: -40, text: "Charts refresh", ...card(1), container: null };
+    s.highlights = [
+      { text: "Hobby 3 5 $0\nTeam Unlimited 50 $49", tStart: 300, t: 650, ...card(2), container: "Pricing table" },
+      { text: "Drop any chart", tStart: 1000, t: 1350, ...card(3), container: null },
+    ];
+    const file = toCursorFile(s);
+    expect(file).not.toHaveProperty("selection");
+    const c = parseCursorFile(JSON.stringify(file));
     expect(c.clicks).toEqual(s.clicks);
-    expect(c.selection).toEqual(s.selection);
-    const { sessions } = sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(toCursorFile(s)) }]);
-    expect(sessions[0]!.clicks).toEqual(s.clicks);
-    expect(sessions[0]!.selection).toEqual(s.selection);
+    expect(c.preselected).toEqual(s.preselected);
+    expect(c.highlights).toEqual(s.highlights);
+    const { sessions } = sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(file) }]);
+    expect(sessionEvents(sessions[0]!)).toEqual({ clicks: s.clicks, preselected: s.preselected, highlights: s.highlights });
+  });
+
+  it("loads old files: kind-less clicks become single clicks, `selection` becomes a highlight", () => {
+    const old = {
+      ...toCursorFile(session()),
+      clicks: [{ t: 120, x: 5, y: 6, ...card(2), container: "Feature card grid" }, { t: 400, x: 1, y: 1, ...card(1) }],
+      selection: { t: -40, text: "Charts refresh", ...card(1), container: null },
+    };
+    const c = parseCursorFile(JSON.stringify(old));
+    expect(c.clicks).toEqual([
+      { ...card(2), container: "Feature card grid", kind: "single", count: 1, t: 120, tEnd: 120, times: [120], x: 5, y: 6 },
+      { ...card(1), kind: "single", count: 1, t: 400, tEnd: 400, times: [400], x: 1, y: 1 },
+    ]);
+    expect(c.highlights).toEqual([{ ...card(1), container: null, text: "Charts refresh", tStart: -40, t: -40 }]);
+    expect(c.preselected).toBeUndefined();
+    // Re-saving writes the new shape.
+    const again = toCursorFile(sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(old) }]).sessions[0]!);
+    expect(again).not.toHaveProperty("selection");
+    expect(again.highlights).toHaveLength(1);
+    // A malformed click list is dropped rather than failing the load.
+    expect(parseCursorFile(JSON.stringify({ ...old, clicks: [{ t: "x" }] })).clicks).toBeUndefined();
+  });
+
+  it("shiftEvents moves every time (absolute <-> relative)", () => {
+    const ev = shiftEvents({
+      clicks: [{ ...card(1), kind: "double", count: 2, t: 1000, tEnd: 1250, times: [1000, 1180], x: 0, y: 0 }],
+      preselected: { ...card(1), t: 900, text: "a" },
+      highlights: [{ ...card(2), text: "b", tStart: 1100, t: 1400 }],
+    }, -1000);
+    expect([ev.clicks[0]!.t, ev.clicks[0]!.tEnd, ev.clicks[0]!.times]).toEqual([0, 250, [0, 180]]);
+    expect(ev.preselected!.t).toBe(-100);
+    expect([ev.highlights[0]!.tStart, ev.highlights[0]!.t]).toEqual([100, 400]);
   });
 
   it("rejects malformed files", () => {
