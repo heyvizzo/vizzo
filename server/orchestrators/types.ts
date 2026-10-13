@@ -1,5 +1,5 @@
 import type { RunConfig } from "../../shared/config.ts";
-import type { CursorSample, PageClick, PageSelection, PointingTarget, ServerMsg, Usage } from "../../shared/protocol.ts";
+import type { CursorSample, PageEvents, PointingTarget, ServerMsg, Usage } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
 import type { GenerateFillers, OpenRealtime, OpenScribe, OpenTts, RouteWithHaiku, SolveWithOpus } from "../adapters/types.ts";
 
@@ -43,7 +43,7 @@ export interface TurnContext {
   /** Client time of the first captured audio sample, once known. */
   tAudioStart: () => number | undefined;
   /** Clicks and highlighted text the client reported for this turn (turn.context). */
-  pageEvents?: () => { clicks: PageClick[]; selection: PageSelection | null };
+  pageEvents?: () => PageEvents;
   /** T7 addition: state that outlives the turn (one per browser connection). */
   connection: ConnectionCache;
   /** Connection-level output for background jobs (chat mode). Without it, long tasks run inline. */

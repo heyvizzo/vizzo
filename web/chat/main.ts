@@ -9,7 +9,7 @@ import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type TtsModel } from "../../shared/config.ts";
-import type { PageClick, PageSelection, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
+import type { PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -18,6 +18,7 @@ import { mountDemo } from "../cursor/demoLoader.ts";
 import { renderOverlay } from "../cursor/overlay.ts";
 import { Sampler } from "../cursor/sampler.ts";
 import { createPageContextRecorder } from "../cursor/pageContext.ts";
+import { clickVerb, relTime } from "../../shared/pointing.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
@@ -238,21 +239,28 @@ function renderChips(v: TurnView, targets: PointingTarget[], approach: ChatAppro
   if (approach === "realtime" && v.chips.childElementCount) v.chips.append(el("span", "chip", "not sent to A"));
 }
 
-/** What was clicked / highlighted during the turn, under the pointing chips. */
-function renderPageChips(v: TurnView, clicks: PageClick[], selection: PageSelection | null): void {
-  if (!clicks.length && !selection) return;
+/** What was clicked / highlighted during the turn (with times from when you started speaking), under the pointing chips. */
+function renderPageChips(v: TurnView, page: PageEvents, tAudioStart: number | undefined): void {
+  if (!page.clicks.length && !page.preselected && !page.highlights.length) return;
   const row = el("div", "chips");
-  for (const c of clicks) {
+  const at = (t: number) => { const r = relTime(t, tAudioStart); return r ? ` · ${r}` : ""; };
+  const short = (text: string) => (text.length > 50 ? `${text.slice(0, 50)}…` : text);
+  for (const c of page.clicks) {
     const chip = el("span", "chip");
-    chip.append(el("b", undefined, "clicked"), ` ${c.label ?? "(element)"}${c.container ? ` · ${c.container}` : ""}`);
+    chip.append(el("b", undefined, clickVerb(c).toLowerCase()), ` ${c.label ?? "(element)"}${c.container ? ` · ${c.container}` : ""}${at(c.t)}`);
+    chip.title = `click times: ${c.times.map((t) => relTime(t, tAudioStart) ?? "?").join(", ")}`;
     row.append(chip);
   }
-  if (selection) {
+  if (page.preselected) {
     const chip = el("span", "chip");
-    const text = selection.text.length > 60 ? `${selection.text.slice(0, 60)}…` : selection.text;
-    chip.append(el("b", undefined, "selected"), ` “${text}”`);
+    chip.append(el("b", undefined, "already highlighted"), ` “${short(page.preselected.text)}”`);
     row.append(chip);
   }
+  page.highlights.forEach((h, i) => {
+    const chip = el("span", "chip");
+    chip.append(el("b", undefined, `highlight ${i + 1}`), ` “${short(h.text)}”${at(h.t)}`);
+    row.append(chip);
+  });
   v.chips.after(row);
 }
 
@@ -426,6 +434,8 @@ function stopNotice(): void {
 
 // ── turn flow ──────────────────────────────────────
 interface Turn {
+  /** Client time of the first captured audio sample (page-event times are shown relative to it). */
+  tAudioStart?: number;
   turnId: string;
   approach: ChatApproach;
   tPress: number;
@@ -511,6 +521,7 @@ function press(): void {
     try {
       t.capture = await startCapture({ onFrame: (pcm) => { if (turn === t && t.tRelease === undefined && !t.finished) sock.sendAudio(pcm); } });
       const tAudioStart = await t.capture.tAudioStart;
+      t.tAudioStart = tAudioStart;
       if (!t.finished) sock.send({ type: "turn.audioStart", turnId, tAudioStart });
     } catch (e) {
       failTurn(t, `Mic: ${(e as Error).message}`);
@@ -529,8 +540,8 @@ async function release(): Promise<void> {
   flushSamples(t);
   clearInterval(t.batchTimer);
   const page = pageRec.stop();
-  sock.send({ type: "turn.context", turnId: t.turnId, clicks: page.clicks, selection: page.selection });
-  renderPageChips(t.view, page.clicks, page.selection);
+  sock.send({ type: "turn.context", turnId: t.turnId, ...page });
+  renderPageChips(t.view, page, t.tAudioStart);
   sock.send({ type: "turn.release", turnId: t.turnId, tRelease: t.tRelease });
   setStatus("Thinking…");
   refreshBusy();

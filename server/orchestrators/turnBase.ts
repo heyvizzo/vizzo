@@ -177,8 +177,8 @@ export class TurnBase {
   /** Clicks / highlighted text from this turn as LLM context lines ("" if none). Call after stt.final for word alignment. */
   pageContext(words: Word[] = this.words): string {
     const ev = this.ctx.pageEvents?.();
-    if (!ev || (!ev.clicks.length && !ev.selection)) return "";
-    return formatPageContext(ev.clicks, ev.selection, words, this.ctx.tAudioStart());
+    if (!ev || (!ev.clicks.length && !ev.preselected && !ev.highlights.length)) return "";
+    return formatPageContext(ev, words, this.ctx.tAudioStart());
   }
 
   onCleanup(fn: (reason: CleanupReason) => void): void {

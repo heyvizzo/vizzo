@@ -1,5 +1,5 @@
 // Pointing resolution (ARCHITECTURE §6). Pure functions, shared by the server and the cursor lab.
-import type { CursorSample, ElementRef, PageClick, PageSelection, PointingTarget, Word } from "./protocol.ts";
+import type { CursorSample, ElementRef, PageClick, PageEvents, PointingTarget, Word } from "./protocol.ts";
 
 export const POINTING_WORDS = /^(this|that|these|those|here|there)$/i;
 
@@ -179,25 +179,43 @@ export function formatPointingContext(targets: PointingTarget[], algorithm = "dw
     .join("\n");
 }
 
-/** At most this many `Clicked:` lines (the latest ones). */
-export const MAX_CLICK_LINES = 5;
+/** At most this many click lines (the latest events). */
+export const MAX_CLICK_LINES = 8;
+/** At most this many highlight lines (the latest ones). */
+export const MAX_HIGHLIGHT_LINES = 6;
 /** A click further than this from every word's span isn't attributed to a word. */
 export const CLICK_WORD_MAX_MS = 1000;
 /** Selected text is cut to this many characters in the context. */
 export const SELECTION_MAX = 200;
 
-const refKey = (r: ElementRef) => r.elementPath ?? `${r.dataSource ?? ""}|${r.label ?? ""}`;
+/** Click events sorted by time, empty refs dropped, the latest `max` kept. (Grouping into double/triple/multi happens in the recorder.) */
+export function sortClicks(clicks: readonly PageClick[], max = MAX_CLICK_LINES): PageClick[] {
+  return [...clicks].filter((c) => !isEmptyRef(c)).sort((a, b) => a.t - b.t).slice(-max);
+}
 
-/** Sorted by t; consecutive clicks on the same element collapse into the first; empty refs dropped; the latest `max` kept. */
-export function dedupeClicks(clicks: readonly PageClick[], max = MAX_CLICK_LINES): PageClick[] {
-  const out: PageClick[] = [];
-  for (const c of [...clicks].sort((a, b) => a.t - b.t)) {
-    if (isEmptyRef(c)) continue;
-    const prev = out[out.length - 1];
-    if (prev && refKey(prev) === refKey(c)) continue;
-    out.push(c);
+/** "Clicked", "Double-clicked", "Triple-clicked", "Clicked 5 times". */
+export function clickVerb(c: Pick<PageClick, "kind" | "count">): string {
+  switch (c.kind) {
+    case "single": return "Clicked";
+    case "double": return "Double-clicked";
+    case "triple": return "Triple-clicked";
+    default: return `Clicked ${c.count} times`;
   }
-  return out.slice(-max);
+}
+
+/** Client time → seconds from the turn's first audio sample, e.g. "1.4 s" (negative: before speaking). Null without tAudioStart. */
+export function relTime(t: number, tAudioStart: number | undefined): string | null {
+  if (tAudioStart === undefined || !Number.isFinite(tAudioStart) || !Number.isFinite(t)) return null;
+  const s = (t - tAudioStart) / 1000;
+  return `${(Math.round(s * 10) / 10).toFixed(1)} s`;
+}
+
+/** " at 1.4 s" or " from 1.0 to 2.3 s" ("" without tAudioStart). */
+function when(from: number, to: number, tAudioStart: number | undefined): string {
+  const a = relTime(from, tAudioStart);
+  if (!a) return "";
+  const b = relTime(to, tAudioStart)!;
+  return a === b ? ` at ${a}` : ` from ${a.replace(" s", "")} to ${b}`;
 }
 
 /**
@@ -225,27 +243,42 @@ export function truncateText(text: string, max = SELECTION_MAX): string {
 
 const norm = (s: string) => s.replace(/…$/, "").replace(/\s+/g, " ").trim().toLowerCase();
 
+/** `"text" in <p> in "Card: …" [data-source=…]` (the element's label is left out when it just repeats the text). */
+function describeText(text: string, ref: ElementRef): string {
+  const label = ref.label ? norm(ref.label) : "";
+  const repeats = !!label && (norm(text).includes(label) || label.includes(norm(text)));
+  const where = describeRef(ref, { label: !repeats });
+  return `${JSON.stringify(text)}${where ? ` in ${where}` : ""}`;
+}
+
+const saying = (t: number, words: Word[], tAudioStart: number | undefined): string => {
+  const w = wordNear(t, words, tAudioStart);
+  return w ? ` (while saying ${JSON.stringify(w.text.trim())})` : "";
+};
+
 /**
- * Clicks and highlighted text from the turn, as lines for the LLM context (empty string if none):
- *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] (while saying "this")`
- *   `Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=…]`
- * Clicks: one line each, sorted by time, consecutive clicks on the same element deduped, the latest
- * MAX_CLICK_LINES kept; `(while saying "…")` names the word nearest the click (wordNear), omitted
- * when words/tAudioStart are missing or no word is within CLICK_WORD_MAX_MS. Selection: text cut to
- * SELECTION_MAX chars, then its element; the element's label is left out when it just repeats the text.
+ * What the user did on the page during the turn, as lines for the LLM context ("" if nothing). Times are
+ * seconds from the first audio sample (the words' clock):
+ *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] at 1.4 s (while saying "this")`
+ *   `Double-clicked: <h3> "Live queries" … at 2.1 s` · `Triple-clicked: …` · `Clicked 5 times: <button> … from 1.0 to 2.3 s`
+ *   `Already highlighted when recording started: "…" in <p> …`
+ *   `Highlight 1 (made from 0.8 to 1.6 s, while saying "these"): "…" in <td> …`
+ * Clicks: sorted by time, the latest MAX_CLICK_LINES; the word nearest the first click (CLICK_WORD_MAX_MS).
+ * Highlights: in order, the latest MAX_HIGHLIGHT_LINES, numbered; the word nearest the highlight's end.
  */
-export function formatPageContext(clicks: PageClick[], selection: PageSelection | null, words: Word[], tAudioStart: number | undefined): string {
-  const lines = dedupeClicks(clicks ?? []).map((c) => {
-    const w = wordNear(c.t, words, tAudioStart);
-    const saying = w ? ` (while saying ${JSON.stringify(w.text.trim())})` : "";
-    return `Clicked: ${describeRef(c)}${saying}`;
+export function formatPageContext(ev: PageEvents | null | undefined, words: Word[], tAudioStart: number | undefined): string {
+  if (!ev) return "";
+  const lines = sortClicks(ev.clicks ?? []).map((c) =>
+    `${clickVerb(c)}: ${describeRef(c)}${when(c.t, c.kind === "single" ? c.t : c.tEnd, tAudioStart)}${saying(c.t, words, tAudioStart)}`);
+  const pre = ev.preselected ? truncateText(ev.preselected.text) : "";
+  if (ev.preselected && pre) lines.push(`Already highlighted when recording started: ${describeText(pre, ev.preselected)}`);
+  const hs = (ev.highlights ?? []).filter((h) => truncateText(h.text)).slice(-MAX_HIGHLIGHT_LINES);
+  hs.forEach((h, i) => {
+    const span = relTime(h.tStart, tAudioStart);
+    const made = span ? `made${when(h.tStart, h.t, tAudioStart)}` : "";
+    const w = wordNear(h.t, words, tAudioStart);
+    const meta = [made, w ? `while saying ${JSON.stringify(w.text.trim())}` : ""].filter(Boolean).join(", ");
+    lines.push(`Highlight ${i + 1}${meta ? ` (${meta.trim()})` : ""}: ${describeText(truncateText(h.text), h)}`);
   });
-  const text = selection ? truncateText(selection.text) : "";
-  if (selection && text) {
-    const label = selection.label ? norm(selection.label) : "";
-    const repeats = !!label && (norm(text).includes(label) || label.includes(norm(text)));
-    const where = describeRef(selection, { label: !repeats });
-    lines.push(`Selected text: ${JSON.stringify(text)}${where ? ` in ${where}` : ""}`);
-  }
   return lines.join("\n");
 }

@@ -1,24 +1,54 @@
-// Captures what the user clicks and highlights on a page during a turn (ClientMsg turn.context).
+// Captures what the user does on a page during a turn (ClientMsg turn.context → PageEvents):
+// - clicks, grouped into single / double / triple / multi (4+) events with every click's timestamp;
+// - the text already highlighted when the recording started;
+// - each highlight made during the recording, as its own entry (a browser shows only one selection at a
+//   time, so earlier highlights are painted with the CSS Custom Highlight API until the next turn).
 // Pure helpers are exported for tests; the DOM wiring in createPageContextRecorder stays thin.
-import type { PageClick, PageSelection } from "../../shared/protocol.ts";
-import { describeElement, type ElLike } from "./dom.ts";
+import type { ClickKind, PageClick, PageEvents, PageHighlight, PageSelection } from "../../shared/protocol.ts";
+import { describeElement, type ElLike, type ElementInfo } from "./dom.ts";
 
 /** A pointer that moved more than this between down and up was a drag (e.g. selecting text), not a click. */
 export const DRAG_PX = 6;
-/** A keyboard `click` right after a recorded pointer click on the same element is the same click. */
-export const SAME_CLICK_MS = 800;
-/** Selected text kept per turn (formatPageContext truncates further for the LLM). */
+/** Consecutive clicks on the same element at most this far apart (ms) form one double/triple/multi click. */
+export const CLICK_GROUP_MS = 500;
+/** …and at most this far from the group's first click (px). */
+export const CLICK_GROUP_PX = 10;
+/** A new highlight overlapping the previous one within this time replaces it (double → triple click on text). */
+export const HIGHLIGHT_MERGE_MS = 700;
+/** Selected text kept per highlight (formatPageContext truncates further for the LLM). */
 export const SELECTION_KEEP = 2000;
 
 export function isDrag(down: { x: number; y: number }, up: { x: number; y: number }, px = DRAG_PX): boolean {
   return Math.hypot(up.x - down.x, up.y - down.y) > px;
 }
 
-/** Append `c` unless it repeats the previous click (same element within SAME_CLICK_MS). Returns the list. */
-export function pushClick(list: PageClick[], c: PageClick, sameMs = SAME_CLICK_MS): PageClick[] {
-  const prev = list[list.length - 1];
-  if (prev && prev.elementPath === c.elementPath && Math.abs(c.t - prev.t) <= sameMs) return list;
-  list.push(c);
+export function clickKind(count: number): ClickKind {
+  return count <= 1 ? "single" : count === 2 ? "double" : count === 3 ? "triple" : "multi";
+}
+
+/** One press+release that wasn't a drag. */
+export interface RawClick extends ElementInfo { t: number; tUp: number; x: number; y: number }
+
+/**
+ * Add a click to the event list: it joins the last event when it's on the same element, within
+ * CLICK_GROUP_MS of that event's last click and CLICK_GROUP_PX of its first; otherwise it starts a new
+ * single click. Mutates and returns `list`.
+ */
+export function addClick(list: PageClick[], c: RawClick, groupMs = CLICK_GROUP_MS, groupPx = CLICK_GROUP_PX): PageClick[] {
+  const last = list[list.length - 1];
+  if (
+    last && last.elementPath === c.elementPath &&
+    c.t - last.times[last.times.length - 1]! <= groupMs &&
+    Math.hypot(c.x - last.x, c.y - last.y) <= groupPx
+  ) {
+    last.times.push(c.t);
+    last.count = last.times.length;
+    last.kind = clickKind(last.count);
+    last.tEnd = c.tUp;
+    return list;
+  }
+  const { t, tUp, x, y, ...info } = c;
+  list.push({ ...info, kind: "single", count: 1, t, tEnd: tUp, times: [t], x, y });
   return list;
 }
 
@@ -26,6 +56,28 @@ export function pushClick(list: PageClick[], c: PageClick, sameMs = SAME_CLICK_M
 export function cleanSelection(text: string | null | undefined, max = SELECTION_KEEP): string | null {
   const t = (text ?? "").replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
   return t ? t.slice(0, max) : null;
+}
+
+/** Offsets of a range in document order, for overlap checks without a DOM in tests. */
+export interface Span { start: number; end: number }
+export const overlaps = (a: Span, b: Span): boolean => a.start < b.end && b.start < a.end;
+
+/**
+ * Add a finished highlight: replaces the previous one when they overlap and it's within HIGHLIGHT_MERGE_MS
+ * (one gesture refining its selection, e.g. the word of a double click → the paragraph of a triple click),
+ * is ignored when it repeats the previous one exactly, else appended. Returns what happened.
+ */
+export function addHighlight(
+  list: { h: PageHighlight; span: Span }[], h: PageHighlight, span: Span, mergeMs = HIGHLIGHT_MERGE_MS,
+): "added" | "replaced" | "ignored" {
+  const last = list[list.length - 1];
+  if (last && last.span.start === span.start && last.span.end === span.end) return "ignored";
+  if (last && overlaps(last.span, span) && h.tStart - last.h.t <= mergeMs) {
+    list[list.length - 1] = { h: { ...h, tStart: Math.min(h.tStart, last.h.tStart) }, span };
+    return "replaced";
+  }
+  list.push({ h, span });
+  return "added";
 }
 
 interface NodeLike { nodeType: number; parentElement: ElLike | null }
@@ -37,38 +89,107 @@ export function elementOf(node: NodeLike | null | undefined): ElLike | null {
 }
 
 export interface PageContextRecorder {
-  /** Begin recording clicks (t ≥ tFrom) and selections for a turn; clears the previous turn. */
+  /** Begin a turn at client time `tFrom`: clears the previous turn and snapshots the text already highlighted. */
   start(tFrom: number): void;
-  /** Stop and return the turn's clicks and the latest selection (including one still active from before the turn). */
-  stop(): { clicks: PageClick[]; selection: PageSelection | null };
+  /** End the turn and return its events (an unfinished click group is included as it stands). */
+  stop(): PageEvents;
+  /** The current turn's events so far (live views). */
+  current(): PageEvents;
+  /** Called after every change while recording. */
+  onChange: ((ev: PageEvents) => void) | null;
   dispose(): void;
 }
 
-/** Records clicks inside `root` (capture phase) and the latest selection inside `root`. Clock: performance.now(). */
-export function createPageContextRecorder(root: HTMLElement): PageContextRecorder {
+export interface RecorderOpts {
+  /** Paint the turn's highlights (and the pre-existing one) with the CSS Custom Highlight API. Default true. */
+  paint?: boolean;
+}
+
+const HL_NOW = "turn-highlights";
+const HL_PRE = "turn-preselected";
+const HL_STYLE = `
+::highlight(${HL_NOW}) { background-color: rgba(110, 168, 254, 0.38); color: inherit; }
+::highlight(${HL_PRE}) { background-color: rgba(251, 191, 36, 0.32); color: inherit; }`;
+
+type HighlightRegistry = { set(name: string, h: unknown): void; delete(name: string): void };
+const registry = (): HighlightRegistry | null =>
+  ((globalThis as { CSS?: { highlights?: HighlightRegistry } }).CSS?.highlights) ?? null;
+const HighlightCtor = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+
+/** Records clicks and highlights inside `root`. Clock: performance.now(). */
+export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts = {}): PageContextRecorder {
+  const paint = (opts.paint ?? true) && !!registry() && !!HighlightCtor;
   let active = false;
   let tFrom = 0;
   let clicks: PageClick[] = [];
-  let selection: PageSelection | null = null;
+  let preselected: { sel: PageSelection; range: Range } | null = null;
+  let highlights: { h: PageHighlight; span: Span; range: Range }[] = [];
   let down: { t: number; x: number; y: number; target: Element } | null = null;
+  let keySelectStart: number | null = null;
+
+  if (paint && !document.getElementById("page-context-highlights")) {
+    const style = document.createElement("style");
+    style.id = "page-context-highlights";
+    style.textContent = HL_STYLE;
+    document.head.append(style);
+  }
 
   const inside = (n: Node | null) => !!n && root.contains(n);
-
-  const record = (target: Element, t: number, x: number, y: number) => {
-    if (!active || t < tFrom || !inside(target)) return;
-    const info = describeElement(target as unknown as ElLike, root as unknown as ElLike);
-    if (!info.elementPath) return;
-    pushClick(clicks, { t, x, y, ...info });
+  const describe = (el: Element | ElLike | null) => describeElement(el as unknown as ElLike, root as unknown as ElLike);
+  const events = (): PageEvents => ({
+    clicks: clicks.map((c) => ({ ...c, times: [...c.times] })),
+    preselected: preselected?.sel ?? null,
+    highlights: highlights.map((x) => x.h),
+  });
+  const changed = () => {
+    if (paint) repaint();
+    recorder.onChange?.(events());
   };
 
-  const readSelection = (t: number): PageSelection | null => {
+  /** Document-order offsets of a range within root (for overlap checks). */
+  const spanOf = (r: Range): Span => {
+    const pre = document.createRange();
+    pre.selectNodeContents(root);
+    pre.setEnd(r.startContainer, r.startOffset);
+    const start = pre.toString().length;
+    return { start, end: start + r.toString().length };
+  };
+
+  /** The current selection inside root, if any. */
+  const readSelection = (): { text: string; range: Range; info: ElementInfo } | null => {
     const sel = document.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
     if (!inside(sel.anchorNode) || !inside(sel.focusNode)) return null;
     const text = cleanSelection(sel.toString());
     if (!text) return null;
-    const el = elementOf(sel.getRangeAt(0).commonAncestorContainer as unknown as NodeLike);
-    return { t, text, ...describeElement(el, root as unknown as ElLike) };
+    const range = sel.getRangeAt(0).cloneRange();
+    return { text, range, info: describe(elementOf(range.commonAncestorContainer as unknown as NodeLike)) };
+  };
+
+  function repaint(): void {
+    const reg = registry()!;
+    reg.delete(HL_NOW);
+    reg.delete(HL_PRE);
+    if (highlights.length) reg.set(HL_NOW, new HighlightCtor!(...highlights.map((x) => x.range)));
+    if (preselected) reg.set(HL_PRE, new HighlightCtor!(preselected.range));
+  }
+
+  const commitHighlight = (tStart: number, t: number) => {
+    if (!active) return;
+    const s = readSelection();
+    if (!s) return;
+    const span = spanOf(s.range);
+    // Still the selection that existed before the recording: not a new highlight.
+    if (preselected && highlights.length === 0) {
+      const p = spanOf(preselected.range);
+      if (p.start === span.start && p.end === span.end) return;
+    }
+    const list = highlights.map(({ h, span: sp }) => ({ h, span: sp }));
+    const r = addHighlight(list, { text: s.text, tStart: Math.max(tStart, tFrom), t, ...s.info }, span);
+    if (r === "ignored") return;
+    if (r === "replaced") highlights[highlights.length - 1] = { ...list[list.length - 1]!, range: s.range };
+    else highlights.push({ ...list[list.length - 1]!, range: s.range });
+    changed();
   };
 
   const onDown = (e: PointerEvent) => {
@@ -78,49 +199,68 @@ export function createPageContextRecorder(root: HTMLElement): PageContextRecorde
   const onUp = (e: PointerEvent) => {
     const d = down;
     down = null;
-    if (!d || isDrag(d, { x: e.clientX, y: e.clientY })) return; // a drag (text selection) isn't a click
-    record(d.target, d.t, d.x, d.y);
+    if (!d || !active) return;
+    const tUp = performance.now();
+    if (!isDrag(d, { x: e.clientX, y: e.clientY }) && d.t >= tFrom && inside(d.target)) {
+      const info = describe(d.target);
+      if (info.elementPath) { addClick(clicks, { t: d.t, tUp, x: d.x, y: d.y, ...info }); changed(); }
+    }
+    // The selection is final once the button is up (drag, or the word/paragraph of a double/triple click).
+    const tStart = d.t;
+    setTimeout(() => commitHighlight(tStart, tUp), 0);
   };
   // Keyboard activation (Enter/Space on a button or link) fires click with detail 0 and no pointer events.
   const onClick = (e: MouseEvent) => {
-    if (e.detail === 0 && e.target instanceof Element) {
-      const r = e.target.getBoundingClientRect();
-      record(e.target, performance.now(), r.left + r.width / 2, r.top + r.height / 2);
-    }
+    if (!active || e.detail !== 0 || !(e.target instanceof Element) || !inside(e.target)) return;
+    const r = e.target.getBoundingClientRect();
+    const t = performance.now();
+    const info = describe(e.target);
+    if (info.elementPath) { clicks.push({ ...info, kind: "single", count: 1, t, tEnd: t, times: [t], x: r.left + r.width / 2, y: r.top + r.height / 2 }); changed(); }
   };
-  const onSelection = () => {
-    if (!active) return;
-    const s = readSelection(performance.now());
-    if (s) selection = s;
+  // Shift+arrow (or similar) keyboard selection: a highlight finishes when Shift is released.
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (active && e.shiftKey && keySelectStart === null) keySelectStart = performance.now();
+  };
+  const onKeyUp = (e: KeyboardEvent) => {
+    if (e.key !== "Shift" || keySelectStart === null) return;
+    const t0 = keySelectStart;
+    keySelectStart = null;
+    commitHighlight(t0, performance.now());
   };
 
   root.addEventListener("pointerdown", onDown, true);
-  root.addEventListener("pointerup", onUp, true);
+  window.addEventListener("pointerup", onUp, true); // a drag may end outside root
   root.addEventListener("click", onClick, true);
-  document.addEventListener("selectionchange", onSelection);
+  document.addEventListener("keydown", onKeyDown, true);
+  document.addEventListener("keyup", onKeyUp, true);
 
-  return {
+  const recorder: PageContextRecorder = {
+    onChange: null,
     start(t) {
       active = true;
       tFrom = t;
       clicks = [];
-      selection = null;
+      highlights = [];
       down = null;
+      keySelectStart = null;
+      const s = readSelection();
+      preselected = s ? { sel: { t, text: s.text, ...s.info }, range: s.range } : null;
+      changed();
     },
     stop() {
-      // The selection that's active now wins (it's the latest). If selectionchange didn't record it
-      // during the turn, it was made before the turn and is still active: it counts, stamped tFrom.
-      const current = readSelection(tFrom);
-      if (current && current.text !== selection?.text) selection = current;
       active = false;
-      return { clicks: [...clicks], selection };
+      return events(); // highlights stay painted until the next turn starts
     },
+    current: events,
     dispose() {
       active = false;
       root.removeEventListener("pointerdown", onDown, true);
-      root.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointerup", onUp, true);
       root.removeEventListener("click", onClick, true);
-      document.removeEventListener("selectionchange", onSelection);
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      if (paint) { registry()!.delete(HL_NOW); registry()!.delete(HL_PRE); }
     },
   };
+  return recorder;
 }

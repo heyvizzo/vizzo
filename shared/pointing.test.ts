@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { CursorSample, PageClick, PageSelection, Word } from "./protocol.ts";
+import type { ClickKind, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, Word } from "./protocol.ts";
 import {
-  ALGORITHMS, DWELL_TIE_EPS, atStart, dedupeClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
+  ALGORITHMS, DWELL_TIE_EPS, atStart, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
   mode, normalizeWord, resolvePointing, sampleSpeeds, tagFromPath, truncateText, wordNear, wordWindow,
 } from "./pointing.ts";
 
@@ -238,42 +238,58 @@ describe("formatPageContext", () => {
   const DS = "web/cursor/demo/demo.html";
   const th = { elementPath: "table > thead > tr > th:nth-of-type(4)", dataSource: `${DS}:67`, label: "Price / month", container: "Pricing table" };
   const cta = { elementPath: "section > button", dataSource: `${DS}:27`, label: "Get started", container: "Hero section" };
-  const click = (t: number, el: typeof th): PageClick => ({ t, x: 1, y: 2, ...el });
+  const td = { elementPath: "table > tbody > tr:nth-of-type(2) > td", dataSource: `${DS}:72`, label: "Team", container: "Pricing table" };
+  const kindOf = (n: number): ClickKind => (n === 1 ? "single" : n === 2 ? "double" : n === 3 ? "triple" : "multi");
+  /** A click event of `n` clicks, 150 ms apart, starting at t. */
+  const click = (t: number, el: typeof th, n = 1): PageClick => {
+    const times = Array.from({ length: n }, (_, i) => t + i * 150);
+    return { ...el, kind: kindOf(n), count: n, t, tEnd: times[n - 1]! + 80, times, x: 1, y: 2 };
+  };
+  const ev = (p: Partial<PageEvents>): PageEvents => ({ clicks: [], preselected: null, highlights: [], ...p });
   // "how much is this one" — "this" spans 10_600..10_900
   const words: Word[] = [w("how", 0.0, 0.2), w("much", 0.2, 0.4), w("is", 0.4, 0.6), w("this", 0.6, 0.9), w("one", 0.9, 1.1)];
 
-  it("one Clicked line per click, naming the word being said", () => {
-    expect(formatPageContext([click(T0 + 700, th)], null, words, T0)).toBe(
-      `Clicked: <th> "Price / month" in "Pricing table" [data-source=${DS}:67] (while saying "this")`,
+  it("a single click: verb, element, time from audio start, the word being said", () => {
+    expect(formatPageContext(ev({ clicks: [click(T0 + 700, th)] }), words, T0)).toBe(
+      `Clicked: <th> "Price / month" in "Pricing table" [data-source=${DS}:67] at 0.7 s (while saying "this")`,
     );
   });
 
-  it("omits the word without words / tAudioStart, or when no word is near", () => {
-    expect(formatPageContext([click(T0 + 700, th)], null, [], T0)).not.toContain("while saying");
-    expect(formatPageContext([click(T0 + 700, th)], null, words, undefined)).not.toContain("while saying");
-    expect(formatPageContext([click(T0 + 5000, th)], null, words, T0)).not.toContain("while saying");
+  it("double / triple / multi clicks get their own verbs and a time range", () => {
+    const lines = formatPageContext(ev({ clicks: [click(T0 + 100, th, 2), click(T0 + 2500, cta, 3), click(T0 + 4000, td, 5)] }), words, T0).split("\n");
+    expect(lines[0]).toMatch(/^Double-clicked: <th> "Price \/ month".* from 0\.1 to 0\.3 s \(while saying "how"\)$/);
+    expect(lines[1]).toMatch(/^Triple-clicked: <button> "Get started".* from 2\.5 to 2\.9 s$/);
+    expect(lines[2]).toMatch(/^Clicked 5 times: <td> "Team".* from 4\.0 to 4\.7 s$/);
+    expect(clickVerb({ kind: "multi", count: 7 })).toBe("Clicked 7 times");
   });
 
-  it("dedupes consecutive clicks on the same element and keeps the latest 5", () => {
-    const lines = formatPageContext([click(T0 + 900, cta), click(T0 + 100, th), click(T0 + 200, th)], null, words, T0).split("\n");
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain(`"Price / month"`);
-    expect(lines[0]).toContain(`(while saying "how")`);
-    expect(lines[1]).toContain(`"Get started" in "Hero section"`);
-    const many = Array.from({ length: 8 }, (_, i) => click(i * 10, i % 2 ? th : cta));
-    expect(dedupeClicks(many)).toHaveLength(5);
-    expect(dedupeClicks(many)[4]!.t).toBe(70);
-    expect(dedupeClicks([{ t: 0, x: 0, y: 0, elementPath: null, dataSource: null, label: null }])).toEqual([]);
+  it("omits times and words without tAudioStart; omits the word when none is near", () => {
+    expect(formatPageContext(ev({ clicks: [click(T0 + 700, th)] }), words, undefined)).toBe(`Clicked: <th> "Price / month" in "Pricing table" [data-source=${DS}:67]`);
+    expect(formatPageContext(ev({ clicks: [click(T0 + 5000, th)] }), words, T0)).not.toContain("while saying");
+    expect(relTime(T0 - 300, T0)).toBe("-0.3 s");
   });
 
-  it("adds the selected text with its element, dropping a label that only repeats the text", () => {
+  it("clicks sorted by time, the latest 8 kept, empty refs dropped", () => {
+    const many = Array.from({ length: 12 }, (_, i) => click(T0 + (12 - i) * 1000, i % 2 ? th : cta));
+    expect(sortClicks(many)).toHaveLength(8);
+    expect(sortClicks(many)[7]!.t).toBe(T0 + 12_000);
+    expect(sortClicks([{ ...click(0, th), elementPath: null, dataSource: null, label: null, container: null }])).toEqual([]);
+  });
+
+  it("the pre-existing highlight and each new highlight are separate, numbered lines", () => {
     const p = { elementPath: "article > p", dataSource: `${DS}:37`, label: "Charts refresh as rows land. Postgres, MySQL and BigQuery…", container: "Card: Live queries" };
-    const sel: PageSelection = { t: T0, text: "  Charts refresh\n as rows land. ", ...p };
-    expect(formatPageContext([], sel, words, T0)).toBe(`Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=${DS}:37]`);
-    const other: PageSelection = { ...sel, text: "Pricing", label: "Plan", elementPath: "th", container: null };
-    expect(formatPageContext([click(T0 + 700, th)], other, words, T0).split("\n")[1]).toBe(`Selected text: "Pricing" in <th> "Plan" [data-source=${DS}:37]`);
-    expect(formatPageContext([], { ...sel, text: "   " }, words, T0)).toBe("");
-    expect(formatPageContext([], null, words, T0)).toBe("");
+    const pre: PageSelection = { t: T0 - 500, text: "  Charts refresh\n as rows land. ", ...p };
+    const h1: PageHighlight = { text: "Team", tStart: T0 + 400, t: T0 + 800, ...td };
+    const h2: PageHighlight = { text: "Business", tStart: T0 + 3000, t: T0 + 3600, ...td, label: "Business", elementPath: "tr:nth-of-type(3) > td" };
+    const lines = formatPageContext(ev({ preselected: pre, highlights: [h1, h2] }), words, T0).split("\n");
+    expect(lines).toEqual([
+      `Already highlighted when recording started: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=${DS}:37]`,
+      `Highlight 1 (made from 0.4 to 0.8 s, while saying "this"): "Team" in <td> in "Pricing table" [data-source=${DS}:72]`,
+      `Highlight 2 (made from 3.0 to 3.6 s): "Business" in <td> in "Pricing table" [data-source=${DS}:72]`,
+    ]);
+    expect(formatPageContext(ev({ highlights: [{ ...h1, text: "   " }] }), words, T0)).toBe("");
+    expect(formatPageContext(ev({}), words, T0)).toBe("");
+    expect(formatPageContext(null, words, T0)).toBe("");
   });
 
   it("truncates long selections to ~200 chars", () => {

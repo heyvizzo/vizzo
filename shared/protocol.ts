@@ -54,10 +54,43 @@ export interface ElementRef {
   label: string | null;
   container?: string | null;
 }
-/** A click on the page during a turn (client clock). */
-export interface PageClick extends ElementRef { t: number; x: number; y: number }
-/** Text highlighted on the page during a turn (the latest non-empty selection, client clock). */
+/** single = 1 click, double = 2, triple = 3, multi = 4 or more (rapid clicks on the same element). */
+export type ClickKind = "single" | "double" | "triple" | "multi";
+/**
+ * A click event on the page during a turn: consecutive clicks on the same element, < CLICK_GROUP_MS apart
+ * and within a few px, are one event (web/cursor/pageContext.ts). Times are client clock (performance.now()).
+ */
+export interface PageClick extends ElementRef {
+  kind: ClickKind;
+  count: number;
+  /** First click (press). */
+  t: number;
+  /** Last click (release). */
+  tEnd: number;
+  /** Every click's press time, in order (length === count). */
+  times: number[];
+  /** Position of the first click (viewport px). */
+  x: number;
+  y: number;
+}
+/** Text that was already highlighted when the recording started (t = the press time). */
 export interface PageSelection extends ElementRef { t: number; text: string }
+/** One highlight made during the recording (a finished drag / double / triple click / shift-select). */
+export interface PageHighlight extends ElementRef {
+  text: string;
+  /** When the gesture started (press) and when it finished (release / last key). Client clock. */
+  tStart: number;
+  t: number;
+}
+
+/** Everything the user did on the page during a turn (ClientMsg turn.context). */
+export interface PageEvents {
+  clicks: PageClick[];
+  /** Already highlighted when the recording started. */
+  preselected: PageSelection | null;
+  /** Highlights made during the recording, in order. */
+  highlights: PageHighlight[];
+}
 
 export interface PointingTarget { word: string; wordStart: number; algorithm: string; sample: CursorSample | null }
 
@@ -72,7 +105,7 @@ export type ClientMsg =
   /** tAudioStart: client time of the first captured audio sample (ARCHITECTURE §6). */
   | { type: "turn.audioStart"; turnId: string; tAudioStart: number }
   /** What the user clicked and highlighted on the page during the turn. Sent right before turn.release. */
-  | { type: "turn.context"; turnId: string; clicks: PageClick[]; selection: PageSelection | null }
+  | ({ type: "turn.context"; turnId: string } & PageEvents)
   | { type: "turn.release"; turnId: string; tRelease: number }
   | { type: "audio.played"; turnId: string; segment: Segment; tPlayed: number }
   /** reason "interrupt": the user started talking over the reply; "stop": the user stopped it (Esc). */
