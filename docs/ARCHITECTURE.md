@@ -278,7 +278,7 @@ The cursor lab saves (and loads, by file name) three files per session; `Uxx` is
     labels: { wordIndex: number /* into words[] */; word: string /* normalized */; start: number; end: number /* s */;
               target: { elementPath: string | null; dataSource: string | null; label: string | null } | null /* null = unlabeled */ }[] }
   ```
-  One entry per pointing word. A pick is **correct** if `pick.dataSource === target.dataSource` (when the target has one; targets are the `[data-source]` elements, so a pick on a child of the card counts), otherwise if the `elementPath`s are equal. Accuracy = correct / labeled words, per algorithm.
+  One entry per pointing word. (HTTP, T8: `GET /api/fixtures` lists the file names in `fixtures/utterances/` and `GET /api/fixtures/<name>` serves one; only `^[A-Za-z0-9_-]+\.(wav|cursor\.json|labels\.json)$` names are accepted. `GET /api/results` returns every `RunRecord` in `results/*.jsonl`.) A pick is **correct** if `pick.dataSource === target.dataSource` (when the target has one; targets are the `[data-source]` elements, so a pick on a child of the card counts), otherwise if the `elementPath`s are equal. Accuracy = correct / labeled words, per algorithm.
 
 ## 7. Orchestrator sketches
 
