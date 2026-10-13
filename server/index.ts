@@ -59,6 +59,8 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
   });
 
   const wss = new WebSocketServer({ server: http, path: "/ws" });
+  // ws re-emits the HTTP server's errors (e.g. EADDRINUSE); startServer's promise reports them instead.
+  wss.on("error", () => {});
   wss.on("connection", (ws) => {
     log("[ws] connected");
     new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist });
@@ -105,15 +107,25 @@ async function fakeVendorOpts(): Promise<StartServerOpts> {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  const port = Number(process.env.PORT ?? 8787);
   const opts = process.env.FAKE_VENDORS === "1" ? await fakeVendorOpts() : {};
-  // `npm run dev`: spawn the pre-warmed claude -p agents (router, progress lines, Opus). CLAUDE_AGENTS=0 skips.
+  try {
+    await startServer(port, opts);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "EADDRINUSE") {
+      console.error(`[server] port ${port} is already in use: another dev server is probably still running.`);
+      console.error(`[server] find it with: lsof -nP -iTCP:${port} -sTCP:LISTEN   (or start this one with PORT=<other port>)`);
+    } else {
+      console.error("[server] failed to start", err);
+    }
+    process.exit(1);
+  }
+  // `npm run dev`: spawn the pre-warmed claude -p agents (router, progress lines, Opus) once the server is up.
+  // CLAUDE_AGENTS=0 skips them.
   if (process.env.FAKE_VENDORS !== "1" && process.env.CLAUDE_AGENTS !== "0") {
     const { startClaudeAgents } = await import("./adapters/claudeCli.ts");
     await import("./adapters/claude.ts"); // registers the agents' prompts/models
     startClaudeAgents();
   }
-  startServer(Number(process.env.PORT ?? 8787), opts).catch((e) => {
-    console.error("[server] failed to start", e);
-    process.exit(1);
-  });
 }
