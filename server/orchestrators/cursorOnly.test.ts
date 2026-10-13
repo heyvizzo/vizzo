@@ -1,3 +1,4 @@
+import { ConnectionState } from "../connection.ts";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../../shared/config.ts";
 import type { CursorSample, ServerMsg, Word } from "../../shared/protocol.ts";
@@ -38,6 +39,7 @@ function ctx(over: Partial<TurnContext> = {}) {
     mark: (n) => void marks.push(n),
     send: (m) => void sent.push(m),
     sendAudio: () => {},
+    connection: new ConnectionState(),
     cursorSamples: () => [sample(1000, 10, "a"), sample(1100, 10, "a"), sample(1500, 300, "b"), sample(1600, 300, "b")],
     tAudioStart: () => 1000,
     ...over,
