@@ -247,6 +247,13 @@ Other events you'll see: `session.created`, `session.updated`, `conversation.ite
 - ✅ OpenAI Realtime out-of-band filler responses (said verbatim), notices, `metadata` echo and `response.cancel {response_id}` + reuse after `beginTurn()`: see §OpenAI Realtime "Out-of-band responses, metadata, cancel" (`npm run smoke:realtime` cases 3–4).
 - ✅ ElevenLabs `output_format=pcm_24000` works on both the v4 Turbo dialogue WebSocket and the Flash stream-input WebSocket (output verified as speech, not noise).
 
+## OpenAI TTS (`tts-1`) ✅ (docs, and live in `npm run bench:tts`)
+
+- Model page: "optimized for realtime text-to-speech"; **$15 per 1M characters**; endpoint `POST /v1/audio/speech` only. Rate limits by tier (Build 2,500 RPM). Source: https://developers.openai.com/api/docs/models/tts-1
+- Request: `{"model":"tts-1","input":"…","voice":"coral","response_format":"pcm"}` with `Authorization: Bearer $OPENAI_API_KEY`. Voices for tts-1 / tts-1-hd: `alloy ash coral echo fable onyx nova sage shimmer` (not ballad/verse/marin/cedar); "voices are currently optimized for English". Source: https://developers.openai.com/api/docs/guides/text-to-speech
+- `pcm` = "raw samples in 24kHz (16-bit signed, low-endian), without the header" — mono in practice — exactly the lab's format. Streams via chunked transfer encoding; the guide recommends `wav`/`pcm` "for the fastest response times". No streaming *text* input: the adapter sends a sentence at a time.
+- Live: ~1.1–1.3 s from the first text pushed to the first PCM byte (sentence wait + request). Policy: tell end users the voice is AI-generated.
+
 ## Sources
 - Anthropic: bundled `claude-api` skill (models, Haiku 5.5 / Opus 5.5 migration notes)
 - OpenAI pricing: https://developers.openai.com/api/docs/pricing

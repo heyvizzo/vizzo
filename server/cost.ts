@@ -27,6 +27,8 @@ export const PRICES = {
     "gpt-realtime-2.1-mini": { audioIn: 10, cached: 0.3, audioOut: 20, textIn: 0.6, textOut: 2.4 },
   },
   elevenPerChar: 0.04 / 1000,
+  /** OpenAI tts-1: $15 per 1M characters. */
+  openaiTtsPerChar: 15 / 1_000_000,
   scribePerSecond: 0.39 / 3600,
 } as const;
 
@@ -78,7 +80,7 @@ export function costBreakdown(config: RunConfig, usage: Usage): CostBreakdown {
     haiku: billed * ((a.haiku ? haikuCost(a.haiku) : 0) + (a.fillers ? haikuCost(a.fillers) : 0)),
     opus: billed * (a.opus ? opusCost(a.opus, config.opusFast) : 0),
     openai: usage.openai ? realtimeCost(usage.openai, config.realtimeModel) : 0,
-    tts: num(usage.elevenChars) * PRICES.elevenPerChar,
+    tts: num(usage.elevenChars) * PRICES.elevenPerChar + num(usage.openaiTtsChars) * PRICES.openaiTtsPerChar,
     stt: num(usage.scribeSeconds) * PRICES.scribePerSecond,
   };
   return { ...b, total: b.haiku + b.opus + b.openai + b.tts + b.stt };
@@ -146,6 +148,11 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
       label: `ElevenLabs TTS (${config.ttsModel})`, usd: chars * PRICES.elevenPerChar,
       detail: segs.length ? `${segs.map((s) => `${s.label} ${s.chars}`).join(" · ")} chars` : `${chars} chars`,
     });
+  }
+  const oaChars = num(usage.openaiTtsChars);
+  if (oaChars) {
+    const segs = (usage.elevenSegments ?? []).filter((s) => s.chars > 0);
+    items.push({ label: "OpenAI TTS (tts-1)", usd: oaChars * PRICES.openaiTtsPerChar, detail: segs.length ? `${segs.map((s) => `${s.label} ${s.chars}`).join(" · ")} chars` : `${oaChars} chars` });
   }
   const local = num(usage.localTtsChars);
   if (local) {

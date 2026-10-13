@@ -75,7 +75,7 @@ app.innerHTML = `
       <label data-for="pipeline">Router mode
         <select data-k="routerMode"><option value="forced">forced (tool_choice)</option><option value="auto">auto</option></select></label>
       <label data-for="pipeline">TTS model
-        <select data-k="ttsModel"><option>eleven_v4_turbo</option><option>eleven_flash_v2_5</option><option value="macos">macos (on-device)</option></select></label>
+        <select data-k="ttsModel"><option>eleven_v4_turbo</option><option>eleven_flash_v2_5</option><option value="openai_tts_1">openai tts-1</option><option value="macos">macos (on-device)</option></select></label>
       <label data-for="realtime pipeline hybrid">Claude backend
         <select data-k="claudeBackend"><option value="cli">claude -p agents</option><option value="api">API (OpenRouter)</option></select></label>
       <label data-for="hybrid">Hybrid wait (ms)

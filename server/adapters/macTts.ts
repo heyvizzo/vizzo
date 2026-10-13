@@ -10,6 +10,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { OpenTts, TtsStream } from "./types.ts";
+import { takeSentences } from "./sentences.ts";
+
+export { takeSentences };
 
 const SOURCE = fileURLToPath(new URL("../../tools/mactts/main.swift", import.meta.url));
 const CACHE = fileURLToPath(new URL("../../node_modules/.cache/mactts/", import.meta.url));
@@ -113,20 +116,6 @@ async function getHelper(): Promise<Helper> {
 export function stopMacTts(): void {
   helper?.then((h) => h.kill(), () => {});
   helper = null;
-}
-
-/** Split off complete sentences ("…. " / "…? " / "…! "); returns [sentences, rest]. */
-export function takeSentences(text: string): [string[], string] {
-  const out: string[] = [];
-  const re = /[^.!?…]*[.!?…]+["'”’)]*(\s+|$)/gy;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) && m[0].length) {
-    if (!m[1] && m.index + m[0].length === text.length) break; // sentence end at the very end: wait for more (or flush)
-    out.push(m[0].trim());
-    last = re.lastIndex;
-  }
-  return [out.filter(Boolean), text.slice(last)];
 }
 
 /** On-device TTS behind the same interface as ElevenLabs (model "macos"). */

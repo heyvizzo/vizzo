@@ -111,7 +111,9 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         // On-device speech isn't billed: its characters are counted separately (shown as saved vs ElevenLabs).
         ...(cfg.ttsModel === "macos"
           ? { localTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
-          : { elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }),
+          : cfg.ttsModel === "openai_tts_1"
+            ? { openaiTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
+            : { elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }),
         elevenSegments: ttsStreams.filter((t) => t.chars > 0).map((t) => ({ label: t.label ?? "tts", chars: t.chars })),
         scribeSeconds: scribe.seconds,
       }),
@@ -133,7 +135,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
     }
 
     async function run(): Promise<void> {
-      if (!voiceId && cfg.ttsModel !== "macos") throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
+      if (!voiceId && cfg.ttsModel.startsWith("eleven_")) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
       const fin = await tag("scribe", scribe.final());
       if (base.isFinished) return;
       base.sttFinal(fin.text, fin.words, fin.language);

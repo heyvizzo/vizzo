@@ -1,290 +1,412 @@
 {
-  "started": "2026-10-13T22:31:21.508Z",
+  "started": "2026-10-13T23:25:32.697Z",
   "N": 5,
   "runs": [
     {
       "model": "eleven_v4_turbo",
       "lang": "en",
       "i": 0,
-      "firstByte": 591.159208,
-      "total": 1936.91275,
-      "audioS": 3.44
-    },
-    {
-      "model": "eleven_v4_turbo",
-      "lang": "en",
-      "i": 1,
-      "firstByte": 542.2157499999998,
-      "total": 1913.7240419999998,
-      "audioS": 3.44
-    },
-    {
-      "model": "eleven_v4_turbo",
-      "lang": "en",
-      "i": 2,
-      "firstByte": 467.3962080000001,
-      "total": 1815.4889999999996,
-      "audioS": 3.28
-    },
-    {
-      "model": "eleven_v4_turbo",
-      "lang": "en",
-      "i": 3,
-      "firstByte": 532.5662500000008,
-      "total": 1889.8770000000004,
-      "audioS": 3.6
-    },
-    {
-      "model": "eleven_v4_turbo",
-      "lang": "en",
-      "i": 4,
-      "firstByte": 484.7859589999989,
-      "total": 1934.113792,
+      "firstByte": 497.75404199999997,
+      "total": 1901.073,
       "audioS": 3.36
     },
     {
       "model": "eleven_v4_turbo",
+      "lang": "en",
+      "i": 1,
+      "firstByte": 483.89933299999984,
+      "total": 1832.1040409999996,
+      "audioS": 3.44
+    },
+    {
+      "model": "eleven_v4_turbo",
+      "lang": "en",
+      "i": 2,
+      "firstByte": 468.22954200000004,
+      "total": 1823.0480829999997,
+      "audioS": 3.52
+    },
+    {
+      "model": "eleven_v4_turbo",
+      "lang": "en",
+      "i": 3,
+      "firstByte": 543.6962920000005,
+      "total": 1839.1097499999996,
+      "audioS": 3.44
+    },
+    {
+      "model": "eleven_v4_turbo",
+      "lang": "en",
+      "i": 4,
+      "firstByte": 453.3248339999991,
+      "total": 1778.9205839999995,
+      "audioS": 3.52
+    },
+    {
+      "model": "eleven_v4_turbo",
       "lang": "ro",
       "i": 0,
-      "firstByte": 545.018333,
-      "total": 775.2536660000005,
+      "firstByte": 522.8851670000004,
+      "total": 824.1764170000006,
       "audioS": 3.12
     },
     {
       "model": "eleven_v4_turbo",
       "lang": "ro",
       "i": 1,
-      "firstByte": 473.9394999999986,
-      "total": 842.8885409999984,
+      "firstByte": 467.9431659999991,
+      "total": 742.1151249999984,
       "audioS": 3.12
     },
     {
       "model": "eleven_v4_turbo",
       "lang": "ro",
       "i": 2,
-      "firstByte": 545.502625000001,
-      "total": 780.1295840000002,
-      "audioS": 3.04
+      "firstByte": 506.26466600000094,
+      "total": 796.8305410000012,
+      "audioS": 3.2
     },
     {
       "model": "eleven_v4_turbo",
       "lang": "ro",
       "i": 3,
-      "firstByte": 487.09000000000015,
-      "total": 838.1724580000009,
-      "audioS": 3.12
+      "firstByte": 478.97049999999945,
+      "total": 769.1930839999986,
+      "audioS": 3.28
     },
     {
       "model": "eleven_v4_turbo",
       "lang": "ro",
       "i": 4,
-      "firstByte": 548.4367919999968,
-      "total": 783.794458999997,
-      "audioS": 3.2
+      "firstByte": 464.1018750000003,
+      "total": 800.8807500000003,
+      "audioS": 3.12
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "en",
       "i": 0,
-      "firstByte": 623.0628749999996,
-      "total": 758.4995830000007,
-      "audioS": 3.29725
+      "firstByte": 588.4747919999973,
+      "total": 733.6106669999972,
+      "audioS": 2.8792916666666666
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "en",
       "i": 1,
-      "firstByte": 684.6804159999992,
-      "total": 827.0896250000005,
-      "audioS": 3.1579166666666665
+      "firstByte": 588.783625,
+      "total": 738.2699580000008,
+      "audioS": 3.0185833333333334
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "en",
       "i": 2,
-      "firstByte": 613.7860419999997,
-      "total": 764.7878330000021,
-      "audioS": 3.1579166666666665
+      "firstByte": 687.1000829999975,
+      "total": 791.8768749999981,
+      "audioS": 3.2043333333333335
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "en",
       "i": 3,
-      "firstByte": 694.3086250000015,
-      "total": 805.0324590000018,
+      "firstByte": 593.5849170000001,
+      "total": 737.122124999998,
       "audioS": 3.111458333333333
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "en",
       "i": 4,
-      "firstByte": 626.3170410000021,
-      "total": 774.4515830000018,
-      "audioS": 3.761625
+      "firstByte": 589.4018329999999,
+      "total": 746.9323750000003,
+      "audioS": 3.5294166666666666
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "ro",
       "i": 0,
-      "firstByte": 693.0059580000016,
-      "total": 794.8493330000019,
+      "firstByte": 606.0618329999998,
+      "total": 670.5184579999986,
       "audioS": 2.972166666666667
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "ro",
       "i": 1,
-      "firstByte": 657.0187500000029,
-      "total": 720.3121250000004,
-      "audioS": 3.1579166666666665
+      "firstByte": 616.9539169999989,
+      "total": 669.1312919999982,
+      "audioS": 2.8328333333333333
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "ro",
       "i": 2,
-      "firstByte": 589.945334,
-      "total": 643.8696670000027,
-      "audioS": 2.600625
+      "firstByte": 896.0049579999977,
+      "total": 952.0854999999974,
+      "audioS": 2.50775
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "ro",
       "i": 3,
-      "firstByte": 614.1569999999992,
-      "total": 738.8724169999987,
+      "firstByte": 619.4926250000026,
+      "total": 677.2134590000023,
       "audioS": 2.972166666666667
     },
     {
       "model": "eleven_flash_v2_5",
       "lang": "ro",
       "i": 4,
-      "firstByte": 580.252292000001,
-      "total": 653.3626670000012,
-      "audioS": 3.483
+      "firstByte": 541.4235829999998,
+      "total": 593.749541000001,
+      "audioS": 3.0650416666666667
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "en",
+      "i": 0,
+      "firstByte": 1376.2980420000022,
+      "total": 1696.5875000000015,
+      "audioS": 2.5125
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "en",
+      "i": 1,
+      "firstByte": 1090.7045829999988,
+      "total": 1447.9122080000016,
+      "audioS": 2.975
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "en",
+      "i": 2,
+      "firstByte": 1327.8140830000048,
+      "total": 2464.7247080000016,
+      "audioS": 3.175
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "en",
+      "i": 3,
+      "firstByte": 1610.0434999999998,
+      "total": 2033.1542919999993,
+      "audioS": 2.7625
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "en",
+      "i": 4,
+      "firstByte": 1071.4799580000035,
+      "total": 1459.135792000001,
+      "audioS": 3.075
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "ro",
+      "i": 0,
+      "firstByte": 1205.2775419999962,
+      "total": 1731.6878329999963,
+      "audioS": 2.4625
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "ro",
+      "i": 1,
+      "firstByte": 1089.0705420000013,
+      "total": 2419.381042000001,
+      "audioS": 2.3875
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "ro",
+      "i": 2,
+      "firstByte": 1013.4031669999968,
+      "total": 2410.4019999999946,
+      "audioS": 2.4125
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "ro",
+      "i": 3,
+      "firstByte": 1232.4784169999984,
+      "total": 1634.145292000001,
+      "audioS": 2.4625
+    },
+    {
+      "model": "openai_tts_1",
+      "lang": "ro",
+      "i": 4,
+      "firstByte": 967.3104579999999,
+      "total": 1507.8677080000052,
+      "audioS": 2.2875
     },
     {
       "model": "macos",
       "lang": "en",
       "i": 0,
-      "firstByte": 291.32537500000035,
-      "total": 395.2697499999995,
-      "audioS": 3.0584583333333333
+      "firstByte": 305.50570800000423,
+      "total": 419.0319579999996,
+      "audioS": 2.625958333333333
     },
     {
       "model": "macos",
       "lang": "en",
       "i": 1,
-      "firstByte": 289.7748750000028,
-      "total": 388.34929100000227,
-      "audioS": 3.0584583333333333
+      "firstByte": 289.2639169999966,
+      "total": 404.14224999999715,
+      "audioS": 2.625958333333333
     },
     {
       "model": "macos",
       "lang": "en",
       "i": 2,
-      "firstByte": 286.6816669999971,
-      "total": 392.9328339999993,
-      "audioS": 3.0584583333333333
+      "firstByte": 291.4790839999987,
+      "total": 405.31283399999666,
+      "audioS": 2.625958333333333
     },
     {
       "model": "macos",
       "lang": "en",
       "i": 3,
-      "firstByte": 281.1971249999988,
-      "total": 386.1224999999977,
-      "audioS": 3.0584583333333333
+      "firstByte": 298.9490000000005,
+      "total": 415.25433299999713,
+      "audioS": 2.625958333333333
     },
     {
       "model": "macos",
       "lang": "en",
       "i": 4,
-      "firstByte": 271.52133299999696,
-      "total": 364.12704099999974,
-      "audioS": 3.0584583333333333
+      "firstByte": 423.3505839999998,
+      "total": 540.0198340000061,
+      "audioS": 2.625958333333333
     },
     {
       "model": "macos",
       "lang": "ro",
       "i": 0,
-      "firstByte": 220.7397920000003,
-      "total": 310.01970900000015,
-      "audioS": 2.6281666666666665
+      "firstByte": 220.81612500000483,
+      "total": 324.2826249999998,
+      "audioS": 2.5947916666666666
     },
     {
       "model": "macos",
       "lang": "ro",
       "i": 1,
-      "firstByte": 209.95462500000576,
-      "total": 291.3847090000054,
-      "audioS": 2.6281666666666665
+      "firstByte": 216.03645900000265,
+      "total": 310.97429199999897,
+      "audioS": 2.5947916666666666
     },
     {
       "model": "macos",
       "lang": "ro",
       "i": 2,
-      "firstByte": 210.53404199999932,
-      "total": 290.5394579999993,
-      "audioS": 2.6281666666666665
+      "firstByte": 214.84754199999588,
+      "total": 302.95866699999897,
+      "audioS": 2.5947916666666666
     },
     {
       "model": "macos",
       "lang": "ro",
       "i": 3,
-      "firstByte": 213.1954590000023,
-      "total": 299.0768339999995,
-      "audioS": 2.6281666666666665
+      "firstByte": 220.01045799999702,
+      "total": 305.6471670000028,
+      "audioS": 2.5947916666666666
     },
     {
       "model": "macos",
       "lang": "ro",
       "i": 4,
-      "firstByte": 195.55566700000054,
-      "total": 270.9144589999996,
-      "audioS": 2.6281666666666665
+      "firstByte": 218.58374999999796,
+      "total": 294.68141599999944,
+      "audioS": 2.5947916666666666
     }
   ],
   "e2e": [
     {
       "model": "eleven_v4_turbo",
       "i": 0,
-      "ttfa": 1696.5193330000038,
-      "tta": 3838.3625410000022,
-      "ackTts": 340.114990234375
+      "ttfa": 2643.8541250000126,
+      "tta": null,
+      "ackTts": 312.282470703125
     },
     {
       "model": "eleven_v4_turbo",
       "i": 1,
-      "ttfa": 1946.6302090000027,
-      "tta": 5591.502042000007,
-      "ackTts": 212.6484375
+      "ttfa": 1285.2037500000006,
+      "tta": null,
+      "ackTts": 285.341796875
     },
     {
       "model": "eleven_v4_turbo",
       "i": 2,
-      "ttfa": 1576.151582999999,
-      "tta": 3646.919124999986,
-      "ackTts": 302.4423828125
+      "ttfa": 1938.127582999994,
+      "tta": null,
+      "ackTts": 210.39990234375
+    },
+    {
+      "model": "eleven_v4_turbo",
+      "i": 3,
+      "ttfa": 2333.8878750000003,
+      "tta": null,
+      "ackTts": 192.6845703125
+    },
+    {
+      "model": "openai_tts_1",
+      "i": 0,
+      "ttfa": 3188.386916000003,
+      "tta": null,
+      "ackTts": 1607.1904296875
+    },
+    {
+      "model": "openai_tts_1",
+      "i": 1,
+      "ttfa": 2523.993166,
+      "tta": null,
+      "ackTts": 941.058837890625
+    },
+    {
+      "model": "openai_tts_1",
+      "i": 2,
+      "ttfa": 2530.541333999994,
+      "tta": null,
+      "ackTts": 1378.65283203125
+    },
+    {
+      "model": "openai_tts_1",
+      "i": 3,
+      "ttfa": 3364.304958000008,
+      "tta": null,
+      "ackTts": 1503.745849609375
     },
     {
       "model": "macos",
       "i": 0,
-      "ttfa": 1604.015625,
-      "tta": 4224.616915999999,
-      "ackTts": 309.577392578125
+      "ttfa": 3545.908833000023,
+      "tta": null,
+      "ackTts": 207.207763671875
     },
     {
       "model": "macos",
       "i": 1,
-      "ttfa": 1304.3785409999982,
-      "tta": 4092.703708000001,
-      "ackTts": 296.156005859375
+      "ttfa": 1747.6886670000094,
+      "tta": null,
+      "ackTts": 335.322509765625
     },
     {
       "model": "macos",
       "i": 2,
-      "ttfa": 1476.739207999999,
-      "tta": 3678.999457999991,
-      "ackTts": 345.36865234375
+      "ttfa": 1683.1722500000033,
+      "tta": null,
+      "ackTts": 268.79345703125
+    },
+    {
+      "model": "macos",
+      "i": 3,
+      "ttfa": 1805.3500000000058,
+      "tta": null,
+      "ackTts": 271.243408203125
     }
   ]
 }

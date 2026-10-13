@@ -230,6 +230,8 @@ export interface Usage {
   elevenChars?: number;
   /** Characters spoken by on-device TTS (macOS): not billed. */
   localTtsChars?: number;
+  /** Characters spoken by OpenAI tts-1. */
+  openaiTtsChars?: number;
   /** ElevenLabs characters per spoken segment, in order (for the cost breakdown). */
   elevenSegments?: { label: string; chars: number }[];
   scribeSeconds?: number;

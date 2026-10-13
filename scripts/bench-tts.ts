@@ -7,13 +7,15 @@ import "dotenv/config";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { openTts as openElevenTts } from "../server/adapters/elevenTts.ts";
 import { openMacTts, setMacTtsLogger, startMacTts, stopMacTts } from "../server/adapters/macTts.ts";
+import { openOpenAiTts } from "../server/adapters/openaiTts.ts";
 import type { TtsModel } from "../shared/config.ts";
 
 const arg = (k: string, d: number) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? Number(process.argv[i + 1]) : d; };
 const N = arg("n", 5), E2E = arg("e2e", 3);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const voiceId = process.env.ELEVENLABS_VOICE_ID ?? "";
-const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5", "macos"];
+const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5", "openai_tts_1", "macos"];
+const E2E_MODELS: TtsModel[] = ["eleven_v4_turbo", "openai_tts_1", "macos"];
 const TEXTS = { en: "Let me check the features section styles. One moment.", ro: "Mă uit la stilurile secțiunii. Un moment." };
 setMacTtsLogger(() => {});
 
@@ -21,7 +23,7 @@ interface Run { model: TtsModel; lang: string; i: number; firstByte: number | nu
 const runs: Run[] = [];
 
 async function one(model: TtsModel, lang: "en" | "ro", i: number): Promise<void> {
-  const open = model === "macos" ? openMacTts : openElevenTts;
+  const open = model === "macos" ? openMacTts : model === "openai_tts_1" ? openOpenAiTts : openElevenTts;
   const t0 = performance.now();
   let first: number | null = null, bytes = 0;
   try {
@@ -40,6 +42,11 @@ async function one(model: TtsModel, lang: "en" | "ro", i: number): Promise<void>
 interface E2E { model: TtsModel; i: number; ttfa: number | null; tta: number | null; ackTts: number | null; error?: string }
 const e2e: E2E[] = [];
 
+/**
+ * One B turn up to the ack: speech is what the ack's timing depends on (the answer waits on Opus).
+ * Measures key release → first ack audio (client clock) and the router's first token → ack audio
+ * (server marks), then cancels the turn.
+ */
 async function turn(model: TtsModel, i: number): Promise<void> {
   const { default: WebSocket } = await import("ws");
   const { startServer } = await import("../server/index.ts");
@@ -48,15 +55,24 @@ async function turn(model: TtsModel, i: number): Promise<void> {
   const server = await startServer(0, { quiet: true, persist: false });
   const ws = new WebSocket(`ws://localhost:${server.port}/ws`);
   await new Promise((r) => ws.once("open", r));
-  ws.send(JSON.stringify({ type: "clock.sync", rttMs: 0, offsetMs: performance.timeOrigin }));
   const turnId = `t-${model}-${i}`;
-  const done = new Promise<any>((res) => ws.on("message", (d, bin) => {
-    if (bin) return;
-    const m = JSON.parse(d.toString());
-    if (m.turnId !== turnId) return;
-    if (m.type === "audio.segment" && m.state === "start") ws.send(JSON.stringify({ type: "audio.played", turnId, segment: m.segment, tPlayed: performance.now() }));
-    if (m.type === "turn.done") res(m.run);
-  }));
+  let tRelease = 0;
+  const marks: Record<string, number> = {};
+  const acked = new Promise<{ ttfa: number }>((res, rej) => {
+    const timer = setTimeout(() => rej(new Error("no ack audio within 30 s")), 30_000);
+    ws.on("message", (d, bin) => {
+      if (bin) return;
+      const m = JSON.parse(d.toString());
+      if (m.turnId !== turnId) return;
+      if (m.type === "mark") marks[m.name] ??= m.serverNow;
+      if (m.type === "error") { clearTimeout(timer); rej(new Error(`${m.source}: ${m.message}`)); }
+      if (m.type === "audio.segment" && m.state === "start" && (m.segment === "ack" || m.segment === "answer")) {
+        clearTimeout(timer);
+        res({ ttfa: performance.now() - tRelease });
+      }
+    });
+  });
+  acked.catch(() => {});
   const wav = parseWav(readFileSync(new URL("../fixtures/smoke/bench-question.wav", import.meta.url)));
   const t0 = performance.now();
   ws.send(JSON.stringify({ type: "turn.start", turnId, config: { ...DEFAULT_CONFIG, approach: "pipeline", routerMode: "forced", ttsModel: model, fillers: false }, tPress: t0 }));
@@ -65,10 +81,17 @@ async function turn(model: TtsModel, i: number): Promise<void> {
     ws.send(wav.data.subarray(off, off + 960));
     const w = t0 + (j + 1) * 20 - performance.now(); if (w > 0) await sleep(w);
   }
-  ws.send(JSON.stringify({ type: "turn.release", turnId, tRelease: performance.now() }));
-  const run = await done;
-  const ackTts = run.marks["ack.ttsFirstByte"] !== undefined && run.marks["llm.firstToken"] !== undefined ? run.marks["ack.ttsFirstByte"] - run.marks["llm.firstToken"] : null;
-  e2e.push({ model, i, ttfa: run.metrics.ttfa, tta: run.metrics.tta, ackTts, error: run.error });
+  tRelease = performance.now();
+  ws.send(JSON.stringify({ type: "turn.release", turnId, tRelease }));
+  try {
+    const { ttfa } = await acked;
+    await sleep(300); // let the ack's ttsFirstByte mark arrive
+    const ackTts = marks["ack.ttsFirstByte"] !== undefined && marks["llm.firstToken"] !== undefined ? marks["ack.ttsFirstByte"] - marks["llm.firstToken"] : null;
+    e2e.push({ model, i, ttfa, tta: null, ackTts });
+  } catch (e) {
+    e2e.push({ model, i, ttfa: null, tta: null, ackTts: null, error: String(e) });
+  }
+  ws.send(JSON.stringify({ type: "turn.cancel", turnId }));
   ws.close();
   await server.close();
 }
@@ -81,7 +104,8 @@ async function main(): Promise<void> {
   const started = new Date().toISOString();
   await startMacTts();
   for (const model of MODELS) {
-    if (model !== "macos" && !voiceId) { console.log(`SKIP ${model}: ELEVENLABS_VOICE_ID not set`); continue; }
+    if (model.startsWith("eleven_") && !voiceId) { console.log(`SKIP ${model}: ELEVENLABS_VOICE_ID not set`); continue; }
+    if (model === "openai_tts_1" && !process.env.OPENAI_API_KEY) { console.log(`SKIP ${model}: OPENAI_API_KEY not set`); continue; }
     for (const lang of ["en", "ro"] as const) for (let i = 0; i < N; i++) {
       await one(model, lang, i);
       const r = runs.at(-1)!;
@@ -95,7 +119,7 @@ async function main(): Promise<void> {
     setLogger(() => {}); setCliLogger(() => {});
     startClaudeAgents();
     await sleep(3000);
-    for (const model of ["eleven_v4_turbo", "macos"] as TtsModel[]) for (let i = 0; i < E2E; i++) {
+    for (const model of E2E_MODELS) for (let i = 0; i < E2E; i++) {
       try { await turn(model, i); } catch (e) { e2e.push({ model, i, ttfa: null, tta: null, ackTts: null, error: String(e) }); }
       const r = e2e.at(-1)!;
       console.log(`  e2e ${model} ${i}: ttfa ${ms(r.ttfa ?? NaN)} · tta ${ms(r.tta ?? NaN)}${r.error ? ` ERROR ${r.error}` : ""}`);
@@ -113,6 +137,7 @@ async function main(): Promise<void> {
     "",
     "- **eleven_v4_turbo**: Text-to-Dialogue WebSocket (one socket per segment, opened inside the measurement).",
     "- **eleven_flash_v2_5**: TTS stream-input WebSocket.",
+    "- **openai_tts_1**: OpenAI `tts-1` over HTTP (`/v1/audio/speech`, `response_format: pcm`, voice `coral`), one request per sentence, the next requested while the current one streams.",
     "- **macos**: `tools/mactts` (AVSpeechSynthesizer, persistent helper, voices warmed): text goes a sentence at a time. Voices: best en-US voice installed, Ioana for Romanian.",
     "",
     "### TTS alone (ms from the first text pushed)",
@@ -124,16 +149,16 @@ async function main(): Promise<void> {
     `Errors: ${runs.filter((r) => r.error).length}.`,
     "",
     ...(e2e.length ? [
-      "### Full B turns (real audio, claude -p agents, forced router, no fillers; ms from key release)",
+      "### B turns up to the ack (real audio, claude -p agents, forced router, no fillers; ms from key release; the turn is cancelled after the ack, since the answer's timing is Opus's)",
       "",
       "| model · metric | p50 | p90 | n |",
       "|---|---|---|---|",
-      ...(["eleven_v4_turbo", "macos"] as TtsModel[]).flatMap((m) => {
+      ...E2E_MODELS.flatMap((m) => {
         const v = e2e.filter((r) => r.model === m && !r.error);
-        return [row(`${m} · TTFA (ack heard)`, v.map((r) => r.ttfa)), row(`${m} · router first token → ack audio`, v.map((r) => r.ackTts)), row(`${m} · TTA (answer heard)`, v.map((r) => r.tta))];
+        return [row(`${m} · TTFA (ack audio arrives)`, v.map((r) => r.ttfa)), row(`${m} · router first token → ack audio`, v.map((r) => r.ackTts))];
       }),
       "",
-      `Errors: ${e2e.filter((r) => r.error).length}. Played times are approximate (headless client reports the first byte as played).`,
+      `Errors: ${e2e.filter((r) => r.error).length}. TTFA here = when the first ack audio reaches the client (no playback buffering).`,
     ] : []),
     "",
     "Raw runs: `docs/report-data/bench-tts.json`.",

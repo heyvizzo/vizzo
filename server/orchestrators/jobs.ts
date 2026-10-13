@@ -167,7 +167,7 @@ async function speakOnce(
   }
 
   const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
-  if (!voiceId && config.ttsModel !== "macos") return { outcome: "spoken", item: null };
+  if (!voiceId && config.ttsModel.startsWith("eleven_")) return { outcome: "spoken", item: null };
   const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer", language: job.language });
   abort = () => tts.close();
   tts.onAudio(emit);
@@ -185,6 +185,8 @@ async function speakOnce(
     outcome: outcome(),
     item: config.ttsModel === "macos"
       ? { label: "macOS TTS (spoken result, on-device)", usd: 0, savedUsd: chars * PRICES.elevenPerChar, savedVia: "on-device" as const, detail: `${chars} chars` }
-      : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` },
+      : config.ttsModel === "openai_tts_1"
+        ? { label: "OpenAI TTS (spoken result, tts-1)", usd: chars * PRICES.openaiTtsPerChar, detail: `${chars} chars` }
+        : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` },
   };
 }

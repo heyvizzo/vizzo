@@ -1,7 +1,7 @@
 export type Approach = "realtime" | "pipeline" | "hybrid" | "cursor-only";
 export type RealtimeModel = "gpt-realtime-2.1" | "gpt-realtime-2.1-mini";
-/** ElevenLabs (API) or "macos": on-device AVSpeechSynthesizer via tools/mactts (free, local). */
-export type TtsModel = "eleven_v4_turbo" | "eleven_flash_v2_5" | "macos";
+/** ElevenLabs (API), OpenAI tts-1 (API), or "macos": on-device AVSpeechSynthesizer via tools/mactts (free, local). */
+export type TtsModel = "eleven_v4_turbo" | "eleven_flash_v2_5" | "openai_tts_1" | "macos";
 export type RouterMode = "forced" | "auto";
 /** How Haiku and Opus are called: pre-spawned `claude -p` agents, or the HTTP API (OpenRouter / Anthropic). */
 export type ClaudeBackend = "cli" | "api";
