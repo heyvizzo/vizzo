@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch server/index.ts",
-    "dev:web": "vite",
+    "dev:web": "node scripts/wait-port.mjs ${PORT:-8787} && vite",
     "dev:fake": "FAKE_VENDORS=1 npm run dev",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
