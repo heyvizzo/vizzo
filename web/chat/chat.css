@@ -128,3 +128,6 @@ table.ctable tr.cgroup th { color: var(--muted); font-weight: 600; padding-top: 
 table.ctable tr.ctotal td { font-weight: 700; border-bottom: 0; }
 
 table.ctable .cusd.saved { color: var(--ok); }
+
+.session-cost { font: 11px ui-monospace, monospace; color: #e5c07b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.session-cost[hidden] { display: none; }

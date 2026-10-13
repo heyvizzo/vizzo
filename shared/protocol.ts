@@ -133,8 +133,10 @@ export interface CostItem {
   label: string;
   /** Billed cost (0 for calls routed through the subscription). */
   usd: number;
-  /** Subscription calls: the API-price cost that wasn't billed. */
+  /** Subscription calls / on-device speech: the API-price cost that wasn't billed. */
   savedUsd?: number;
+  /** Where the saving came from: Claude through the claude -p subscription, or on-device macOS TTS (vs ElevenLabs). */
+  savedVia?: "subscription" | "on-device";
   /** e.g. "ack 34 · filler 41 · answer 180 chars" */
   detail?: string;
 }

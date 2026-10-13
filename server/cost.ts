@@ -126,7 +126,7 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
   // claude -p: billed to the subscription, so 0 here, with the API-price cost as "saved".
   const claude = (label: string, usd: number, u: unknown): CostItem => claudeBilled(config)
     ? { label, usd, detail: tokens(u) }
-    : { label: `${label} (claude -p · subscription)`, usd: 0, savedUsd: usd, detail: tokens(u) };
+    : { label: `${label} (claude -p · subscription)`, usd: 0, savedUsd: usd, savedVia: "subscription", detail: tokens(u) };
   if (a.haiku) items.push(claude("Haiku router", haikuCost(a.haiku), a.haiku));
   if (a.fillers) items.push(claude("Haiku progress lines", haikuCost(a.fillers), a.fillers));
   if (a.opus) items.push(claude("Opus", opusCost(a.opus, config.opusFast), a.opus));
@@ -151,7 +151,7 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
   if (local) {
     const segs = (usage.elevenSegments ?? []).filter((s) => s.chars > 0);
     items.push({
-      label: "macOS TTS (on-device)", usd: 0, savedUsd: local * PRICES.elevenPerChar,
+      label: "macOS TTS (on-device)", usd: 0, savedUsd: local * PRICES.elevenPerChar, savedVia: "on-device",
       detail: `${segs.length ? segs.map((s) => `${s.label} ${s.chars}`).join(" · ") : local} chars · saved vs ElevenLabs`,
     });
   }

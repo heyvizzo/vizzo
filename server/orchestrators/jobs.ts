@@ -80,7 +80,7 @@ export function startJob(
         state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0),
         costUsd: subscription ? 0 : opusUsd,
         costItems: [subscription
-          ? { label: "Opus (background task · claude -p · subscription)", usd: 0, savedUsd: opusUsd }
+          ? { label: "Opus (background task · claude -p · subscription)", usd: 0, savedUsd: opusUsd, savedVia: "subscription" as const }
           : { label: "Opus (background task)", usd: opusUsd }],
       });
       channel.send({ type: "job", job: { ...job } });
@@ -184,7 +184,7 @@ async function speakOnce(
   return {
     outcome: outcome(),
     item: config.ttsModel === "macos"
-      ? { label: "macOS TTS (spoken result, on-device)", usd: 0, savedUsd: chars * PRICES.elevenPerChar, detail: `${chars} chars` }
+      ? { label: "macOS TTS (spoken result, on-device)", usd: 0, savedUsd: chars * PRICES.elevenPerChar, savedVia: "on-device" as const, detail: `${chars} chars` }
       : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` },
   };
 }

@@ -21,7 +21,7 @@ import { Sampler } from "../cursor/sampler.ts";
 import { createPageContextRecorder } from "../cursor/pageContext.ts";
 import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
 import { addResponse, renderPrompt } from "./promptView.ts";
-import { fmtUsd, renderTurnCost, type TurnCost } from "./costView.ts";
+import { fmtUsd, renderTurnCost, savingsOf, savingsText, type TurnCost } from "./costView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
@@ -95,6 +95,7 @@ app.innerHTML = `
         ${LONG_TASK_CHOICES.map((s) => `<option value="${s}">${s} s</option>`).join("")}
       </select></label>
       <span class="jobs-pill" id="jobs-pill" hidden></span>
+      <span class="session-cost" id="session-cost" hidden title="This conversation: what was billed, and what claude -p (subscription) and on-device speech saved"></span>
       <span class="spacer"></span>
       <button id="reset" title="Forget the conversation on the server (also drops background tasks)">New conversation</button>
     </div>
@@ -376,6 +377,26 @@ function refreshTurnCost(turnId: string): void {
   if (!v?.cost || !v.costBox) return;
   v.cost.jobs = jobsOfTurn(turnId).map(jobCost);
   renderTurnCost(v.costBox, v.cost);
+  renderSessionCost();
+}
+
+/** Running totals for the conversation: billed, and saved by source (turns + their background tasks). */
+function renderSessionCost(): void {
+  let billed = 0;
+  const items: CostItem[] = [];
+  for (const v of views.values()) {
+    if (!v.cost) continue;
+    billed += v.cost.total;
+    items.push(...v.cost.items);
+  }
+  for (const c of jobs.values()) {
+    billed += c.info.costUsd ?? 0;
+    items.push(...(c.info.costItems ?? []));
+  }
+  const el2 = $("session-cost");
+  const saved = savingsText(savingsOf(items));
+  el2.hidden = billed === 0 && !saved;
+  el2.textContent = `spent ${fmtUsd(billed)}${saved ? ` · ${saved}` : ""}`;
 }
 
 // ── background job cards ───────────────────────────
@@ -854,6 +875,7 @@ setInterval(() => {
 }, TICK_MS);
 
 function clearConversation(): void {
+  queueMicrotask(renderSessionCost);
   messages.querySelectorAll(".turn, .job, .note").forEach((n) => n.remove());
   views.clear();
   calls.clear();

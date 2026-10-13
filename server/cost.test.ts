@@ -108,3 +108,15 @@ describe("claude -p (subscription)", () => {
     expect(computeCost(API, usage)).toBeGreaterThan(computeCost(sub, usage) + 0.01);
   });
 });
+
+describe("on-device TTS", () => {
+  it("is \$0, saved vs ElevenLabs and tagged on-device; claude -p is tagged subscription", () => {
+    const items = costItems({ ...DEFAULT_CONFIG, ttsModel: "macos" }, {
+      anthropic: { opus: { input_tokens: 100, output_tokens: 500 } }, localTtsChars: 130, elevenSegments: [{ label: "ack", chars: 40 }, { label: "answer", chars: 90 }],
+    });
+    const tts = items.find((i) => i.label === "macOS TTS (on-device)")!;
+    expect(tts).toMatchObject({ usd: 0, savedVia: "on-device", detail: "ack 40 · answer 90 chars · saved vs ElevenLabs" });
+    expect(tts.savedUsd).toBeCloseTo(130 * 0.04 / 1000, 12);
+    expect(items.find((i) => i.label.startsWith("Opus"))!.savedVia).toBe("subscription");
+  });
+});

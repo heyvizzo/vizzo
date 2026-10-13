@@ -27,3 +27,18 @@ describe("subscription savings", () => {
     expect(priceText({ costUsd: 0.0123 })).toBe("$0.012");
   });
 });
+
+describe("savings by source", () => {
+  it("splits claude -p and on-device TTS savings in the headline", async () => {
+    const { costHeadline, savingsOf, savingsText } = await import("./costView.ts");
+    const items = [
+      { label: "Opus (claude -p · subscription)", usd: 0, savedUsd: 0.019, savedVia: "subscription" as const },
+      { label: "macOS TTS (on-device)", usd: 0, savedUsd: 0.0052, savedVia: "on-device" as const },
+      { label: "Scribe STT", usd: 0.0004 },
+    ];
+    expect(costHeadline({ items, total: 0.0004, jobs: [] })).toBe("cost $0.0004 · $0.024 saved (claude -p $0.019 · on-device TTS $0.0052)");
+    expect(savingsText(savingsOf([items[1]!]))).toBe("$0.0052 saved (on-device TTS $0.0052)");
+    expect(savingsText(savingsOf([items[0]!]))).toBe("$0.019 saved (subscription)");
+    expect(savingsText(savingsOf([items[2]!]))).toBe("");
+  });
+});
