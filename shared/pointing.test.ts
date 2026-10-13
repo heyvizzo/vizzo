@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ClickKind, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, Word } from "./protocol.ts";
+import type { ClickKind, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "./protocol.ts";
 import {
-  ALGORITHMS, DWELL_TIE_EPS, annotateTranscript, atStart, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
+  ALGORITHMS, DWELL_TIE_EPS, annotateTranscript, atStart, computeRests, foldWord, formatRests, pointingLanguage, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
   mode, normalizeWord, resolvePointing, sampleSpeeds, tagFromPath, truncateText, wordNear, wordWindow,
 } from "./pointing.ts";
 
@@ -334,5 +334,57 @@ describe("pointing reference numbers", () => {
     const targets = resolvePointing(words, T, samples);
     const click: PageClick = { kind: "single", count: 1, t: T + 1100, tEnd: T + 1150, times: [T + 1100], x: 0, y: 0, elementPath: "main > h3.Gamma", dataSource: null, label: "Gamma" };
     expect(formatPageContext({ clicks: [click], preselected: null, highlights: [] }, words, T, targets)).toContain('(while saying "this," [3])');
+  });
+});
+
+describe("pointing words in English and Romanian", () => {
+  it("matches both languages, with or without diacritics, and hyphenated clitics", () => {
+    for (const t of ["this", "There.", "aceasta", "Această,", "ăsta", "asta", "ăla", "aia", "aici", "acolo", "ăsta-i", "acela", "acestea"]) {
+      expect(isPointingWord(t), t).toBe(true);
+    }
+    for (const t of ["the", "button", "butonul", "mare", "cel", "un", "it"]) expect(isPointingWord(t), t).toBe(false);
+    expect(pointingLanguage("Această")).toBe("ro");
+    expect(pointingLanguage("those")).toBe("en");
+    expect(pointingLanguage("asta", ["en"])).toBeNull();
+    expect(foldWord("Ăștia!")).toBe("astia");
+  });
+
+  it("resolves Romanian pointing words with reference numbers", () => {
+    const T = 10_000;
+    const words: Word[] = [w("Mută", 0, 0.3), w("butonul", 0.3, 0.7), w("ăsta", 0.7, 0.9), w("acolo.", 1.2, 1.6)];
+    const s = (t: number, label: string): CursorSample => ({ t, x: 0, y: 0, scrollX: 0, scrollY: 0, elementPath: `main > ${label}`, dataSource: null, label });
+    const targets = resolvePointing(words, T, [s(T + 750, "cta"), s(T + 1300, "footer")]);
+    expect(annotateTranscript(words, targets)).toBe("Mută butonul ăsta [1] acolo [2].");
+  });
+});
+
+describe("cursor rests (language-agnostic)", () => {
+  const T = 10_000;
+  // "move it over to the pricing table" — no pointing words
+  const words: Word[] = [w("move", 0, 0.3), w("it", 0.3, 0.45), w("over", 0.5, 0.7), w("to", 0.7, 0.8), w("the", 0.8, 0.9), w("pricing", 0.9, 1.3), w("table", 1.3, 1.6)];
+  const at = (t: number, x: number, el: string): CursorSample => ({ t, x, y: 100, scrollX: 0, scrollY: 0, elementPath: `main > ${el}`, dataSource: `demo.html:${el.length}`, label: el });
+  /** Still on `el` from t0 to t1 (every 16 ms), then moving fast. */
+  const still = (t0: number, t1: number, x: number, el: string) => Array.from({ length: Math.floor((t1 - t0) / 16) + 1 }, (_, i) => at(t0 + i * 16, x, el));
+  const moving = (t0: number, t1: number, x0: number, el: string) => Array.from({ length: Math.floor((t1 - t0) / 16) + 1 }, (_, i) => at(t0 + i * 16, x0 + i * 20, el));
+
+  it("finds rests ≥ 250 ms during speech, numbered in time order, anchored to the word being said", () => {
+    const samples = [...still(T + 200, T + 600, 50, "h3"), ...moving(T + 616, T + 900, 60, "section"), ...still(T + 916, T + 1500, 800, "table")];
+    const rests = computeRests(words, T, samples);
+    expect(rests.map((r) => [r.ref, r.sample.label, words[r.wordIndex!]!.text])).toEqual([[1, "h3", "it"], [2, "table", "pricing"]]);
+    expect(annotateTranscript(words, [], rests)).toBe("move it [@1] over to the pricing [@2] table");
+    expect(formatRests(rests, words, T).split("\n")[0]).toMatch(/^Cursor rested \[@1\] on <h3> "h3" \[data-source=demo\.html:2\] from 0\.2 to 0\.6 s \(while saying "it"\)$/);
+  });
+
+  it("ignores short rests, rests outside speech, and rests a pointing word already covers", () => {
+    expect(computeRests(words, T, still(T + 200, T + 380, 50, "h3"))).toEqual([]);
+    expect(computeRests(words, T, still(T + 3000, T + 4000, 50, "h3"))).toEqual([]);
+    const target: PointingTarget = { word: "this", wordStart: 0.3, algorithm: "dwellMode", sample: at(T + 300, 50, "h3"), ref: 1, wordIndex: 1 };
+    expect(computeRests(words, T, still(T + 200, T + 600, 50, "h3"), [target])).toEqual([]);
+  });
+
+  it("flags a cursor parked on one element for the whole utterance", () => {
+    const [r] = computeRests(words, T, still(T - 100, T + 1700, 50, "h3"));
+    expect(r!.whole).toBe(true);
+    expect(formatRests([r!], words, T)).toContain("the whole time");
   });
 });

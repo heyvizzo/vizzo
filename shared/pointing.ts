@@ -1,7 +1,45 @@
 // Pointing resolution (ARCHITECTURE §6). Pure functions, shared by the server and the cursor lab.
-import type { CursorSample, ElementRef, PageClick, PageEvents, PointingTarget, Word } from "./protocol.ts";
+import type { CursorRest, CursorSample, ElementRef, PageClick, PageEvents, PointingTarget, Word } from "./protocol.ts";
 
+/** @deprecated English only; use POINTING_LEXICON / isPointingWord. */
 export const POINTING_WORDS = /^(this|that|these|those|here|there)$/i;
+
+export type PointingLanguage = "en" | "ro";
+export const POINTING_LANGUAGES: readonly PointingLanguage[] = ["en", "ro"];
+
+/**
+ * Deictic words per language, written without diacritics (matching strips them, so "această",
+ * "aceasta", "ăsta" and "asta" all match). Romanian: near / far demonstratives in standard and
+ * colloquial forms (incl. oblique cases) and place adverbs.
+ */
+export const POINTING_LEXICON: Record<PointingLanguage, ReadonlySet<string>> = {
+  en: new Set(["this", "that", "these", "those", "here", "there"]),
+  ro: new Set([
+    // near: acesta/această/aceștia/acestea, acest/aceste, ăsta/asta/ăștia/astea (+ oblique)
+    "acesta", "aceasta", "acestia", "acestea", "acest", "aceste", "acestui", "acestei", "acestor",
+    "asta", "astia", "astea", "astuia", "asteia", "astora",
+    // far: acela/aceea/aceia/acelea, acel/acea/acei/acele, ăla/aia/ăia/alea (+ oblique)
+    "acela", "aceea", "aceia", "acelea", "acel", "acea", "acei", "acele", "acelui", "acelei", "acelor",
+    "ala", "aia", "alea", "aluia", "aleia", "alora",
+    // place
+    "aici", "aicea", "acilea", "acolo", "acolea", "colo",
+  ]),
+};
+
+/** Lowercase, drop diacritics and everything that isn't a letter: `"Această,"` → `"aceasta"`. */
+export function foldWord(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}]/gu, "");
+}
+
+/**
+ * The language whose pointing word this is (null if none). Hyphenated clitics count by their parts
+ * ("ăsta-i" → "asta"). `languages` limits the lists (default: all).
+ */
+export function pointingLanguage(text: string, languages: readonly PointingLanguage[] = POINTING_LANGUAGES): PointingLanguage | null {
+  const parts = [text, ...text.split(/[-‑]/)].map(foldWord).filter(Boolean);
+  for (const lang of languages) if (parts.some((p) => POINTING_LEXICON[lang].has(p))) return lang;
+  return null;
+}
 
 export type Resolver = (word: Word, tAudioStart: number, samples: CursorSample[], opts?: WindowOpts) => CursorSample | null;
 export interface WindowOpts { preMs: number; postMs: number }
@@ -20,8 +58,8 @@ export function normalizeWord(text: string): string {
   return text.toLowerCase().replace(/[^\p{L}]/gu, "");
 }
 
-export function isPointingWord(text: string): boolean {
-  return POINTING_WORDS.test(normalizeWord(text));
+export function isPointingWord(text: string, languages: readonly PointingLanguage[] = POINTING_LANGUAGES): boolean {
+  return pointingLanguage(text, languages) !== null;
 }
 
 /** Absolute client times for a word and its resolver window. */
@@ -133,13 +171,16 @@ export const ALGORITHMS = Object.keys(RESOLVERS);
  * Run every resolver on every pointing word. Output order: word order, then ALGORITHMS order.
  * `word` is the normalized word ("this"); `wordStart` is word.start (seconds from turn audio start).
  */
-export function resolvePointing(words: Word[], tAudioStart: number, samples: CursorSample[], opts: WindowOpts = DEFAULT_WINDOW): PointingTarget[] {
+export function resolvePointing(
+  words: Word[], tAudioStart: number, samples: CursorSample[], opts: WindowOpts = DEFAULT_WINDOW,
+  languages: readonly PointingLanguage[] = POINTING_LANGUAGES,
+): PointingTarget[] {
   const sorted = sortByT(samples);
   const out: PointingTarget[] = [];
   let ref = 0;
   words.forEach((word, wordIndex) => {
+    if (!pointingLanguage(word.text, languages)) return;
     const norm = normalizeWord(word.text);
-    if (!POINTING_WORDS.test(norm)) return;
     ref++;
     for (const [algorithm, r] of Object.entries(RESOLVERS)) {
       out.push({ word: norm, wordStart: word.start, algorithm, sample: r(word, tAudioStart, sorted, opts), ref, wordIndex });
@@ -191,15 +232,19 @@ export function formatPointingContext(targets: PointingTarget[], algorithm = "dw
  * The transcript rebuilt from its words with each pointing word's reference number after it (before
  * trailing punctuation): `move this [1] over there [2], and this [3] too.` Null when there are no refs.
  */
-export function annotateTranscript(words: readonly Word[], targets: readonly PointingTarget[]): string | null {
-  const refAt = new Map<number, number>();
-  for (const t of targets) if (t.ref !== undefined && t.wordIndex !== undefined) refAt.set(t.wordIndex, t.ref);
-  if (!refAt.size) return null;
+export function annotateTranscript(
+  words: readonly Word[], targets: readonly PointingTarget[], rests: readonly CursorRest[] = [],
+): string | null {
+  const marks = new Map<number, string[]>();
+  const add = (i: number, m: string) => marks.set(i, [...(marks.get(i) ?? []), m]);
+  for (const t of targets) if (t.ref !== undefined && t.wordIndex !== undefined && !marks.get(t.wordIndex)?.includes(`[${t.ref}]`)) add(t.wordIndex, `[${t.ref}]`);
+  for (const r of rests) if (r.wordIndex !== null) add(r.wordIndex, `[@${r.ref}]`);
+  if (!marks.size) return null;
   return words.map((w, i) => {
-    const r = refAt.get(i);
-    if (r === undefined) return w.text;
-    const m = /^(.*?)([^\p{L}\p{N}]*)$/u.exec(w.text)!;
-    return `${m[1]} [${r}]${m[2]}`;
+    const m = marks.get(i);
+    if (!m) return w.text;
+    const p = /^(.*?)([^\p{L}\p{N}]*)$/u.exec(w.text)!;
+    return `${p[1]} ${m.join(" ")}${p[2]}`;
   }).join(" ").replace(/\s+/g, " ").trim();
 }
 
@@ -314,4 +359,65 @@ export function formatPageContext(
     lines.push(`Highlight ${i + 1}${meta ? ` (${meta.trim()})` : ""}: ${describeText(truncateText(h.text), h)}`);
   });
   return lines.join("\n");
+}
+
+// ── Cursor rests: a language-agnostic pointing signal ──────────────────────────────────────────────
+
+/** Pointer speed (px/ms) at or below which the cursor counts as resting (≈ 80 px/s: tremor, not motion). */
+export const REST_SPEED = 0.08;
+/** A rest must last at least this long on one element. */
+export const REST_MIN_MS = 250;
+/** At most this many rests are reported (the longest, then in time order). */
+export const MAX_RESTS = 6;
+
+/** Where the cursor rested on one element while the user spoke (protocol CursorRest). */
+export type { CursorRest };
+
+export function computeRests(
+  words: readonly Word[], tAudioStart: number | undefined, samples: readonly CursorSample[], targets: readonly PointingTarget[] = [],
+): CursorRest[] {
+  if (!words.length || tAudioStart === undefined || !Number.isFinite(tAudioStart)) return [];
+  const speechFrom = tAudioStart + words[0]!.start * 1000;
+  const speechTo = tAudioStart + words[words.length - 1]!.end * 1000;
+  const sorted = sortByT(samples);
+  const speeds = sampleSpeeds(sorted);
+  const runs: { from: number; to: number; s: CursorSample }[] = [];
+  let cur: { from: number; to: number; s: CursorSample } | null = null;
+  sorted.forEach((s, i) => {
+    const still = !(speeds[i]! > REST_SPEED); // NaN (first sample) counts as still
+    const inSpeech = s.t >= speechFrom - 300 && s.t <= speechTo + 300;
+    if (inSpeech && still && s.elementPath && cur && cur.s.elementPath === s.elementPath) { cur.to = s.t; return; }
+    if (cur) runs.push(cur);
+    cur = inSpeech && still && s.elementPath ? { from: s.t, to: s.t, s } : null;
+  });
+  if (cur) runs.push(cur);
+
+  const speechMs = Math.max(1, speechTo - speechFrom);
+  const covered = (r: { from: number; to: number; s: CursorSample }) => targets.some((t) => {
+    if (!t.sample || t.sample.elementPath !== r.s.elementPath) return false;
+    const w = tAudioStart + t.wordStart * 1000;
+    return w >= r.from - 400 && w <= r.to + 400;
+  });
+  const kept = runs.filter((r) => r.to - r.from >= REST_MIN_MS && !covered(r))
+    .sort((a, b) => (b.to - b.from) - (a.to - a.from)).slice(0, MAX_RESTS)
+    .sort((a, b) => a.from - b.from);
+  return kept.map((r, i) => {
+    // What was being said while it rested: the rest's middle (at most 400 ms in).
+    const w = wordNear(Math.min((r.from + r.to) / 2, r.from + 400), words, tAudioStart, 600);
+    return {
+      ref: i + 1, tStart: r.from, tEnd: r.to, sample: r.s,
+      wordIndex: w ? words.indexOf(w) : null,
+      whole: Math.min(r.to, speechTo) - Math.max(r.from, speechFrom) >= 0.9 * speechMs,
+    };
+  });
+}
+
+/** `Cursor rested [@1] on <h3> "Embeds" in "Card: Embeds" [data-source=…] from 1.2 to 1.9 s (while saying "it")`. */
+export function formatRests(rests: readonly CursorRest[], words: readonly Word[], tAudioStart: number | undefined): string {
+  return rests.map((r) => {
+    const w = r.wordIndex !== null ? words[r.wordIndex] : undefined;
+    const span = when(r.tStart, r.tEnd, tAudioStart);
+    const tail = r.whole ? " (the cursor stayed there the whole time you spoke)" : w ? ` (while saying ${JSON.stringify(w.text.trim())})` : "";
+    return `Cursor rested [@${r.ref}] on ${describeRef(r.sample)}${span}${tail}`;
+  }).join("\n");
 }

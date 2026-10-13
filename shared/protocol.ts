@@ -111,6 +111,22 @@ export interface PageEvents {
   highlights: PageHighlight[];
 }
 
+/**
+ * Where the cursor rested on one element (≥ 250 ms) while the user spoke, numbered @1, @2… in time order.
+ * A language-agnostic pointing hint (shared/pointing.ts computeRests).
+ */
+export interface CursorRest {
+  ref: number;
+  /** Client clock. */
+  tStart: number;
+  tEnd: number;
+  sample: CursorSample;
+  /** Word being said during the rest (index into words), if any. */
+  wordIndex: number | null;
+  /** The cursor stayed on this element for (almost) the whole utterance. */
+  whole: boolean;
+}
+
 export interface PointingTarget {
   word: string;
   wordStart: number;
@@ -150,8 +166,9 @@ export type ServerMsg =
   | { type: "pong"; id: number; clientNow: number; serverNow: number }
   | { type: "mark"; turnId: string; name: MarkName; serverNow: number; meta?: Record<string, unknown> }
   | { type: "stt.partial"; turnId: string; text: string }
-  | { type: "stt.final"; turnId: string; text: string; words: Word[] }
-  | { type: "pointing.resolved"; turnId: string; targets: PointingTarget[] }
+  /** language: what Scribe detected (ISO code, e.g. "en", "ro"), when known. */
+  | { type: "stt.final"; turnId: string; text: string; words: Word[]; language?: string }
+  | { type: "pointing.resolved"; turnId: string; targets: PointingTarget[]; rests?: CursorRest[] }
   | { type: "voice.text"; turnId: string; delta: string }
   | { type: "opus.text"; turnId: string; delta: string }
   | { type: "audio.segment"; turnId: string; segment: Segment; state: "start" | "end" }

@@ -20,7 +20,11 @@ export interface SttStream {
   /** Audio seconds sent to the vendor so far, for cost. */
   readonly seconds: number;
 }
-export interface OpenScribeOpts { mark: Mark; keyterms?: string[] }
+export interface OpenScribeOpts {
+  mark: Mark; keyterms?: string[];
+  /** Pin the language (ISO 639-1, e.g. "en", "ro"); omitted = Scribe auto-detects. */
+  language?: string;
+}
 export type OpenScribe = (opts: OpenScribeOpts) => Promise<SttStream>;
 
 export interface TtsStream {
@@ -104,6 +108,8 @@ export interface RouteWithHaikuOpts {
   history?: ChatTurn[];
   /** Clicks / highlighted text from the turn, preformatted (shared/pointing.ts formatPageContext). */
   pageContext?: string;
+  /** The language the user spoke (e.g. "ro"): replies are written in it. Omitted = English. */
+  language?: string;
   /** Long-task threshold in seconds when it differs from the prompt's default (RunConfig.longTaskSeconds). */
   longTaskSeconds?: number;
   /** Called with the exact prompt right before it's sent (debug view). */
@@ -131,6 +137,8 @@ export type RouteWithHaiku = (opts: RouteWithHaikuOpts) => Promise<{
 /** Short spoken progress lines for the wait on a short task (Haiku, called in parallel with Opus). */
 export type GenerateFillers = (opts: {
   transcript: string; question: string; intent: Intent; pointing: PointingTarget[];
+  /** The language the user spoke: lines are written in it. */
+  language?: string;
   onPrompt?: (p: LlmPrompt) => void;
 }) => Promise<{ lines: string[]; usage: unknown }>;
 
@@ -140,6 +148,8 @@ export interface SolveWithOpusOpts {
   history?: ChatTurn[];
   /** Clicks / highlighted text from the turn, preformatted (shared/pointing.ts formatPageContext). */
   pageContext?: string;
+  /** The language the user spoke (e.g. "ro"): replies are written in it. Omitted = English. */
+  language?: string;
   /** "task": the user wants something changed (Opus describes the change; it can't edit files here). Default question. */
   intent?: Intent;
   /** Called with the exact prompt right before it's sent (debug view). */

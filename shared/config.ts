@@ -2,6 +2,8 @@ export type Approach = "realtime" | "pipeline" | "hybrid" | "cursor-only";
 export type RealtimeModel = "gpt-realtime-2.1" | "gpt-realtime-2.1-mini";
 export type TtsModel = "eleven_v4_turbo" | "eleven_flash_v2_5";
 export type RouterMode = "forced" | "auto";
+/** Spoken language: "auto" lets Scribe detect it (en or ro expected); "en"/"ro" pin it. */
+export type SpeechLanguage = "auto" | "en" | "ro";
 
 export interface RunConfig {
   approach: Approach;
@@ -24,6 +26,8 @@ export interface RunConfig {
   backgroundLongTasks: boolean;
   /** Estimate (seconds) above which a task counts as long. */
   longTaskSeconds: number;
+  /** Speech language for Scribe and the pointing word lists (benchmarks stay pinned to "en"). */
+  language: SpeechLanguage;
 }
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -40,6 +44,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   fillers: false,
   backgroundLongTasks: false,
   longTaskSeconds: 20,
+  language: "en",
 };
 
 export const MODELS = {
