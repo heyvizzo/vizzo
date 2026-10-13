@@ -23,6 +23,8 @@ export interface JobInfo {
   intent: Intent;
   question: string;
   estimateS: number | null;
+  /** The language the user spoke (the result is written and spoken in it). */
+  language?: string;
   state: "running" | "done" | "failed";
   /** Opus's SPOKEN line, when done. */
   spoken?: string;
@@ -224,6 +226,8 @@ export interface Usage {
   anthropic?: unknown;
   openai?: unknown;
   elevenChars?: number;
+  /** Characters spoken by on-device TTS (macOS): not billed. */
+  localTtsChars?: number;
   /** ElevenLabs characters per spoken segment, in order (for the cost breakdown). */
   elevenSegments?: { label: string; chars: number }[];
   scribeSeconds?: number;

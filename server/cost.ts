@@ -147,6 +147,14 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
       detail: segs.length ? `${segs.map((s) => `${s.label} ${s.chars}`).join(" · ")} chars` : `${chars} chars`,
     });
   }
+  const local = num(usage.localTtsChars);
+  if (local) {
+    const segs = (usage.elevenSegments ?? []).filter((s) => s.chars > 0);
+    items.push({
+      label: "macOS TTS (on-device)", usd: 0, savedUsd: local * PRICES.elevenPerChar,
+      detail: `${segs.length ? segs.map((s) => `${s.label} ${s.chars}`).join(" · ") : local} chars · saved vs ElevenLabs`,
+    });
+  }
   const secs = num(usage.scribeSeconds);
   if (secs) items.push({ label: "Scribe STT", usd: secs * PRICES.scribePerSecond, detail: fmtSecs(secs) });
   return items.filter((i) => i.usd > 0 || (i.savedUsd ?? 0) > 0);

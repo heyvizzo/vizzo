@@ -40,6 +40,7 @@ class SegmentTts {
     const cfg = base.ctx.config;
     this.ready = tag("tts", base.track(deps.openTts({
       mark: relabelTtsMark(base.mark, () => this.label ?? hint), voiceId, model: cfg.ttsModel, segment: hint === "answer" ? "answer" : "ack",
+      language: () => base.language,
     }))).then((s) => {
       this.stream = s;
       s.onAudio((pcm) => (this.writer ? this.writer.push(pcm) : this.preAudio.push(pcm)));
@@ -107,7 +108,10 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
             ...(fillerUsage ? { fillers: fillerUsage } : {}),
           } }
           : {}),
-        elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0),
+        // On-device speech isn't billed: its characters are counted separately (shown as saved vs ElevenLabs).
+        ...(cfg.ttsModel === "macos"
+          ? { localTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
+          : { elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }),
         elevenSegments: ttsStreams.filter((t) => t.chars > 0).map((t) => ({ label: t.label ?? "tts", chars: t.chars })),
         scribeSeconds: scribe.seconds,
       }),
@@ -129,7 +133,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
     }
 
     async function run(): Promise<void> {
-      if (!voiceId) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
+      if (!voiceId && cfg.ttsModel !== "macos") throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
       const fin = await tag("scribe", scribe.final());
       if (base.isFinished) return;
       base.sttFinal(fin.text, fin.words, fin.language);

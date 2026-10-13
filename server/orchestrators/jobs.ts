@@ -56,7 +56,7 @@ export function startJob(
   const reg = registry(conn);
   const job: JobInfo = {
     jobId: randomUUID(), turnId: spec.turnId, approach: spec.config.approach, intent: spec.intent,
-    question: spec.question, estimateS: spec.estimateS, state: "running",
+    question: spec.question, estimateS: spec.estimateS, state: "running", ...(spec.language ? { language: spec.language } : {}),
   };
   reg.jobs.set(job.jobId, job);
   channel.send({ type: "job", job: { ...job } });
@@ -167,8 +167,8 @@ async function speakOnce(
   }
 
   const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
-  if (!voiceId) return { outcome: "spoken", item: null };
-  const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer" });
+  if (!voiceId && config.ttsModel !== "macos") return { outcome: "spoken", item: null };
+  const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer", language: job.language });
   abort = () => tts.close();
   tts.onAudio(emit);
   channel.setNoticeAbort(() => { aborted = true; abort!(); });
@@ -180,5 +180,11 @@ async function speakOnce(
     finish();
   }
   const chars = tts.chars;
-  return { outcome: outcome(), item: chars ? { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` } : null };
+  if (!chars) return { outcome: outcome(), item: null };
+  return {
+    outcome: outcome(),
+    item: config.ttsModel === "macos"
+      ? { label: "macOS TTS (spoken result, on-device)", usd: 0, savedUsd: chars * PRICES.elevenPerChar, detail: `${chars} chars` }
+      : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` },
+  };
 }

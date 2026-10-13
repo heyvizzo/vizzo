@@ -38,7 +38,11 @@ export interface TtsStream {
   /** Characters sent, for cost. */
   readonly chars: number;
 }
-export interface OpenTtsOpts { mark: Mark; voiceId: string; model: TtsModel; segment: "ack" | "answer" }
+export interface OpenTtsOpts {
+  mark: Mark; voiceId: string; model: TtsModel; segment: "ack" | "answer";
+  /** Spoken language (en / ro) for on-device voices; a getter when it's only known later (pre-opened sockets). */
+  language?: string | (() => string | undefined);
+}
 export type OpenTts = (opts: OpenTtsOpts) => Promise<TtsStream>;
 
 export interface ToolCall { callId: string; name: string; args: unknown }
