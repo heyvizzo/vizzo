@@ -101,6 +101,6 @@ describe("router/Opus per-turn context", () => {
     const d = buildRouterParams("what is this", [], "forced", [], { longTaskSeconds: 20 });
     expect(d.messages[0]!.content as string).not.toContain("threshold");
     const o = buildOpusParams("q", [], false, [], "question", page);
-    expect(JSON.stringify(o.messages)).toContain(page);
+    expect(o.messages[o.messages.length - 1]!.content as string).toContain(page);
   });
 });
