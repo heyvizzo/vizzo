@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lumen · Ship dashboards faster</title>
+  <link rel="stylesheet" href="./demo.css" />
+</head>
+<body>
+  <!-- Sticky header: see DECISIONS.md D2 -->
+  <header class="site-header" data-source="web/cursor/demo/demo.html:11" data-label="Site header">
+    <a class="logo" href="#top" data-source="web/cursor/demo/demo.html:12" data-label="Lumen logo">Lumen</a>
+    <nav class="main-nav" aria-label="Main" data-source="web/cursor/demo/demo.html:13" data-label="Main navigation">
+      <a href="#features" data-source="web/cursor/demo/demo.html:14" data-label="Nav: Features">Features</a>
+      <a href="#pricing" data-source="web/cursor/demo/demo.html:15" data-label="Nav: Pricing">Pricing</a>
+      <a href="#signup" data-source="web/cursor/demo/demo.html:16" data-label="Nav: Sign up">Sign up</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <!-- Hero with the primary CTA: see DECISIONS.md D3 -->
+    <section class="hero" data-source="web/cursor/demo/demo.html:22" data-label="Hero section">
+      <h1 data-source="web/cursor/demo/demo.html:23" data-label="Hero headline">Ship dashboards in an afternoon</h1>
+      <p class="hero-sub" data-source="web/cursor/demo/demo.html:24" data-label="Hero subtitle">
+        Connect a database, drag in charts, share a link. No front-end work required.
+      </p>
+      <button class="cta" type="button" data-source="web/cursor/demo/demo.html:27" data-label="Get started button">Get started</button>
+      <a class="hero-secondary" href="#features" data-source="web/cursor/demo/demo.html:28" data-label="See features link">See features</a>
+    </section>
+
+    <!-- Feature cards laid out with CSS grid: see DECISIONS.md D1 -->
+    <section id="features" class="features" data-source="web/cursor/demo/demo.html:32" data-label="Features section">
+      <h2 data-source="web/cursor/demo/demo.html:33" data-label="Features heading">Everything you need</h2>
+      <div class="card-grid" data-source="web/cursor/demo/demo.html:34" data-label="Feature card grid">
+        <article class="card" data-source="web/cursor/demo/demo.html:35" data-label="Card: Live queries">
+          <h3>Live queries</h3>
+          <p>Charts refresh as rows land. Postgres, MySQL and BigQuery supported.</p>
+        </article>
+        <article class="card" data-source="web/cursor/demo/demo.html:39" data-label="Card: Drag-and-drop">
+          <h3>Drag-and-drop</h3>
+          <p>Lay out a dashboard by dragging blocks. Snap lines keep everything tidy.</p>
+        </article>
+        <article class="card" data-source="web/cursor/demo/demo.html:43" data-label="Card: Share links">
+          <h3>Share links</h3>
+          <p>Send a read-only link with row-level permissions baked in.</p>
+        </article>
+        <article class="card" data-source="web/cursor/demo/demo.html:47" data-label="Card: Alerts">
+          <h3>Alerts</h3>
+          <p>Get a Slack message when a metric crosses a threshold you set.</p>
+        </article>
+        <article class="card card--wide" data-source="web/cursor/demo/demo.html:51" data-label="Card: Embeds">
+          <h3>Embeds</h3>
+          <p>Drop any chart into your own app with one script tag. Theming follows your CSS variables.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Pricing table -->
+    <section id="pricing" class="pricing" data-source="web/cursor/demo/demo.html:59" data-label="Pricing section">
+      <h2 data-source="web/cursor/demo/demo.html:60" data-label="Pricing heading">Pricing</h2>
+      <table class="pricing-table" data-source="web/cursor/demo/demo.html:61" data-label="Pricing table">
+        <thead>
+          <tr><th>Plan</th><th>Dashboards</th><th>Viewers</th><th>Price / month</th></tr>
+        </thead>
+        <tbody>
+          <tr data-source="web/cursor/demo/demo.html:66" data-label="Row: Hobby"><td>Hobby</td><td>3</td><td>5</td><td>$0</td></tr>
+          <tr data-source="web/cursor/demo/demo.html:67" data-label="Row: Team"><td>Team</td><td>Unlimited</td><td>50</td><td>$49</td></tr>
+          <tr data-source="web/cursor/demo/demo.html:68" data-label="Row: Business"><td>Business</td><td>Unlimited</td><td>Unlimited</td><td>$199</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Signup form -->
+    <section id="signup" class="signup" data-source="web/cursor/demo/demo.html:74" data-label="Signup section">
+      <h2 data-source="web/cursor/demo/demo.html:75" data-label="Signup heading">Start free</h2>
+      <form class="signup-form" novalidate data-source="web/cursor/demo/demo.html:76" data-label="Signup form">
+        <label for="email" data-source="web/cursor/demo/demo.html:77" data-label="Email label">Work email</label>
+        <input id="email" name="email" type="email" placeholder="you@company.com" required data-source="web/cursor/demo/demo.html:78" data-label="Email input" />
+        <label for="team-size" data-source="web/cursor/demo/demo.html:79" data-label="Team size label">Team size</label>
+        <select id="team-size" name="teamSize" data-source="web/cursor/demo/demo.html:80" data-label="Team size select">
+          <option>Just me</option>
+          <option>2–10</option>
+          <option>11–50</option>
+          <option>50+</option>
+        </select>
+        <button class="submit" type="submit" data-source="web/cursor/demo/demo.html:86" data-label="Create account button">Create account</button>
+        <p class="form-error" role="alert" hidden data-source="web/cursor/demo/demo.html:87" data-label="Form error message"></p>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer" data-source="web/cursor/demo/demo.html:92" data-label="Footer">
+    <p>© 2026 Lumen Labs</p>
+  </footer>
+
+  <script type="module" src="./demo.ts"></script>
+</body>
+</html>

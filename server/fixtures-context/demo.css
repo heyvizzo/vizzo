@@ -1,0 +1,138 @@
+/* Lumen marketing page (cursor-lab demo). Decisions referenced as D1–D3 live in DECISIONS.md. */
+
+:root {
+  --brand: #2f5bea;          /* Lumen blue: logo, links, focus rings */
+  --cta: #e8590c;            /* D3: orange CTA, the one warm color on the page */
+  --cta-hover: #c94a06;
+  --ink: #1b1f2a;
+  --muted: #5b6475;
+  --surface: #ffffff;
+  --page: #f5f7fb;
+  --border: #dde2ec;
+  --header-h: 64px;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  /* D2: anchor jumps land below the sticky header instead of under it. */
+  scroll-padding-top: calc(var(--header-h) + 16px);
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--page);
+}
+
+/* ── D2: sticky header ───────────────────────────────────────────── */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: var(--header-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.site-header.is-scrolled { box-shadow: 0 2px 12px rgba(27, 31, 42, 0.08); }
+
+.logo { font-weight: 700; font-size: 20px; color: var(--brand); text-decoration: none; }
+
+.main-nav { display: flex; gap: 20px; }
+.main-nav a { color: var(--ink); text-decoration: none; padding: 6px 2px; }
+.main-nav a[aria-current="true"] { color: var(--brand); border-bottom: 2px solid var(--brand); }
+
+/* ── Hero + D3: CTA ──────────────────────────────────────────────── */
+.hero {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 96px 24px 72px;
+  text-align: center;
+}
+.hero h1 { font-size: clamp(32px, 5vw, 52px); line-height: 1.1; margin: 0 0 16px; }
+.hero-sub { color: var(--muted); font-size: 18px; margin: 0 0 32px; }
+
+.cta {
+  background: var(--cta);
+  color: #fff;
+  border: 0;
+  border-radius: 999px;
+  padding: 14px 32px;
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cta:hover { background: var(--cta-hover); }
+.cta:focus-visible { outline: 3px solid var(--brand); outline-offset: 3px; }
+
+.hero-secondary { display: inline-block; margin-left: 16px; color: var(--brand); }
+
+/* ── D1: feature card grid ───────────────────────────────────────── */
+.features, .pricing, .signup { max-width: 1120px; margin: 0 auto; padding: 48px 24px; }
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-auto-rows: 1fr;       /* every row as tall as the tallest card */
+  gap: 24px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+.card h3 { margin: 0 0 8px; }
+.card p { margin: 0; color: var(--muted); }
+
+/* The Embeds card spans two tracks when there's room for it. */
+.card--wide { grid-column: span 2; }
+@media (max-width: 560px) {
+  .card--wide { grid-column: auto; }
+}
+
+/* ── Pricing table ───────────────────────────────────────────────── */
+.pricing-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.pricing-table th, .pricing-table td {
+  text-align: left;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.pricing-table th { background: #eef1f8; font-weight: 600; }
+
+/* ── Signup form ─────────────────────────────────────────────────── */
+.signup-form { display: grid; gap: 8px; max-width: 420px; }
+.signup-form input, .signup-form select {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.submit {
+  background: var(--brand);
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.form-error { color: #b42318; margin: 0; }
+
+.site-footer { text-align: center; color: var(--muted); padding: 32px; }
