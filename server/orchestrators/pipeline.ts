@@ -17,6 +17,7 @@ import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
+import { isLocalTts } from "../../shared/config.ts";
 import { startJob } from "./jobs.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
@@ -109,7 +110,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           } }
           : {}),
         // On-device speech isn't billed: its characters are counted separately (shown as saved vs ElevenLabs).
-        ...(cfg.ttsModel === "macos"
+        ...(isLocalTts(cfg.ttsModel)
           ? { localTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
           : cfg.ttsModel === "openai_tts_1"
             ? { openaiTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }

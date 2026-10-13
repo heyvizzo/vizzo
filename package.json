@@ -20,7 +20,8 @@
     "smoke:e2e": "tsx scripts/smoke-e2e.ts",
     "smoke:chat": "tsx scripts/smoke-chat.ts",
     "bench:claude": "tsx scripts/bench-claude.ts",
-    "bench:tts": "tsx scripts/bench-tts.ts"
+    "bench:tts": "tsx scripts/bench-tts.ts",
+    "setup:local-tts": "bash scripts/setup-local-tts.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",

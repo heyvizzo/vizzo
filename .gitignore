@@ -5,3 +5,5 @@ dist/
 results/
 out/
 .claude/
+.venv-tts/
+.models/

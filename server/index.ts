@@ -128,9 +128,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     await import("./adapters/claude.ts"); // registers the agents' prompts/models
     startClaudeAgents();
   }
-  // On-device TTS helper (macOS): compiled once, then kept running with its voices loaded.
-  if (process.env.FAKE_VENDORS !== "1" && process.platform === "darwin" && process.env.MAC_TTS !== "0") {
-    const { startMacTts } = await import("./adapters/macTts.ts");
-    startMacTts().catch(() => {}); // logs why if it can't start; "macos" turns then fail with a tts error
+  // On-device TTS engines (macOS, Kokoro, Piper): started now so each has its model loaded and voices
+  // warmed before the first turn. LOCAL_TTS=0 skips them; one that isn't installed logs why and is skipped.
+  if (process.env.FAKE_VENDORS !== "1" && process.platform === "darwin" && process.env.LOCAL_TTS !== "0") {
+    const { LOCAL_ENGINES, startLocalTts } = await import("./adapters/localTts.ts");
+    for (const engine of LOCAL_ENGINES) startLocalTts(engine).catch(() => {});
   }
 }

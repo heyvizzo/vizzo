@@ -6,24 +6,24 @@
 import "dotenv/config";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { openTts as openElevenTts } from "../server/adapters/elevenTts.ts";
-import { openMacTts, setMacTtsLogger, startMacTts, stopMacTts } from "../server/adapters/macTts.ts";
+import { openLocalTts, setLocalTtsLogger, startLocalTts, stopLocalTts } from "../server/adapters/localTts.ts";
 import { openOpenAiTts } from "../server/adapters/openaiTts.ts";
-import type { TtsModel } from "../shared/config.ts";
+import { isLocalTts, type TtsModel } from "../shared/config.ts";
 
 const arg = (k: string, d: number) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? Number(process.argv[i + 1]) : d; };
 const N = arg("n", 5), E2E = arg("e2e", 3);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const voiceId = process.env.ELEVENLABS_VOICE_ID ?? "";
-const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5", "openai_tts_1", "macos"];
-const E2E_MODELS: TtsModel[] = ["eleven_v4_turbo", "openai_tts_1", "macos"];
+const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5", "openai_tts_1", "macos", "kokoro", "piper"];
+const E2E_MODELS: TtsModel[] = ["eleven_v4_turbo", "macos", "kokoro", "piper"];
 const TEXTS = { en: "Let me check the features section styles. One moment.", ro: "Mă uit la stilurile secțiunii. Un moment." };
-setMacTtsLogger(() => {});
+setLocalTtsLogger(() => {});
 
 interface Run { model: TtsModel; lang: string; i: number; firstByte: number | null; total: number; audioS: number; error?: string }
 const runs: Run[] = [];
 
 async function one(model: TtsModel, lang: "en" | "ro", i: number): Promise<void> {
-  const open = model === "macos" ? openMacTts : model === "openai_tts_1" ? openOpenAiTts : openElevenTts;
+  const open = isLocalTts(model) ? openLocalTts(model) : model === "openai_tts_1" ? openOpenAiTts : openElevenTts;
   const t0 = performance.now();
   let first: number | null = null, bytes = 0;
   try {
@@ -102,7 +102,7 @@ const row = (label: string, xs: (number | null)[]) => { const v = xs.filter((x):
 
 async function main(): Promise<void> {
   const started = new Date().toISOString();
-  await startMacTts();
+  await Promise.all((["macos", "kokoro", "piper"] as const).map((e) => startLocalTts(e)));
   for (const model of MODELS) {
     if (model.startsWith("eleven_") && !voiceId) { console.log(`SKIP ${model}: ELEVENLABS_VOICE_ID not set`); continue; }
     if (model === "openai_tts_1" && !process.env.OPENAI_API_KEY) { console.log(`SKIP ${model}: OPENAI_API_KEY not set`); continue; }
@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     }
     stopClaudeAgents();
   }
-  stopMacTts();
+  stopLocalTts();
 
   const ok = (m: TtsModel, lang?: string) => runs.filter((r) => r.model === m && (!lang || r.lang === lang) && !r.error);
   const md = [
@@ -138,6 +138,8 @@ async function main(): Promise<void> {
     "- **eleven_v4_turbo**: Text-to-Dialogue WebSocket (one socket per segment, opened inside the measurement).",
     "- **eleven_flash_v2_5**: TTS stream-input WebSocket.",
     "- **openai_tts_1**: OpenAI `tts-1` over HTTP (`/v1/audio/speech`, `response_format: pcm`, voice `coral`), one request per sentence, the next requested while the current one streams.",
+    "- **kokoro**: Kokoro-82M ONNX on CPU (`tools/localtts`, voice af_heart; Romanian via espeak phonemes + the Italian voice if_sara), long sentences split at clauses.",
+    "- **piper**: Piper (`tools/localtts`, en_US-lessac-medium / ro_RO-mihai-medium, 22.05 kHz resampled to 24 kHz).",
     "- **macos**: `tools/mactts` (AVSpeechSynthesizer, persistent helper, voices warmed): text goes a sentence at a time. Voices: best en-US voice installed, Ioana for Romanian.",
     "",
     "### TTS alone (ms from the first text pushed)",

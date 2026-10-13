@@ -13,3 +13,21 @@ export function takeSentences(text: string): [string[], string] {
   }
   return [out.filter(Boolean), text.slice(last)];
 }
+
+/**
+ * Split a long sentence at clause boundaries (", " "; " ": " " — "), keeping each piece at least `min`
+ * characters, for engines that synthesize a whole piece before returning audio (Kokoro). Short
+ * sentences come back whole.
+ */
+export function splitClauses(sentence: string, max = 70, min = 25): string[] {
+  if (sentence.length <= max) return [sentence];
+  const parts = sentence.split(/(?<=[,;:])\s+|\s+(?=—)/);
+  const out: string[] = [];
+  let cur = "";
+  for (const p of parts) {
+    cur = cur ? `${cur} ${p}` : p;
+    if (cur.length >= min) { out.push(cur); cur = ""; }
+  }
+  if (cur) { if (out.length && cur.length < min) out[out.length - 1] += ` ${cur}`; else out.push(cur); }
+  return out;
+}

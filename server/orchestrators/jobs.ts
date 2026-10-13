@@ -3,7 +3,7 @@
 // spoken as a notice once no turn is active, in the voice of the approach that started it (A/C: the
 // connection's Realtime session; B, or if that session isn't available: ElevenLabs).
 import { randomUUID } from "node:crypto";
-import type { RunConfig } from "../../shared/config.ts";
+import { isLocalTts, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
 import { opusCost, PRICES, realtimeResponseCost } from "../cost.ts";
 import { getConversation, type ChatTurn } from "../conversation.ts";
@@ -183,8 +183,8 @@ async function speakOnce(
   if (!chars) return { outcome: outcome(), item: null };
   return {
     outcome: outcome(),
-    item: config.ttsModel === "macos"
-      ? { label: "macOS TTS (spoken result, on-device)", usd: 0, savedUsd: chars * PRICES.elevenPerChar, savedVia: "on-device" as const, detail: `${chars} chars` }
+    item: isLocalTts(config.ttsModel)
+      ? { label: `${TTS_LABELS[config.ttsModel]} (spoken result, on-device)`, usd: 0, savedUsd: chars * PRICES.elevenPerChar, savedVia: "on-device" as const, detail: `${chars} chars` }
       : config.ttsModel === "openai_tts_1"
         ? { label: "OpenAI TTS (spoken result, tts-1)", usd: chars * PRICES.openaiTtsPerChar, detail: `${chars} chars` }
         : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` },

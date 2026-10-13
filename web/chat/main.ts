@@ -83,6 +83,8 @@ app.innerHTML = `
         <option value="eleven_v4_turbo">v4 Turbo</option><option value="eleven_flash_v2_5">Flash v2.5</option>
         <option value="openai_tts_1">OpenAI tts-1</option>
       <option value="macos">macOS (on-device)</option>
+      <option value="kokoro">Kokoro (local)</option>
+      <option value="piper">Piper (local)</option>
       </select></label>
       <label title="Spoken language: Scribe transcription and the pointing words (“this”, “ăsta”…). Auto detects English or Romanian.">Language <select id="language">
         ${LANGUAGES.map((l) => `<option value="${l.id}">${l.label}</option>`).join("")}

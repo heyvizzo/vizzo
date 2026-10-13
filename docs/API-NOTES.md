@@ -254,6 +254,13 @@ Other events you'll see: `session.created`, `session.updated`, `conversation.ite
 - `pcm` = "raw samples in 24kHz (16-bit signed, low-endian), without the header" — mono in practice — exactly the lab's format. Streams via chunked transfer encoding; the guide recommends `wav`/`pcm` "for the fastest response times". No streaming *text* input: the adapter sends a sentence at a time.
 - Live: ~1.1–1.3 s from the first text pushed to the first PCM byte (sentence wait + request). Policy: tell end users the voice is AI-generated.
 
+## Local TTS: Kokoro and Piper ✅ (installed and run locally)
+
+- Setup: `npm run setup:local-tts` → `.venv-tts` (Python 3.12 via uv: `kokoro-onnx` 0.6, `onnxruntime` 1.31, `piper-tts` 1.8) and `.models/` (gitignored).
+- **Kokoro-82M** (Apache-2.0): `kokoro-v1.0.onnx` (310 MB) + `voices-v1.0.bin` (26 MB) from the kokoro-onnx `model-files-v1.0` release. `Kokoro.create_stream(text, voice, lang)` yields float32 at 24 kHz. Voices used: `af_heart` (en); no Romanian voice — `lang="ro"` (espeak-ng phonemes) with `if_sara`. CPU (CoreML EP partial, not faster).
+- **Piper** (OHF-Voice piper1): voices from `huggingface.co/rhasspy/piper-voices` — `en_US-lessac-medium`, `ro_RO-mihai-medium` (60 MB each + `.onnx.json`). `PiperVoice.synthesize(text)` yields one `AudioChunk` (int16, 22.05 kHz) per sentence → resampled to 24 kHz.
+- Both run in `tools/localtts/server.py` (one persistent process per engine, framed PCM like tools/mactts), started by `npm run dev` (`LOCAL_TTS=0` skips local engines).
+
 ## Sources
 - Anthropic: bundled `claude-api` skill (models, Haiku 5.5 / Opus 5.5 migration notes)
 - OpenAI pricing: https://developers.openai.com/api/docs/pricing

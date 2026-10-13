@@ -11,7 +11,7 @@
 //   - Haiku cache reads bill at 0.1× its input rate. Opus fast-mode cache reads at 2× the standard $0.20.
 //   - Realtime: the single "cached" price applies to cached text and cached audio tokens alike.
 //   - Haiku's >100K-token prompt tier is chosen from input + cache read + cache write tokens.
-import type { RunConfig } from "../shared/config.ts";
+import { TTS_LABELS, type RunConfig } from "../shared/config.ts";
 import type { CostItem, Usage } from "../shared/protocol.ts";
 
 const PER_M = 1e-6;
@@ -158,7 +158,7 @@ export function costItems(config: RunConfig, usage: Usage): CostItem[] {
   if (local) {
     const segs = (usage.elevenSegments ?? []).filter((s) => s.chars > 0);
     items.push({
-      label: "macOS TTS (on-device)", usd: 0, savedUsd: local * PRICES.elevenPerChar, savedVia: "on-device",
+      label: `${TTS_LABELS[config.ttsModel]} (on-device)`, usd: 0, savedUsd: local * PRICES.elevenPerChar, savedVia: "on-device",
       detail: `${segs.length ? segs.map((s) => `${s.label} ${s.chars}`).join(" · ") : local} chars · saved vs ElevenLabs`,
     });
   }
