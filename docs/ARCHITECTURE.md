@@ -117,7 +117,7 @@ Built by T2, used by the cursor lab (T9) and the latency lab (T8). Signatures ar
 
 ## 4. Server adapter interfaces
 
-The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `SttStream` exposes `seconds` (audio seconds sent, feeds `usage.scribeSeconds`); `RealtimeSession` exposes `usage`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
+The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `SttStream` exposes `seconds` (audio seconds sent, feeds `usage.scribeSeconds`); `RealtimeSession` exposes `usage` (typed `RealtimeUsage`) plus T4's `beginTurn`, `setMark`, `onError`, `currentSegment`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
 
 Orchestrators depend **only** on these interfaces, so each adapter can be built and smoke-tested on its own. Each adapter emits marks through the injected `mark()` function.
 
@@ -149,17 +149,26 @@ function openTts(opts: { mark: Mark; voiceId: string; model: "eleven_v4_turbo" |
 // End-of-segment is only signaled after close, so it's ONE socket PER SEGMENT: flush() = flush + close; done() resolves on final/close.
 // Pre-warmed v4 dialogue sockets hold capacity from a separate pool while open; pre-warm at most one (see API-NOTES).
 
-interface RealtimeSession {                    // server/adapters/openaiRealtime.ts
+interface RealtimeSession {                    // server/adapters/openaiRealtime.ts — ONE session reused across turns (§7)
+  beginTurn(): void;                           // T4: sends input_audio_buffer.clear, resets per-turn mark state
+  setMark(mark: Mark): void;                   // T4: swap the per-turn mark function on the reused session
+  onError(cb: (err: Error) => void): void;     // T4: vendor `error` events + socket failures
+  readonly currentSegment: "ack" | "answer";   // T4: "answer" for the response created after sendToolResult
+  readonly usage: RealtimeUsage;               // T4: {responses: raw usage[], totals: {inputText, inputAudio, cachedText, cachedAudio, outputText, outputAudio, ...}}
   pushAudio(pcm24k: Buffer): void;
   commitAndRespond(extraContext?: string): void; // commit buffer, optionally add a context item, then response.create
   onAudio(cb: (pcm24k: Buffer) => void): void;
   onText(cb: (delta: string) => void): void;
   onToolCall(cb: (call: { callId: string; name: string; args: unknown }) => void): void;
-  sendToolResult(callId: string, output: string): void;  // then response.create
-  responseDone(): Promise<void>;
+  sendToolResult(callId: string, output: string): void;  // then response.create (deferred until the active response is done)
+  responseDone(): Promise<void>;               // current/next response.done; resolves at once if none outstanding; rejects on failed response.create / close
   close(): void;
 }
-function openRealtime(opts: { mark: Mark; model: "gpt-realtime-2.1" | "gpt-realtime-2.1-mini"; instructions: string; tools: ToolDef[] }): Promise<RealtimeSession>;
+function openRealtime(opts: { mark: Mark; model: "gpt-realtime-2.1" | "gpt-realtime-2.1-mini"; instructions: string; tools: ToolDef[]; voice?: string }): Promise<RealtimeSession>;
+// T4: resolves after session.updated (session.created → session.update → session.updated), so PTT config is live
+// before any audio. Marks: llm.request (commitAndRespond), llm.firstToken (first audio/transcript delta of the turn),
+// llm.toolCall {name} (output_item.added function_call), ack.ttsFirstByte / answer.ttsFirstByte (first audio per segment).
+// Context items are role "user" input_text. Tests inject the socket via createOpenRealtime({ WebSocket }).
 
 // server/adapters/claude.ts
 function routeWithHaiku(opts: {

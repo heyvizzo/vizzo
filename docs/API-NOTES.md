@@ -116,6 +116,7 @@ Other events you'll see: `session.created`, `session.updated`, `conversation.ite
 {"event_id":"event_890","type":"error","error":{"type":"invalid_request_error","code":"invalid_event","message":"The 'type' field is missing.","param":null,"event_id":"event_567"}}
 ```
 
+- T4 (live, 2026-10-13): with an **invalid key** the WebSocket upgrade still succeeds and the server sends an `error` event ("Incorrect API key provided") instead of an HTTP 401, so setup code must treat an `error` before `session.updated` as fatal.
 - Don't confuse this with the separate "GPT-Live" WebSocket at `wss://api.openai.com/v1/live/sessions`, which has different event names (`session.output_audio.delta`, …). We use `/v1/realtime`.
 
 ## ElevenLabs Scribe v2 Realtime (STT) ✅
