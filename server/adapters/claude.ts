@@ -64,7 +64,7 @@ const LANGUAGE_NAMES: Record<string, string> = { en: "English", ro: "Romanian" }
 export const languageName = (code: string): string => LANGUAGE_NAMES[code] ?? code;
 /** A per-turn instruction line when the user didn't speak English ("" otherwise). */
 export function languageLine(language: string | undefined, what: string): string {
-  return language && language !== "en" ? `The user spoke ${languageName(language)}: write ${what} in ${languageName(language)}.` : "";
+  return language ? `The user spoke ${languageName(language)}: write ${what} in ${languageName(language)}.` : "";
 }
 
 // ── Provider: OpenRouter (Anthropic-compatible Messages API) or Anthropic directly ──

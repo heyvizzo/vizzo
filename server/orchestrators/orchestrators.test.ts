@@ -256,7 +256,9 @@ describe("hybrid orchestrator (C)", () => {
     const r = await runTurn(createHybridOrchestrator(d), h.ctx);
     expect(r.error).toBeUndefined();
     expectOrdered(h.markNames(), ["stt.final", "pointing.resolved", "llm.request", "ack.ttsFirstByte", "answer.ttsFirstByte", "turn.end"]);
-    expect(d.log.contexts).toEqual([`Pointing: "this" → <section> "Features" [data-source=demo.html:34]`]);
+    expect(d.log.contexts).toHaveLength(1);
+    expect(d.log.contexts[0]!.split("\n")[0]).toBe(`Pointing: "this" → <section> "Features" [data-source=demo.html:34]`);
+    expect(d.log.contexts[0]).toContain("reply in English");
     expect(h.meta("llm.request")).toMatchObject({ pointingInjected: true, pointingMissed: false });
     expect(h.meta("pointing.resolved")).not.toHaveProperty("pointingMissed");
     expect(r.transcript).toBe(DEFAULT_SCENARIO.transcript);

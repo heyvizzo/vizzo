@@ -40,6 +40,36 @@ export function normalizeLanguage(code: string | null | undefined): string | und
   return c.length === 3 ? c : c.slice(0, 2);
 }
 
+const RO_DIACRITICS = /[ăâîșşțţ]/giu;
+const RO_WORDS = new Set([
+  "si", "este", "sunt", "nu", "ce", "de", "la", "pe", "cu", "din", "un", "una", "o", "sa", "mai", "care", "pentru", "cum",
+  "unde", "cand", "vreau", "poti", "poate", "fa", "fac", "face", "facem", "asa", "asta", "acesta", "aceasta", "aici", "acolo",
+  "butonul", "pagina", "pagini", "sectiunea", "tabelul", "coloana", "titlul", "mare", "mic", "mica", "putin", "mult", "ei", "lui",
+  "le", "il", "imi", "iti", "ne", "va", "ar", "am", "ai", "are", "fi", "fost", "dar", "sau", "daca", "doar", "deja", "acum",
+]);
+const EN_WORDS = new Set([
+  "the", "is", "are", "it", "this", "that", "these", "those", "why", "what", "how", "where", "when", "make", "can", "could",
+  "you", "to", "of", "and", "on", "with", "button", "page", "please", "do", "does", "be", "was", "my", "me", "i", "we",
+  "bigger", "smaller", "here", "there", "change", "move", "show", "tell", "about", "for", "from", "its", "one", "a",
+]);
+
+/**
+ * Guess English vs Romanian from a transcript (Scribe's realtime API returns language_code null when
+ * auto-detecting). Romanian diacritics count 3, common words 1. Undefined when it's too close to call.
+ */
+export function detectLanguage(text: string): "en" | "ro" | undefined {
+  let ro = (text.match(RO_DIACRITICS)?.length ?? 0) * 3;
+  let en = 0;
+  for (const raw of text.split(/[\s,.!?;:"()]+/)) {
+    const w = foldWord(raw);
+    if (!w) continue;
+    if (RO_WORDS.has(w)) ro++;
+    if (EN_WORDS.has(w)) en++;
+  }
+  if (ro === en) return undefined;
+  return ro > en ? "ro" : "en";
+}
+
 /** Lowercase, drop diacritics and everything that isn't a letter: `"Această,"` → `"aceasta"`. */
 export function foldWord(text: string): string {
   return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}]/gu, "");
@@ -417,12 +447,10 @@ export function computeRests(
     .sort((a, b) => a.from - b.from);
   return kept.map((r, i) => {
     // What was being said while it rested: the rest's middle (at most 400 ms in).
-    const w = wordNear(Math.min((r.from + r.to) / 2, r.from + 400), words, tAudioStart, 600);
-    return {
-      ref: i + 1, tStart: r.from, tEnd: r.to, sample: r.s,
-      wordIndex: w ? words.indexOf(w) : null,
-      whole: Math.min(r.to, speechTo) - Math.max(r.from, speechFrom) >= 0.9 * speechMs,
-    };
+    const whole = Math.min(r.to, speechTo) - Math.max(r.from, speechFrom) >= 0.9 * speechMs;
+    // A cursor parked for the whole utterance isn't tied to any one word.
+    const w = whole ? null : wordNear(Math.min((r.from + r.to) / 2, r.from + 400), words, tAudioStart, 600);
+    return { ref: i + 1, tStart: r.from, tEnd: r.to, sample: r.s, wordIndex: w ? words.indexOf(w) : null, whole };
   });
 }
 

@@ -17,7 +17,7 @@ import { realDeps } from "./deps.ts";
 import { acquireRealtime, LazyScribe, REALTIME_INSTRUCTIONS, type RealtimeLease, type RealtimeListener } from "./shared.ts";
 import { formatHistoryRecap, getConversation } from "../conversation.ts";
 import { FillerScheduler } from "./fillers.ts";
-import { DEFAULT_LONG_TASK_SECONDS } from "../adapters/claude.ts";
+import { DEFAULT_LONG_TASK_SECONDS, languageName } from "../adapters/claude.ts";
 import { startJob } from "./jobs.ts";
 import type { Intent, LlmPrompt, RouteIntent } from "../../shared/protocol.ts";
 import type { ChatTurn } from "../conversation.ts";
@@ -228,6 +228,14 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       // Clicks / highlighted text (no word timestamps needed, so A gets them too).
       const page = base.pageContext();
       if (page) context = context ? `${context}\n${page}` : page;
+      // Reply language: this turn's (C, from Scribe's transcript) or, for A, the conversation's last one.
+      const lang = base.language ?? (cfg.memory ? ctx.connection.get<string>("language") : undefined);
+      if (lang) {
+        const line = base.language
+          ? `(The user is speaking ${languageName(lang)}: reply in ${languageName(lang)}.)`
+          : `(The user has been speaking ${languageName(lang)}: reply in the language of this message, most likely ${languageName(lang)}.)`;
+        context = context ? `${context}\n${line}` : line;
+      }
       // The instructions say 20 s; tell the model when the user picked another long-task threshold.
       if (cfg.backgroundLongTasks && cfg.longTaskSeconds !== DEFAULT_LONG_TASK_SECONDS) {
         const line = `(Long-task threshold for this conversation: ${cfg.longTaskSeconds} seconds, use it instead of ${DEFAULT_LONG_TASK_SECONDS}.)`;

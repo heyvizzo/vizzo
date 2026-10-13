@@ -64,7 +64,8 @@ describe("chat memory", () => {
     expect(r1.transcript).not.toBe(""); // chat mode: A runs Scribe for the transcript
     getConversation(conn).push({ turnId: "a1", approach: "realtime", user: r1.transcript, assistant: r1.voiceText, detail: "" });
     await runTurn(orch, ctx("a2", { approach: "realtime" }, conn));
-    expect(d.log.contexts[1]).toBeUndefined(); // same session heard a1 itself and already got b1
+    // Same session heard a1 itself and already got b1: no recap (only the reply-language hint).
+    expect(d.log.contexts[1] ?? "").not.toContain("Earlier in this conversation");
   });
 
   it("realtime without memory: no Scribe, no recap", async () => {

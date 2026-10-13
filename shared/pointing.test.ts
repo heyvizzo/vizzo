@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClickKind, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "./protocol.ts";
 import {
-  ALGORITHMS, DWELL_TIE_EPS, annotateTranscript, atStart, computeRests, foldWord, formatRests, pointingLanguage, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
+  ALGORITHMS, DWELL_TIE_EPS, annotateTranscript, atStart, computeRests, detectLanguage, foldWord, formatRests, pointingLanguage, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
   mode, normalizeWord, resolvePointing, sampleSpeeds, tagFromPath, truncateText, wordNear, wordWindow,
 } from "./pointing.ts";
 
@@ -386,5 +386,17 @@ describe("cursor rests (language-agnostic)", () => {
     const [r] = computeRests(words, T, still(T - 100, T + 1700, 50, "h3"));
     expect(r!.whole).toBe(true);
     expect(formatRests([r!], words, T)).toContain("the whole time");
+  });
+});
+
+describe("detectLanguage", () => {
+  it("tells Romanian from English", () => {
+    expect(detectLanguage("De ce este butonul ăsta portocaliu?")).toBe("ro");
+    expect(detectLanguage("Fă-l puțin mai mare.")).toBe("ro");
+    expect(detectLanguage("fa-l putin mai mare")).toBe("ro"); // no diacritics
+    expect(detectLanguage("Why is it orange?")).toBe("en");
+    expect(detectLanguage("Make this button bigger please")).toBe("en");
+    expect(detectLanguage("")).toBeUndefined();
+    expect(detectLanguage("OK")).toBeUndefined();
   });
 });

@@ -2,7 +2,7 @@ import { isMarkedSegment } from "../../shared/marks.ts";
 // Shared per-turn plumbing for the A/B/C orchestrators: ordered audio segments, text accumulation,
 // socket cleanup, the overall turn timeout and "finish exactly once" semantics.
 import type { MarkName } from "../../shared/marks.ts";
-import { annotateTranscript, computeRests, formatPageContext, formatRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
+import { annotateTranscript, computeRests, detectLanguage, formatPageContext, formatRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
 import type { CursorRest, PointingTarget, Segment, Usage, Word } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
 import type { TurnContext, TurnResult } from "./types.ts";
@@ -164,8 +164,10 @@ export class TurnBase {
   sttFinal(text: string, words: Word[], detected?: string): void {
     this.transcript = text;
     this.words = words;
+    // Pinned setting, else Scribe's code (null in auto mode so far), else a guess from the text.
     const pinned = this.ctx.config.language;
-    this.language = normalizeLanguage(detected) ?? (pinned && pinned !== "auto" ? pinned : undefined);
+    this.language = (pinned && pinned !== "auto" ? pinned : undefined) ?? normalizeLanguage(detected) ?? detectLanguage(text);
+    if (this.language) this.ctx.connection.set("language", this.language);
     if (!this.finished) {
       this.ctx.send({ type: "stt.final", turnId: this.ctx.turnId, text, words, ...(this.language ? { language: this.language } : {}) });
     }
