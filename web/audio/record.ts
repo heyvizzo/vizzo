@@ -1,4 +1,6 @@
-// Record PCM16 24 kHz frames into a WAV file (used by the cursor lab / T10). Implemented by T2.
+// Record PCM16 24 kHz frames into a WAV file (used by the cursor lab / T10).
+import { RATE } from "./dsp.ts";
+import { encodeWav } from "./wav.ts";
 
 export interface WavRecorder {
   push(pcm: Int16Array): void;
@@ -7,5 +9,13 @@ export interface WavRecorder {
 }
 
 export function createWavRecorder(): WavRecorder {
-  throw new Error("createWavRecorder: not implemented (T2)");
+  const chunks: Int16Array[] = [];
+  return {
+    push(pcm) {
+      chunks.push(pcm.slice()); // copy: callers may reuse or transfer the buffer
+    },
+    toWav() {
+      return new Blob([encodeWav(chunks, RATE)], { type: "audio/wav" });
+    },
+  };
 }
