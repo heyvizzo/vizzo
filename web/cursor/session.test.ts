@@ -61,7 +61,7 @@ describe("session files", () => {
     ];
     s.preselected = { t: -40, text: "Charts refresh", ...card(1), container: null };
     s.highlights = [
-      { text: "Hobby 3 5 $0\nTeam Unlimited 50 $49", tStart: 300, t: 650, ...card(2), container: "Pricing table" },
+      { text: "Hobby 3 5 $0\nTeam Unlimited 50 $49", tStart: 300, t: 650, ...card(2), container: "Pricing table", via: "drag" },
       { text: "Drop any chart", tStart: 1000, t: 1350, ...card(3), container: null },
     ];
     const file = toCursorFile(s);
@@ -87,6 +87,7 @@ describe("session files", () => {
     ]);
     expect(c.highlights).toEqual([{ ...card(1), container: null, text: "Charts refresh", tStart: -40, t: -40 }]);
     expect(c.preselected).toBeUndefined();
+    expect(c.highlights![0]).not.toHaveProperty("via");
     // Re-saving writes the new shape.
     const again = toCursorFile(sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(old) }]).sessions[0]!);
     expect(again).not.toHaveProperty("selection");
@@ -181,5 +182,21 @@ describe("timeline model", () => {
     expect(m.picks).toHaveLength(targets.length);
     expect(m.t0).toBe(-284); // first sample has no speed
     expect(m.t1).toBeGreaterThanOrEqual(1200);
+  });
+
+  it("keeps every click time per event, highlight spans and the pre-existing marker", () => {
+    const m = buildTimelineModel(samples, words, [], { preMs: 300, postMs: 200 }, 0, {
+      clicks: [
+        { ...card(2), kind: "multi", count: 4, t: 1400, tEnd: 1800, times: [1400, 1500, 1600, 1700], x: 0, y: 0 },
+        { ...card(1), kind: "double", count: 2, t: 100, tEnd: 300, times: [100, 220], x: 0, y: 0 },
+      ],
+      preselected: { ...card(1), t: -500, text: "a" },
+      highlights: [{ ...card(3), text: "b", tStart: 200, t: 600 }],
+    });
+    expect(m.clicks.map((c) => [c.n, c.kind, c.times])).toEqual([[1, "double", [100, 220]], [2, "multi", [1400, 1500, 1600, 1700]]]);
+    expect(m.highlights).toEqual([{ n: 1, from: 200, to: 600 }]);
+    expect(m.preselected).toBe(-500);
+    expect(m.t0).toBe(-500);
+    expect(m.t1).toBe(1700);
   });
 });

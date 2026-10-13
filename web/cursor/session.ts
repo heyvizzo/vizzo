@@ -141,9 +141,12 @@ export function toClick(v: unknown): PageClick | null {
 function toSelection(v: unknown): PageSelection | null {
   return isRef(v) && isNum(v.t) && typeof v.text === "string" ? { ...refOf(v), t: v.t, text: v.text } : null;
 }
+type HighlightVia = NonNullable<PageHighlight["via"]>;
+const VIAS: readonly HighlightVia[] = ["drag", "double-click", "triple-click", "multi-click", "shift-click", "keyboard"];
 function toHighlight(v: unknown): PageHighlight | null {
   if (!isRef(v) || !isNum(v.t) || typeof v.text !== "string") return null;
-  return { ...refOf(v), text: v.text, tStart: isNum(v.tStart) ? v.tStart : v.t, t: v.t };
+  const via = typeof v.via === "string" && (VIAS as readonly string[]).includes(v.via) ? (v.via as HighlightVia) : undefined;
+  return { ...refOf(v), text: v.text, tStart: isNum(v.tStart) ? v.tStart : v.t, t: v.t, ...(via ? { via } : {}) };
 }
 /** Every element converted, or null when it isn't an array or any element is malformed. */
 function every<T>(xs: unknown, f: (v: unknown) => T | null): T[] | null {

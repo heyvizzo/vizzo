@@ -1,8 +1,8 @@
 // Highlights each algorithm's pick (and the labeled target) on top of the demo page, the turn's
-// clicks and selection, and (separately, live) the element under the pointer.
-import type { CursorSample, PageClick, PageSelection, PointingTarget } from "../../shared/protocol.ts";
-import { ALGORITHMS } from "../../shared/pointing.ts";
-import { CLICK_COLOR, colorFor, HOVER_COLOR, LABEL_COLOR, SELECTION_COLOR } from "./colors.ts";
+// click events and highlights, and (separately, live) the element under the pointer.
+import type { CursorSample, PageEvents, PointingTarget } from "../../shared/protocol.ts";
+import { ALGORITHMS, clickVerb } from "../../shared/pointing.ts";
+import { CLICK_COLOR, colorFor, HIGHLIGHT_COLOR, HOVER_COLOR, LABEL_COLOR, PRESELECTED_COLOR } from "./colors.ts";
 import type { LabelTarget, PointingLabel } from "./session.ts";
 
 export function findPath(path: string | null): Element | null {
@@ -27,11 +27,14 @@ function place(d: HTMLElement, r: DOMRect, ox: number, oy: number, inset: number
   });
 }
 
-export interface PageMarks {
-  clicks: readonly PageClick[];
-  selection: PageSelection | null;
+export interface PageMarks extends PageEvents {
   /** The session's samples (same clock as clicks): their scroll offsets place click dots in content coords. */
   samples: readonly CursorSample[];
+  /**
+   * Outline each highlight's element with a numbered tag. For the current / most recent live turn the
+   * recorder already paints the text ranges, so this is for loaded sessions (no live ranges).
+   */
+  outlineHighlights: boolean;
 }
 
 /**
@@ -54,6 +57,7 @@ export function renderOverlay(
     tag.className = "ov-tag";
     tag.style.background = color;
     tag.style.color = style === "solid" && color !== CLICK_COLOR ? "#fff" : "#000";
+    if (style === "dotted") tag.style.top = "calc(100% + 2px)"; // page marks: tags below, so pick tags above stay readable
     tag.textContent = text;
     d.append(tag);
     layer.append(d);
@@ -92,23 +96,41 @@ export function renderOverlay(
   }
 
   if (!page) return;
-  if (page.selection) {
-    const el = findPath(page.selection.elementPath);
-    if (el) box(el, SELECTION_COLOR, 6, "selected text", "dotted").querySelector<HTMLElement>(".ov-tag")!.style.top = "calc(100% + 2px)";
+  if (page.outlineHighlights) {
+    const perHl = new Map<Element, number>();
+    const hl = (path: string | null, color: string, text: string) => {
+      const el = findPath(path);
+      if (!el) return;
+      const n = perHl.get(el) ?? 0;
+      perHl.set(el, n + 1);
+      const d = box(el, color, 5 + n * 4, text, "dotted");
+      d.classList.add("ov-hl");
+      d.querySelector<HTMLElement>(".ov-tag")!.style.top = `calc(100% + ${2 + n * 16}px)`;
+    };
+    if (page.preselected) hl(page.preselected.elementPath, PRESELECTED_COLOR, "already highlighted");
+    page.highlights.forEach((h, i) => hl(h.elementPath, HIGHLIGHT_COLOR, `highlight ${i + 1}${h.via ? ` · ${h.via}` : ""}`));
   }
+  // One outline + one dot per click event; the dot shows the click count ("2×").
+  const perClick = new Map<Element, number>();
   [...page.clicks].sort((a, b) => a.t - b.t).forEach((c, i) => {
     const el = findPath(c.elementPath);
-    if (el) box(el, CLICK_COLOR, 1, `click ${i + 1}`).querySelector<HTMLElement>(".ov-tag")!.style.top = "calc(100% + 2px)"; // below, so pick tags above stay readable
+    if (el) {
+      const n = perClick.get(el) ?? 0;
+      perClick.set(el, n + 1);
+      const d = box(el, CLICK_COLOR, 1 + n * 3, `#${i + 1} ${clickVerb(c).toLowerCase()}`, "dotted");
+      d.style.borderStyle = "solid";
+      d.querySelector<HTMLElement>(".ov-tag")!.style.top = `calc(100% + ${2 + n * 16}px)`;
+    }
     // Clicks carry viewport x/y only; take the scroll offset from the nearest cursor sample.
     const near = nearestSample(page.samples, c.t);
     const dot = document.createElement("div");
-    dot.className = "ov-click";
-    dot.textContent = String(i + 1);
+    dot.className = `ov-click k-${c.kind}`;
+    dot.textContent = `${c.count}×`;
     Object.assign(dot.style, {
       left: `${c.x - sr.left - scroller.clientLeft + (near?.scrollX ?? scroller.scrollLeft)}px`,
       top: `${c.y - sr.top - scroller.clientTop + (near?.scrollY ?? scroller.scrollTop)}px`,
     });
-    dot.title = `click ${i + 1}: ${c.label ?? c.elementPath ?? "?"}`;
+    dot.title = `#${i + 1} ${clickVerb(c)}: ${c.label ?? c.elementPath ?? "?"}`;
     layer.append(dot);
   });
 }
