@@ -1,4 +1,5 @@
 // DEV ONLY (?fake=1): an in-browser stand-in for the server so the lab UI can be exercised without keys or T7.
+import { isMarkedSegment } from "../../shared/marks.ts";
 // It speaks shared/protocol.ts: plausible marks per approach, transcript/voice/opus text, short PCM tones for the
 // ack and answer segments, then turn.done with a RunRecord. Loaded with a dynamic import, so it's a separate chunk
 // that the production path never fetches.
@@ -120,7 +121,7 @@ export class FakeSocket implements LabSocketLike {
       case "audio.played":
         if (t?.turnId === msg.turnId) {
           t.played.add(msg.segment);
-          t.marks[`${msg.segment}.played`] = msg.tPlayed;
+          if (isMarkedSegment(msg.segment)) t.marks[`${msg.segment}.played`] = msg.tPlayed;
         }
         return;
       case "turn.cancel":
@@ -160,7 +161,7 @@ export class FakeSocket implements LabSocketLike {
   private segment(t: FakeTurn, seg: Segment, startMs: number, freq: number, durMs: number): number {
     const frames = tone(freq, durMs);
     this.at(t, startMs, () => {
-      this.mark(t, `${seg}.ttsFirstByte`);
+      if (isMarkedSegment(seg)) this.mark(t, `${seg}.ttsFirstByte`);
       t.sent.add(seg);
       this.emit({ type: "audio.segment", turnId: t.turnId, segment: seg, state: "start" });
       // Deliver faster than real time in 100 ms bursts, like a TTS stream.

@@ -256,7 +256,7 @@ export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointin
   if (toolIndex < 0) {
     // Direct spoken answer (auto mode).
     if (final?.stop_reason === "max_tokens") log(`[claude] haiku direct answer hit max_tokens (${spokenText.length} chars spoken)`);
-    return { delegate: null, usage };
+    return { delegate: null, decision: { intent: "answer" as const, estimateS: null }, usage };
   }
 
   // Tool call: validate the eagerly-streamed input ourselves (it isn't validated server-side).
@@ -272,12 +272,12 @@ export const routeWithHaiku: RouteWithHaiku = async ({ mark, transcript, pointin
   if (!input) {
     // Degrade gracefully: still delegate, with the raw transcript + pointing as the question.
     log(`[claude] haiku ask_opus input invalid (stop_reason=${final?.stop_reason ?? "error"}); delegating raw transcript`);
-    return { delegate: { question: `${transcript}\n${formatPointingForPrompt(pointing)}` }, usage };
+    return { delegate: { question: `${transcript}\n${formatPointingForPrompt(pointing)}`, intent: "question" as const, estimateS: null }, decision: { intent: "question" as const, estimateS: null }, usage };
   }
   // If the extractor fell behind the final value (shouldn't happen), speak the remainder.
   if (input.ack.startsWith(ack.value) && input.ack.length > ack.value.length) onSpokenDelta(input.ack.slice(ack.value.length), "ack");
   endAck();
-  return { delegate: { question: input.question }, usage };
+  return { delegate: { question: input.question, intent: "question" as const, estimateS: null }, decision: { intent: "question" as const, estimateS: null }, usage };
 };
 
 // ── Opus solver ────────────────────────────────────────────────────────────
@@ -378,3 +378,6 @@ function logUsage(
       `cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens}${u.speed ? ` speed=${u.speed}` : ""}`,
   );
 }
+
+// TEMP stub (replaced by the router agent).
+export const generateFillers: import("./types.ts").GenerateFillers = async () => ({ lines: [], usage: null });

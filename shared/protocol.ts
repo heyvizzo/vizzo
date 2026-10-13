@@ -3,7 +3,34 @@
 import type { RunConfig } from "./config.ts";
 import type { MarkName, Metrics } from "./marks.ts";
 
-export type Segment = "ack" | "answer";
+/**
+ * Audio segments. "ack" = first thing the voice layer says; "filler" = progress lines while Opus works
+ * (short tasks, chat mode); "answer" = the answer; "notice" = a background job's result, spoken
+ * outside any turn (framed by `notice` messages, not `audio.segment`). Only ack/answer carry marks.
+ */
+export type Segment = "ack" | "filler" | "answer" | "notice";
+
+/** What the voice layer decided the user wants (chat decision, PRD follow-up). */
+export type Intent = "question" | "task";
+/** clarify = asked the user a follow-up instead of guessing; answer = answered directly (trivial). */
+export type RouteIntent = Intent | "clarify" | "answer";
+
+export interface JobInfo {
+  jobId: string;
+  /** The turn that started it. */
+  turnId: string;
+  approach: import("./config.ts").Approach;
+  intent: Intent;
+  question: string;
+  estimateS: number | null;
+  state: "running" | "done" | "failed";
+  /** Opus's SPOKEN line, when done. */
+  spoken?: string;
+  /** Opus's full answer, when done. */
+  detail?: string;
+  error?: string;
+  elapsedMs?: number;
+}
 
 /** Seconds from turn audio start. */
 export interface Word { text: string; start: number; end: number }
@@ -32,7 +59,10 @@ export type ClientMsg =
   | { type: "turn.audioStart"; turnId: string; tAudioStart: number }
   | { type: "turn.release"; turnId: string; tRelease: number }
   | { type: "audio.played"; turnId: string; segment: Segment; tPlayed: number }
-  | { type: "turn.cancel"; turnId: string }
+  /** reason "interrupt": the user started talking over the reply; "stop": the user stopped it (Esc). */
+  | { type: "turn.cancel"; turnId: string; reason?: "interrupt" | "stop" }
+  /** Stop any background-job notice that's being spoken. */
+  | { type: "speech.stop" }
   /** Debug: while on (and no turn is active), the server echoes binary audio frames back. Used by /audio-test. */
   | { type: "echo"; on: boolean }
   /** Chat mode: forget the conversation (and drop the Realtime session, which holds its own history). */
@@ -49,6 +79,12 @@ export type ServerMsg =
   | { type: "opus.text"; turnId: string; delta: string }
   | { type: "audio.segment"; turnId: string; segment: Segment; state: "start" | "end" }
   | { type: "turn.done"; turnId: string; run: RunRecord }
+  /** The voice layer's decision for this turn, as soon as it's known. background: Opus runs as a job. */
+  | { type: "decision"; turnId: string; intent: RouteIntent; estimateS: number | null; background: boolean }
+  /** Background job lifecycle (chat mode, long tasks). Not tied to the active turn. */
+  | { type: "job"; job: JobInfo }
+  /** Frames a spoken job result: binary audio between start and end belongs to it (sent only when no turn is active). */
+  | { type: "notice"; jobId: string; state: "start" | "end" }
   | { type: "error"; turnId?: string; source: string; message: string };
 
 export interface Usage {

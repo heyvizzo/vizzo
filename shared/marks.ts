@@ -67,3 +67,7 @@ export function deriveMetrics(marks: Partial<Record<MarkName, number>>): Metrics
     ttsFirst: ansTts !== undefined && ttsBase !== undefined ? ansTts - ttsBase : null,
   };
 }
+
+/** Only ack and answer segments carry marks (filler/notice don't count toward TTFA/TTA). */
+export type MarkedSegment = "ack" | "answer";
+export const isMarkedSegment = (s: string): s is MarkedSegment => s === "ack" || s === "answer";

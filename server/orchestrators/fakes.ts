@@ -224,6 +224,8 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
       onToolCall(cb) { toolCbs.push(cb); },
       onError(cb) { errCbs.push(cb); },
       sendToolResult(callId, output) { log.sentToolResults.push({ callId, output }); respond("answer"); },
+      speak: async () => {},
+      cancelResponse() {},
       responseDone() {
         if (closed) return Promise.reject(new Error("fake realtime: closed"));
         if (!active && !deferred) return Promise.resolve();
@@ -251,13 +253,13 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     mark("llm.firstToken");
     if (!delegate) {
       for (const w of DIRECT_ANSWER.split(/(?<= )/)) { onSpokenDelta(w, "answer"); await wait(t.chunkMs); }
-      return { delegate: null, usage };
+      return { delegate: null, decision: { intent: "answer" as const, estimateS: null }, usage };
     }
     mark("llm.toolCall", { name: "ask_opus" });
     for (const w of ACK.split(/(?<= )/)) { onSpokenDelta(w, "ack"); await wait(t.chunkMs); }
     onSpokenEnd?.("ack");
     await wait(t.llmFirstMs); // the `question` field
-    return { delegate: { question: "Why is the features section a CSS grid?" }, usage };
+    return { delegate: { question: "Why is the features section a CSS grid?", intent: "question" as const, estimateS: 10 }, decision: { intent: "question" as const, estimateS: 10 }, usage };
   };
 
   const solveWithOpus: SolveWithOpus = async ({ mark, fast, onSpokenLine, onDelta }) => {

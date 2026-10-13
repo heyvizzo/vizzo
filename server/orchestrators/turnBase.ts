@@ -1,3 +1,4 @@
+import { isMarkedSegment } from "../../shared/marks.ts";
 // Shared per-turn plumbing for the A/B/C orchestrators: ordered audio segments, text accumulation,
 // socket cleanup, the overall turn timeout and "finish exactly once" semantics.
 import type { MarkName } from "../../shared/marks.ts";
@@ -236,7 +237,9 @@ export function sleep(ms: number): Promise<void> {
 /** Mark wrapper for a TTS socket opened before its segment label is known: renames *.ttsFirstByte to the final label. */
 export function relabelTtsMark(mark: Mark, label: () => Segment): Mark {
   return (name, meta) => {
-    if (name === "ack.ttsFirstByte" || name === "answer.ttsFirstByte") mark(`${label()}.ttsFirstByte`, meta);
-    else mark(name, meta);
+    if (name === "ack.ttsFirstByte" || name === "answer.ttsFirstByte") {
+      const l = label();
+      if (isMarkedSegment(l)) mark(`${l}.ttsFirstByte`, meta); // filler/notice audio carries no mark
+    } else mark(name, meta);
   };
 }

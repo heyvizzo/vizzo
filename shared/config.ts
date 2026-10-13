@@ -18,6 +18,12 @@ export interface RunConfig {
   postMs: number;
   /** Chat mode: keep conversation history across turns (and approaches) on this connection. */
   memory: boolean;
+  /** Speak short progress lines while waiting for Opus on short tasks. */
+  fillers: boolean;
+  /** Run long tasks (estimate > longTaskSeconds) as background jobs and announce the result later. */
+  backgroundLongTasks: boolean;
+  /** Estimate (seconds) above which a task counts as long. */
+  longTaskSeconds: number;
 }
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -31,6 +37,9 @@ export const DEFAULT_CONFIG: RunConfig = {
   preMs: 300,
   postMs: 200,
   memory: false,
+  fillers: false,
+  backgroundLongTasks: false,
+  longTaskSeconds: 20,
 };
 
 export const MODELS = {

@@ -1,7 +1,7 @@
 // Adapter interfaces (ARCHITECTURE §4). Orchestrators depend only on these.
 import type { Mark } from "../clock.ts";
 import type { ChatTurn } from "../conversation.ts";
-import type { PointingTarget, Word } from "../../shared/protocol.ts";
+import type { Intent, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
 import type { RealtimeModel, RouterMode, TtsModel } from "../../shared/config.ts";
 
 export type { Mark };
@@ -55,7 +55,10 @@ export interface RealtimeUsage {
  * call `beginTurn()` + `setMark()` at the start of each turn.
  */
 export interface RealtimeSession {
-  /** Start of a turn: sends input_audio_buffer.clear and resets per-turn mark state. */
+  /**
+   * Start of a turn: sends input_audio_buffer.clear and resets per-turn mark state. Responses still in flight
+   * (e.g. one cancelled by an interruption) become stale: their audio, text and tool calls are dropped.
+   */
   beginTurn(): void;
   /** Swap the mark function (per-turn marks on a reused session). */
   setMark(mark: Mark): void;
@@ -67,12 +70,27 @@ export interface RealtimeSession {
   onToolCall(cb: (call: ToolCall) => void): void;
   /** Vendor `error` events and socket failures. */
   onError(cb: (err: Error) => void): void;
-  /** Sends function_call_output, then response.create (deferred until the active response is done). */
-  sendToolResult(callId: string, output: string): void;
-  /** Resolves when the current (or next requested) response finishes; immediately if none is outstanding. */
+  /**
+   * Sends function_call_output, then response.create (deferred until the active response is done).
+   * `respond: false` only records the output (background jobs, interrupted turns): no new response.
+   */
+  sendToolResult(callId: string, output: string, opts?: { respond?: boolean }): void;
+  /**
+   * Speak `text` in a response of its own, resolving at that response's response.done (rejects on error/close).
+   * "filler": out-of-band (`conversation: "none"`, tool_choice none), the model says the text verbatim and it
+   * stays out of the conversation. "notice": an in-conversation note + response (tool_choice none), so the
+   * model remembers telling the user. Serialized with other responses like any response.create.
+   */
+  speak(text: string, kind: "filler" | "notice"): Promise<void>;
+  /** response.cancel the active response (if any) and drop a deferred response.create. Keeps the session usable. */
+  cancelResponse(): void;
+  /**
+   * Resolves when no ack/answer response is active or deferred; immediately if none is outstanding.
+   * filler/notice responses and stale ones (from before the last beginTurn) don't count.
+   */
   responseDone(): Promise<void>;
-  /** Segment of the latest response: "ack" for the turn's first response, "answer" after sendToolResult. */
-  readonly currentSegment: "ack" | "answer";
+  /** Segment of the latest response: "ack" (turn's first), "answer" (after sendToolResult), "filler"/"notice" (speak). */
+  readonly currentSegment: "ack" | "filler" | "answer" | "notice";
   /** Accumulated usage from response.done events. */
   readonly usage: RealtimeUsage;
   close(): void;
@@ -85,23 +103,36 @@ export interface RouteWithHaikuOpts {
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
   /**
-   * Text to speak right away. `kind` (T7 addition) says what it is: "ack" = the `ack` field of an
-   * ask_opus call (delegation follows), "answer" = a direct text answer (auto mode only).
+   * Fires once, as soon as the router's `intent` (and `estimate_seconds`, if given) are parsed, i.e. before
+   * `say` streams, so the caller knows whether the spoken text is an ack or the whole reply.
+   */
+  onDecision?: (d: RouteDecision) => void;
+  /**
+   * Text to speak right away (the router's `say` field). `kind`: "ack" when a delegation follows
+   * (intent question/task), "answer" when the text is the whole reply (intent clarify/answer).
    */
   onSpokenDelta: (d: string, kind: "ack" | "answer") => void;
-  /**
-   * T7 addition, optional: fires once the spoken ack is complete (the `ack` field's closing quote),
-   * before Haiku finishes writing `question`, so TTS can be flushed early. Not fired for direct answers
-   * (those end when routeWithHaiku resolves).
-   */
-  onSpokenEnd?: (kind: "ack") => void;
+  /** Optional: fires once `say` is complete (its closing quote), so TTS can be flushed before Haiku finishes. */
+  onSpokenEnd?: (kind: "ack" | "answer") => void;
 }
-export type RouteWithHaiku = (opts: RouteWithHaikuOpts) => Promise<{ delegate: null | { question: string }; usage: unknown }>;
+export interface RouteDecision { intent: RouteIntent; estimateS: number | null }
+export type RouteWithHaiku = (opts: RouteWithHaikuOpts) => Promise<{
+  delegate: null | { question: string; intent: Intent; estimateS: number | null };
+  decision: RouteDecision;
+  usage: unknown;
+}>;
+
+/** Short spoken progress lines for the wait on a short task (Haiku, called in parallel with Opus). */
+export type GenerateFillers = (opts: {
+  transcript: string; question: string; intent: Intent; pointing: PointingTarget[];
+}) => Promise<{ lines: string[]; usage: unknown }>;
 
 export interface SolveWithOpusOpts {
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
+  /** "task": the user wants something changed (Opus describes the change; it can't edit files here). Default question. */
+  intent?: Intent;
   /** Fires once the SPOKEN: line is complete. */
   onSpokenLine: (line: string) => void;
   /** Full answer stream. */
@@ -116,9 +147,17 @@ export const ASK_OPUS_TOOL: ToolDef = {
   parameters: {
     type: "object",
     properties: {
-      question: { type: "string", description: "The precise question, including what the user is pointing at." },
+      intent: {
+        type: "string", enum: ["question", "task"],
+        description: "question = the user wants information or an explanation; task = the user wants something changed or done.",
+      },
+      estimated_seconds: {
+        type: "integer",
+        description: "Your estimate of how long the stronger model needs: ~5-15 for questions, 60-300 for changes or multi-step work.",
+      },
+      question: { type: "string", description: "The precise question or task, including what the user is pointing at." },
       pointing_context: { type: "string", description: "Which element(s) the user pointed at, if known." },
     },
-    required: ["question"],
+    required: ["intent", "estimated_seconds", "question"],
   },
 };

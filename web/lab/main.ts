@@ -1,4 +1,5 @@
 // Latency lab (TASKS T8, PRD FR1–FR6): config, live mic / fixture replay turns, N-run benchmark, live turn view,
+import { isMarkedSegment } from "../../shared/marks.ts";
 // per-turn waterfall, results table, export, past runs. All untrusted strings go through textContent.
 import "./lab.css";
 import { connectWithStatus } from "../common.ts";
@@ -343,7 +344,7 @@ function ensurePlayer(): Promise<Player> {
 
 function onPlayed(seg: Segment, tPlayed: number): void {
   const t = turn;
-  if (!t) return;
+  if (!t || !isMarkedSegment(seg)) return;
   const name: MarkName = `${seg}.played`;
   if (t.clientMarks[name] !== undefined) return;
   t.clientMarks[name] = tPlayed;

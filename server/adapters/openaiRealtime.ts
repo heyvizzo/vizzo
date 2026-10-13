@@ -315,6 +315,12 @@ async function openRealtimeWith(opts: OpenRealtimeOpts, deps: RealtimeDeps): Pro
       send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output } });
       sendResponseCreate("answer");
     },
+    speak() {
+      return Promise.reject(new Error("speak: not implemented")); // TEMP stub (realtime agent)
+    },
+    cancelResponse() {
+      send({ type: "response.cancel" }); // TEMP stub (realtime agent)
+    },
     responseDone() {
       if (closed) return Promise.reject(new Error("openRealtime: session closed"));
       if (!responseActive && !deferredCreate) return Promise.resolve();
