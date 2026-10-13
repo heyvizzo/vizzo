@@ -7,6 +7,7 @@ import { serverNow } from "../server/clock.ts";
 import { openTts } from "../server/adapters/elevenTts.ts";
 import type { TtsModel } from "../shared/config.ts";
 import { SAMPLE_RATE } from "../shared/config.ts";
+import { writeWavPcm16 } from "../server/wav.ts";
 
 const KEY = process.env.ELEVENLABS_API_KEY;
 const VOICE = process.env.ELEVENLABS_VOICE_ID;
@@ -19,23 +20,6 @@ const SENTENCE = "Sure, one sec. The header is sticky so the navigation stays vi
 const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5"];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function wav(pcm: Buffer): Buffer {
-  const h = Buffer.alloc(44);
-  h.write("RIFF", 0);
-  h.writeUInt32LE(36 + pcm.length, 4);
-  h.write("WAVE", 8);
-  h.write("fmt ", 12);
-  h.writeUInt32LE(16, 16);
-  h.writeUInt16LE(1, 20); // PCM
-  h.writeUInt16LE(1, 22); // mono
-  h.writeUInt32LE(SAMPLE_RATE, 24);
-  h.writeUInt32LE(SAMPLE_RATE * 2, 28);
-  h.writeUInt16LE(2, 32);
-  h.writeUInt16LE(16, 34);
-  h.write("data", 36);
-  h.writeUInt32LE(pcm.length, 40);
-  return Buffer.concat([h, pcm]);
-}
 
 mkdirSync("out", { recursive: true });
 let failed = false;
@@ -63,7 +47,7 @@ for (const model of MODELS) {
     const tDone = serverNow();
     const pcm = Buffer.concat(chunks);
     const file = `out/tts-${model}.wav`;
-    writeFileSync(file, wav(pcm));
+    writeFileSync(file, writeWavPcm16(pcm, SAMPLE_RATE));
     const fb = marks.find((m) => m.name.endsWith("ttsFirstByte"));
     console.log(`connect ${(tReady - tOpen).toFixed(0)} ms`);
     console.log(`text-in → first byte ${fb ? (fb.t - tTextIn).toFixed(0) : "-"} ms (flush at +${(tFlush - tTextIn).toFixed(0)} ms, done at +${(tDone - tTextIn).toFixed(0)} ms)`);

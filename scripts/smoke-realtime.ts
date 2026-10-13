@@ -8,7 +8,7 @@ import { serverNow } from "../server/clock.ts";
 import { openRealtime } from "../server/adapters/openaiRealtime.ts";
 import { ASK_OPUS_TOOL, type Mark } from "../server/adapters/types.ts";
 import type { RealtimeModel } from "../shared/config.ts";
-import { parseWav, writeWavPcm16 } from "./lib/wav.ts";
+import { parseWav, writeWavPcm16 } from "../server/wav.ts";
 
 if (!process.env.OPENAI_API_KEY) {
   console.log("SKIP: OPENAI_API_KEY not set (smoke:realtime)");
@@ -23,8 +23,8 @@ if (model !== "gpt-realtime-2.1" && model !== "gpt-realtime-2.1-mini") {
 }
 
 const wav = parseWav(readFileSync(new URL("../fixtures/smoke/hello.wav", import.meta.url)));
-if (wav.sampleRate !== 24000 || wav.channels !== 1 || wav.bitsPerSample !== 16) {
-  throw new Error(`hello.wav must be 24 kHz PCM16 mono, got ${wav.sampleRate} Hz ${wav.channels}ch ${wav.bitsPerSample}-bit`);
+if (wav.sampleRate !== 24000 || wav.channels !== 1) {
+  throw new Error(`hello.wav must be 24 kHz PCM16 mono, got ${wav.sampleRate} Hz ${wav.channels}ch`);
 }
 
 function markRecorder(label: string) {

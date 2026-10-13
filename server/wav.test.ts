@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseWav } from "./wav.ts";
+import { parseWav, writeWavPcm16 } from "./wav.ts";
 
 function wav(chunks: [string, Buffer][]): Buffer {
   const body = Buffer.concat(
@@ -43,5 +43,11 @@ describe("parseWav", () => {
     expect(w.sampleRate).toBe(24000);
     expect(w.channels).toBe(1);
     expect(w.data.length).toBeGreaterThan(24000);
+  });
+  it("round-trips PCM16 mono through writeWavPcm16", () => {
+    const pcm = Buffer.from([1, 0, 2, 0, 3, 0]);
+    const w = parseWav(writeWavPcm16(pcm, 24000));
+    expect(w).toMatchObject({ sampleRate: 24000, channels: 1 });
+    expect(w.data.equals(pcm)).toBe(true);
   });
 });

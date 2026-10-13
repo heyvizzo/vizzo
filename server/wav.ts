@@ -34,3 +34,21 @@ export function parseWav(buf: Buffer): WavPcm16 {
   }
   throw new Error("parseWav: no data chunk");
 }
+
+export function writeWavPcm16(pcm: Buffer, sampleRate = 24000, channels = 1): Buffer {
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0, "ascii");
+  h.writeUInt32LE(36 + pcm.length, 4);
+  h.write("WAVE", 8, "ascii");
+  h.write("fmt ", 12, "ascii");
+  h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20);
+  h.writeUInt16LE(channels, 22);
+  h.writeUInt32LE(sampleRate, 24);
+  h.writeUInt32LE(sampleRate * channels * 2, 28);
+  h.writeUInt16LE(channels * 2, 32);
+  h.writeUInt16LE(16, 34);
+  h.write("data", 36, "ascii");
+  h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
