@@ -78,6 +78,8 @@ export interface PageSelection extends ElementRef { t: number; text: string }
 /** One highlight made during the recording (a finished drag / double / triple click / shift-select). */
 export interface PageHighlight extends ElementRef {
   text: string;
+  /** How it was made: dragging, double-clicking a word, triple-clicking a line/paragraph, shift-click or shift+arrows. */
+  via?: "drag" | "double-click" | "triple-click" | "multi-click" | "shift-click" | "keyboard";
   /** When the gesture started (press) and when it finished (release / last key). Client clock. */
   tStart: number;
   t: number;
