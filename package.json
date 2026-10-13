@@ -1,0 +1,35 @@
+{
+  "name": "realtime-voice-latency-lab",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "smoke:scribe": "tsx scripts/smoke-scribe.ts",
+    "smoke:realtime": "tsx scripts/smoke-realtime.ts",
+    "smoke:tts": "tsx scripts/smoke-tts.ts",
+    "smoke:claude": "tsx scripts/smoke-claude.ts",
+    "smoke:e2e": "tsx scripts/smoke-e2e.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "dotenv": "^18.0.7",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "concurrently": "^10.0.6",
+    "vitest": "^5.0.4"
+  }
+}

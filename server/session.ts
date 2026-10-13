@@ -1,0 +1,184 @@
+// One browser connection = one Session (ARCHITECTURE §1, §3).
+import { randomUUID } from "node:crypto";
+import type { WebSocket, RawData } from "ws";
+import { parseClientMsg, type ClientMsg, type CursorSample, type RunRecord, type Segment, type ServerMsg } from "../shared/protocol.ts";
+import { deriveMetrics, type MarkName } from "../shared/marks.ts";
+import type { RunConfig } from "../shared/config.ts";
+import { serverToClient } from "../shared/clock.ts";
+import { serverNow, type Mark } from "./clock.ts";
+import type { Orchestrator, TurnHandlers, TurnResult } from "./orchestrators/types.ts";
+import { realtimeOrchestrator } from "./orchestrators/realtime.ts";
+import { pipelineOrchestrator } from "./orchestrators/pipeline.ts";
+import { hybridOrchestrator } from "./orchestrators/hybrid.ts";
+import { appendRun } from "./results.ts";
+import { computeCost } from "./cost.ts";
+
+const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
+  realtime: realtimeOrchestrator,
+  pipeline: pipelineOrchestrator,
+  hybrid: hybridOrchestrator,
+};
+
+/** How long to wait after the orchestrator finishes for audio.played reports. */
+const PLAYED_GRACE_MS = 3000;
+
+interface Turn {
+  turnId: string;
+  config: RunConfig;
+  fixtureId?: string;
+  marks: Partial<Record<MarkName, number>>;
+  markMeta: Partial<Record<MarkName, Record<string, unknown>>>;
+  samples: CursorSample[];
+  tAudioStart?: number;
+  released: boolean;
+  segmentsSent: Set<Segment>;
+  segmentsPlayed: Set<Segment>;
+  onPlayed?: () => void;
+  handlers?: TurnHandlers;
+}
+
+export class Session {
+  private turn: Turn | null = null;
+  private clock = { rttMs: 0, offsetMs: 0 };
+  private echo = false;
+
+  constructor(private ws: WebSocket) {
+    ws.on("message", (data, isBinary) => (isBinary ? this.onBinary(data) : this.onText(data.toString())));
+    ws.on("close", () => this.turn?.handlers?.cancel());
+  }
+
+  send(msg: ServerMsg): void {
+    if (this.ws.readyState === this.ws.OPEN) this.ws.send(JSON.stringify(msg));
+  }
+
+  private sendAudio(pcm: Buffer): void {
+    if (this.ws.readyState === this.ws.OPEN) this.ws.send(pcm, { binary: true });
+  }
+
+  private onBinary(data: RawData): void {
+    const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
+    if (!this.turn) {
+      if (this.echo) this.sendAudio(buf);
+      return;
+    }
+    if (this.turn.released) return; // audio after release is ignored
+    this.turn.handlers?.onAudio(buf);
+  }
+
+  private onText(raw: string): void {
+    const msg = parseClientMsg(raw);
+    if (!msg) return this.send({ type: "error", source: "session", message: "bad message" });
+    this.handle(msg);
+  }
+
+  private handle(msg: ClientMsg): void {
+    switch (msg.type) {
+      case "hello":
+        console.log("[session] hello");
+        return;
+      case "ping":
+        return this.send({ type: "pong", id: msg.id, clientNow: msg.clientNow, serverNow: serverNow() });
+      case "clock.sync":
+        this.clock = { rttMs: msg.rttMs, offsetMs: msg.offsetMs };
+        return;
+      case "echo":
+        this.echo = msg.on;
+        return;
+      case "turn.start":
+        return this.startTurn(msg.turnId, msg.config, msg.tPress, msg.fixtureId);
+      case "cursor.samples":
+        if (this.turn?.turnId === msg.turnId) this.turn.samples.push(...msg.samples);
+        return;
+      case "turn.audioStart":
+        if (this.turn?.turnId === msg.turnId) this.turn.tAudioStart = msg.tAudioStart;
+        return;
+      case "turn.release":
+        if (this.turn?.turnId !== msg.turnId || this.turn.released) return;
+        this.turn.released = true;
+        this.turn.marks.release = msg.tRelease;
+        this.turn.handlers?.onRelease();
+        return;
+      case "audio.played": {
+        const t = this.turn;
+        if (t?.turnId !== msg.turnId) return;
+        t.marks[msg.segment === "ack" ? "ack.played" : "answer.played"] ??= msg.tPlayed;
+        t.segmentsPlayed.add(msg.segment);
+        t.onPlayed?.();
+        return;
+      }
+      case "turn.cancel":
+        if (this.turn?.turnId === msg.turnId) {
+          this.turn.handlers?.cancel();
+          this.turn = null;
+        }
+        return;
+    }
+  }
+
+  private startTurn(turnId: string, config: RunConfig, tPress: number, fixtureId?: string): void {
+    this.turn?.handlers?.cancel();
+    const turn: Turn = {
+      turnId, config, fixtureId, marks: { press: tPress }, markMeta: {}, samples: [], released: false,
+      segmentsSent: new Set(), segmentsPlayed: new Set(),
+    };
+    this.turn = turn;
+
+    const mark: Mark = (name, meta) => {
+      if (this.turn !== turn) return;
+      const now = serverNow();
+      if (turn.marks[name] === undefined) {
+        turn.marks[name] = serverToClient(now, this.clock.offsetMs);
+        if (meta) turn.markMeta[name] = meta;
+      }
+      this.send({ type: "mark", turnId, name, serverNow: now, meta });
+    };
+
+    const orchestrator = ORCHESTRATORS[config.approach];
+    if (!orchestrator) {
+      this.send({ type: "error", turnId, source: "session", message: `no orchestrator for ${config.approach}` });
+      return;
+    }
+    try {
+      turn.handlers = orchestrator({
+        turnId, config, mark,
+        send: (m) => {
+          if (this.turn !== turn) return;
+          if (m.type === "audio.segment" && m.state === "start") turn.segmentsSent.add(m.segment);
+          this.send(m);
+        },
+        sendAudio: (pcm) => this.turn === turn && this.sendAudio(pcm),
+        cursorSamples: () => turn.samples,
+        tAudioStart: () => turn.tAudioStart,
+      });
+    } catch (e) {
+      this.send({ type: "error", turnId, source: "orchestrator", message: String(e) });
+      this.turn = null;
+      return;
+    }
+    turn.handlers.done
+      .catch((e): TurnResult => ({ transcript: "", pointing: [], voiceText: "", opusText: "", usage: {}, error: String(e) }))
+      .then((result) => this.finishTurn(turn, result));
+  }
+
+  private async finishTurn(turn: Turn, result: TurnResult): Promise<void> {
+    if (this.turn !== turn) return;
+    // Wait for the client to report every segment we sent as played.
+    await new Promise<void>((resolve) => {
+      const check = () => [...turn.segmentsSent].every((s) => turn.segmentsPlayed.has(s)) && resolve();
+      turn.onPlayed = check;
+      check();
+      setTimeout(resolve, PLAYED_GRACE_MS);
+    });
+    if (this.turn !== turn) return;
+    const usage = result.usage;
+    const run: RunRecord = {
+      runId: randomUUID(), turnId: turn.turnId, approach: turn.config.approach, config: turn.config,
+      fixtureId: turn.fixtureId, marks: turn.marks, metrics: deriveMetrics(turn.marks),
+      transcript: result.transcript, pointing: result.pointing, voiceText: result.voiceText, opusText: result.opusText,
+      usage, costUsd: computeCost(turn.config, usage), clock: this.clock, markMeta: turn.markMeta, error: result.error,
+    };
+    this.send({ type: "turn.done", turnId: turn.turnId, run });
+    this.turn = null;
+    appendRun(run).catch((e) => console.error("[results] append failed", e));
+  }
+}

@@ -73,11 +73,14 @@ There is one WebSocket at `/ws`. Binary frames carry audio. Text frames are JSON
 type ClientMsg =
   | { type: "hello"; clientNow: number }                  // starts clock sync
   | { type: "ping"; id: number; clientNow: number }
-  | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number }
+  | { type: "clock.sync"; rttMs: number; offsetMs: number }  // result of sync, so the server stores marks in client time
+  | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string }
   | { type: "cursor.samples"; turnId: string; samples: CursorSample[] } // batched every ~100ms
+  | { type: "turn.audioStart"; turnId: string; tAudioStart: number } // client time of first captured sample (§6)
   | { type: "turn.release"; turnId: string; tRelease: number }
   | { type: "audio.played"; turnId: string; segment: "ack" | "answer"; tPlayed: number }
-  | { type: "turn.cancel"; turnId: string };
+  | { type: "turn.cancel"; turnId: string }
+  | { type: "echo"; on: boolean };            // debug: echo binary audio when no turn is active (/audio-test)
 // binary frame while a turn is active: raw PCM16 24k audio for the active turn
 
 // ── server → client ──────────────────────────────
@@ -104,9 +107,13 @@ interface CursorSample {
 interface PointingTarget { word: string; wordStart: number; algorithm: string; sample: CursorSample | null }
 ```
 
+The canonical types live in `shared/protocol.ts`. **Server-side bookkeeping:** the server converts every server mark to client time using the `clock.sync` offset and stores it in `RunRecord.marks`. After the orchestrator finishes, it waits (up to 3 s) for an `audio.played` for every segment it sent, then sends `turn.done` and appends the run to `results/`.
+
 Only one turn is active at a time. Binary frames always belong to the active turn. Audio sent after `turn.release` is ignored.
 
 ## 4. Server adapter interfaces
+
+The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `RealtimeSession` exposes `usage`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
 
 Orchestrators depend **only** on these interfaces, so each adapter can be built and smoke-tested on its own. Each adapter emits marks through the injected `mark()` function.
 
