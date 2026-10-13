@@ -12,7 +12,7 @@ import { pipelineOrchestrator } from "./orchestrators/pipeline.ts";
 import { hybridOrchestrator } from "./orchestrators/hybrid.ts";
 import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
-import { computeCost } from "./cost.ts";
+import { computeCost, costItems } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
 import { getConversation, resetConversation } from "./conversation.ts";
 import { dropRealtime } from "./orchestrators/shared.ts";
@@ -279,7 +279,8 @@ export class Session {
       runId: randomUUID(), turnId: turn.turnId, approach: turn.config.approach, config: turn.config,
       fixtureId: turn.fixtureId, marks: turn.marks, metrics: deriveMetrics(turn.marks),
       transcript: result.transcript, pointing: result.pointing, voiceText: result.voiceText, opusText: result.opusText,
-      usage, costUsd: computeCost(turn.config, usage), clock: this.clock, markMeta: turn.markMeta, error: result.error,
+      usage, costUsd: computeCost(turn.config, usage), costItems: costItems(turn.config, usage),
+      clock: this.clock, markMeta: turn.markMeta, error: result.error,
     };
     this.send({ type: "turn.done", turnId: turn.turnId, run });
     this.clearTurn();

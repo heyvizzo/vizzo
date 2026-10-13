@@ -1,6 +1,7 @@
 // Renders an LlmPrompt (exactly what a model was sent) for the Chat page's per-turn "Prompt" section.
 // Fixed instructions and earlier turns are collapsed; this turn's message is shown in full.
 import type { LlmPrompt, LlmResponse, PromptMessage } from "../../shared/protocol.ts";
+import { fmtUsd } from "./costView.ts";
 
 const TARGET_LABEL: Record<LlmPrompt["target"], string> = {
   router: "Haiku router",
@@ -112,7 +113,7 @@ export function usageSummary(usage: unknown): string {
 export function responseSummary(r: LlmResponse): string {
   const time = r.durationMs !== undefined ? `${(r.durationMs / 1000).toFixed(1)} s` : "";
   if (r.error) return ["↳ error", r.label, r.error, time].filter(Boolean).join(" · ");
-  return ["↳ response", r.label, r.stopReason ? `stop: ${r.stopReason}` : "", usageSummary(r.usage), time].filter(Boolean).join(" · ");
+  return ["↳ response", r.label, r.stopReason ? `stop: ${r.stopReason}` : "", usageSummary(r.usage), time, r.costUsd !== undefined ? fmtUsd(r.costUsd) : ""].filter(Boolean).join(" · ");
 }
 
 /** A collapsible block with the raw payload as JSON. */
@@ -127,7 +128,7 @@ export function renderResponse(r: LlmResponse): HTMLDetailsElement {
 export function responseBadge(r: LlmResponse): string {
   if (r.error) return "✕ error";
   const time = r.durationMs !== undefined ? ` ${(r.durationMs / 1000).toFixed(1)} s` : "";
-  return `✓${r.label ? ` ${r.label}` : ""}${r.stopReason ? ` ${r.stopReason}` : ""}${time}`;
+  return `✓${r.label ? ` ${r.label}` : ""}${r.stopReason ? ` ${r.stopReason}` : ""}${time}${r.costUsd !== undefined ? ` · ${fmtUsd(r.costUsd)}` : ""}`;
 }
 
 /** Attach a response to a rendered call (Realtime calls get several: ack, filler, answer…). */
@@ -135,8 +136,11 @@ export function addResponse(call: HTMLDetailsElement, r: LlmResponse): void {
   let box = call.querySelector<HTMLElement>(":scope > .presps");
   if (!box) { box = el("div", "presps"); call.append(box); }
   box.append(renderResponse(r));
-  const badges = [...box.querySelectorAll<HTMLElement>(":scope > details > summary")].length;
+  const n = [...box.querySelectorAll<HTMLElement>(":scope > details > summary")].length;
+  // A call's cost is the sum of its responses (Realtime has several: ack, fillers, answer).
+  const total = (Number(call.dataset.costUsd) || 0) + (r.costUsd ?? 0);
+  call.dataset.costUsd = String(total);
   const badge = call.querySelector<HTMLElement>(":scope > summary > .pbadge");
-  if (badge) badge.textContent = badges > 1 ? ` · ${badges} responses · last ${responseBadge(r)}` : ` · ${responseBadge(r)}`;
+  if (badge) badge.textContent = n > 1 ? ` · ${n} responses · ${fmtUsd(total)} · last ${responseBadge(r)}` : ` · ${responseBadge(r)}`;
   if (r.error) call.classList.add("err");
 }

@@ -9,7 +9,7 @@ import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type SpeechLanguage, type TtsModel } from "../../shared/config.ts";
-import type { CursorRest, LlmPrompt, LlmResponse, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
+import type { CostItem, CursorRest, LlmPrompt, LlmResponse, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -21,6 +21,7 @@ import { Sampler } from "../cursor/sampler.ts";
 import { createPageContextRecorder } from "../cursor/pageContext.ts";
 import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
 import { addResponse, renderPrompt } from "./promptView.ts";
+import { fmtUsd, renderTurnCost, type TurnCost } from "./costView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtEstimate, jobHeadline, runningLabel, spokenOf, type DecisionLike } from "./logic.ts";
 
 const PRE_ROLL_MS = 500;
@@ -182,6 +183,9 @@ interface TurnView {
   detail: HTMLDetailsElement;
   detailPre: HTMLElement;
   meta: HTMLElement;
+  /** Cost breakdown (filled on turn.done; background task costs added as they arrive). */
+  costBox?: HTMLElement;
+  cost?: TurnCost;
   /** "Prompt" section, created on the first llm.prompt for the turn. */
   prompts?: { root: HTMLDetailsElement; summary: HTMLElement; list: HTMLElement; n: number };
   /** stt.final words and the pointing references, for the annotated transcript. */
@@ -337,8 +341,27 @@ function renderMeta(v: TurnView, run: Pick<RunRecord, "metrics" | "costUsd" | "e
   add(`first audio ${fmtMs(run.metrics.ttfa)}`);
   add(`answer ${fmtMs(run.metrics.tta)}`);
   if (run.metrics.opusTotal != null) add(`opus ${fmtMs(run.metrics.opusTotal)}`);
-  add(`$${run.costUsd.toFixed(4)}`);
   if (run.error) add(run.error, "err");
+}
+
+/** Show the turn's itemized cost (plus any background task it started). */
+function renderCost(v: TurnView, run: Pick<RunRecord, "costUsd" | "costItems">, turnId: string): void {
+  const jobCosts = [...jobs.values()].filter((c) => c.info.turnId === turnId).map(jobCost);
+  v.cost = { items: run.costItems ?? [{ label: "total", usd: run.costUsd }], total: run.costUsd, jobs: jobCosts };
+  if (!v.costBox) { v.costBox = el("div", "costbox"); v.meta.after(v.costBox); }
+  renderTurnCost(v.costBox, v.cost);
+}
+
+const jobCost = (c: { info: JobInfo }): TurnCost["jobs"][number] => ({
+  label: "background task", items: c.info.costItems ?? [], total: c.info.costUsd ?? 0, running: c.info.state === "running",
+});
+
+/** A job's cost changed: refresh the cost of the turn that started it. */
+function refreshTurnCost(turnId: string): void {
+  const v = views.get(turnId);
+  if (!v?.cost || !v.costBox) return;
+  v.cost.jobs = [...jobs.values()].filter((c) => c.info.turnId === turnId).map(jobCost);
+  renderTurnCost(v.costBox, v.cost);
 }
 
 // ── background job cards ───────────────────────────
@@ -448,6 +471,7 @@ function upsertJob(info: JobInfo): void {
   c.info = { ...c.info, ...info };
   renderJob(c);
   renderJobsPill();
+  refreshTurnCost(info.turnId);
 }
 
 function renderJob(c: JobCard): void {
@@ -464,6 +488,7 @@ function renderJob(c: JobCard): void {
   const detail = j.state === "done" && j.detail ? detailOf(j.detail) : "";
   c.detailPre.textContent = detail;
   c.detail.hidden = !detail;
+  c.sub.textContent += j.costUsd !== undefined ? ` · cost ${fmtUsd(j.costUsd)}${j.costItems?.length ? ` (${j.costItems.map((i) => `${i.label.replace(/ \(.*\)$/, "")} ${fmtUsd(i.usd)}`).join(", ")})` : ""}` : "";
   c.err.textContent = j.state === "failed" ? j.error || "The task failed." : "";
   c.err.hidden = j.state !== "failed";
 }
@@ -728,7 +753,7 @@ sock.on((msg: ServerMsg) => {
   if (cancelled.has(msg.turnId)) {
     if (msg.type === "turn.done") {
       const v = views.get(msg.turnId);
-      if (v) renderMeta(v, msg.run);
+      if (v) { renderMeta(v, msg.run); renderCost(v, msg.run, msg.turnId); }
     }
     return;
   }
@@ -784,6 +809,7 @@ sock.on((msg: ServerMsg) => {
       }
       if (!t.voice && run.voiceText) { v.bot.hidden = false; v.botText.data = run.voiceText; }
       renderMeta(v, run);
+      renderCost(v, run, t.turnId);
       setStatus(run.error ? `Finished with an error: ${run.error}` : "Ready.", !!run.error);
       break;
     }
@@ -864,6 +890,11 @@ $("reset").onclick = () => {
 if (DEMO) renderDemo();
 
 function renderDemo(): void {
+  /** Canned breakdown: router 10%, Opus 70% (when it's big), speech the rest. */
+  const demoCost = (total: number): CostItem[] => total > 0.01
+    ? [{ label: "Haiku router", usd: total * 0.05, detail: "in 312 + 2,227 cached · out 170" }, { label: "Opus", usd: total * 0.7, detail: "in 134 + 10,214 cached · out 769" },
+      { label: "ElevenLabs TTS (eleven_v4_turbo)", usd: total * 0.24, detail: "ack 40 · filler 41 · answer 179 chars" }, { label: "Scribe STT", usd: total * 0.01, detail: "2.2 s" }]
+    : [{ label: "Haiku router", usd: total * 0.3, detail: "in 312 + 2,227 cached · out 120" }, { label: "ElevenLabs TTS (eleven_v4_turbo)", usd: total * 0.68, detail: "answer 45 chars" }, { label: "Scribe STT", usd: total * 0.02, detail: "1.4 s" }];
   const metrics = (ttfa: number, tta: number | null, opusTotal: number | null) =>
     ({ ttfa, tta, opusTotal, stt: null, llmFirst: null, toolCall: null, opusFirst: null, opusSpoken: null, ttsFirst: null });
   const sample = (label: string) =>
@@ -882,11 +913,13 @@ function renderDemo(): void {
     "Sure, that'll take a couple of minutes. I'll work on it in the background and tell you when it's ready.",
     { intent: "task", estimateS: 95, background: true });
   renderMeta(t1, { metrics: metrics(612, 1840, null), costUsd: 0.0021 });
+  renderCost(t1, { costUsd: 0.0021, costItems: demoCost(0.0021) }, t1.root.dataset.turn ?? "");
 
   const t2 = turnOf("demo-2", "hybrid", "Can you make this bigger?",
     "Do you mean the hero image or the headline above it?", { intent: "clarify", estimateS: null, background: false });
   renderChips(t2, [{ word: "this", wordStart: 1.1, algorithm: SHOWN_ALGORITHM, sample: sample("Hero image") }], "hybrid");
   renderMeta(t2, { metrics: metrics(488, 488, null), costUsd: 0.0009 });
+  renderCost(t2, { costUsd: 0.0009, costItems: demoCost(0.0009) }, t2.root.dataset.turn ?? "");
 
   const t3 = turnOf("demo-3", "pipeline", "Why is the checkout button greyed out?",
     "Let me check that. Looking at the form state now… Got it: the button stays disabled until the email field validates, and the address there is missing its domain.",
@@ -894,6 +927,7 @@ function renderDemo(): void {
   t3.detail.hidden = false;
   t3.detailPre.textContent = "The submit button binds `disabled` to `!form.valid`.\n\nThe email input has value “dana@” which fails the pattern check, so `form.valid` is false. Fixing the address (or relaxing the pattern) enables the button.";
   renderMeta(t3, { metrics: metrics(540, 7320, 6900), costUsd: 0.0188 });
+  renderCost(t3, { costUsd: 0.0188, costItems: demoCost(0.0188) }, t3.root.dataset.turn ?? "");
 
   const t4 = turnOf("demo-4", "realtime", "Summarise the pricing table for me.",
     "The pricing table has three tiers. The Starter plan is", { intent: "question", estimateS: 12, background: false });
@@ -921,6 +955,7 @@ function renderDemo(): void {
   ];
   renderChips(t6, roTargets(), "pipeline", roRests(), 0);
   renderMeta(t6, { metrics: metrics(530, 2210, null), costUsd: 0.0016 });
+  renderCost(t6, { costUsd: 0.0016, costItems: demoCost(0.0016) }, t6.root.dataset.turn ?? "");
 
   // English, no pointing word: only a cursor rest (the pointer stayed on the image the whole time).
   const t7 = turnOf("demo-7", "hybrid", "", "Sure, I'll make the Embeds card span the full width.", { intent: "task", estimateS: 4, background: false });
@@ -931,6 +966,7 @@ function renderDemo(): void {
   renderUserText(t7, "Make it a bit wider.", enWords, "en");
   renderChips(t7, [], "hybrid", [{ ref: 1, tStart: -200, tEnd: 1300, sample: sample("Card: Embeds"), wordIndex: 1, whole: true }], 0);
   renderMeta(t7, { metrics: metrics(470, 470, null), costUsd: 0.0007 });
+  renderCost(t7, { costUsd: 0.0007, costItems: demoCost(0.0007) }, t7.root.dataset.turn ?? "");
 
   demoOverlay = () => { lastTargets = roTargets(); lastRests = roRests(); renderChips(t6, lastTargets, "pipeline", lastRests, 0); drawOverlay(); };
 

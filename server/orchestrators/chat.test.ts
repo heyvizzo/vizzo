@@ -80,7 +80,11 @@ describe("pipeline (B) in chat mode", () => {
     expect(r.opusText).toBe("");
     await until(() => s.channelEvents.some((e) => e.type === "notice" && e.state === "end"));
     const jobs = s.channelEvents.filter((e) => e.type === "job").map((e) => (e as Extract<ServerMsg, { type: "job" }>).job);
-    expect(jobs.map((j) => j.state)).toEqual(["running", "done"]);
+    // running → done (Opus finished, with its cost) → done again once the spoken result's cost is added
+    expect(jobs.map((j) => j.state)).toEqual(["running", "done", "done"]);
+    expect(jobs[1]!.costItems!.map((c) => c.label)).toEqual(["Opus (background task)"]);
+    expect(jobs[2]!.costItems!.map((c) => c.label)).toEqual(["Opus (background task)", expect.stringMatching(/^ElevenLabs TTS \(spoken result/)]);
+    expect(jobs[2]!.costUsd).toBeCloseTo(jobs[2]!.costItems!.reduce((n, c) => n + c.usd, 0), 10);
     expect(jobs[1]!.spoken).toBeTruthy();
     expect(jobs[1]!.turnId).toBe("t1");
     expect(s.noticeBytes()).toBeGreaterThan(0);

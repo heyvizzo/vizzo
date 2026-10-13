@@ -116,3 +116,13 @@ details.pcall.err .pbadge { color: var(--err); }
 details.presp > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: #9fd8b5; }
 details.presp.err > summary { color: var(--err); }
 details.presp pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.4 ui-monospace, monospace; color: #cfd6e4; max-height: 360px; overflow: auto; background: #0f1218; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+
+/* Cost per turn */
+.costbox { align-self: stretch; }
+details.cost > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: #e5c07b; }
+table.ctable { width: 100%; border-collapse: collapse; margin-top: 4px; font: 11px ui-monospace, monospace; }
+table.ctable td, table.ctable th { padding: 2px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+table.ctable .cdetail { color: var(--muted); }
+table.ctable .cusd { text-align: right; white-space: nowrap; color: #e5c07b; }
+table.ctable tr.cgroup th { color: var(--muted); font-weight: 600; padding-top: 6px; }
+table.ctable tr.ctotal td { font-weight: 700; border-bottom: 0; }

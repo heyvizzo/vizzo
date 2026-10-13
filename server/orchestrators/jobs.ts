@@ -4,7 +4,8 @@
 // connection's Realtime session; B, or if that session isn't available: ElevenLabs).
 import { randomUUID } from "node:crypto";
 import type { RunConfig } from "../../shared/config.ts";
-import type { Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
+import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
+import { opusCost, PRICES, realtimeResponseCost } from "../cost.ts";
 import { getConversation, type ChatTurn } from "../conversation.ts";
 import { idleRealtime } from "./shared.ts";
 import { tracer } from "./trace.ts";
@@ -73,13 +74,26 @@ export function startJob(
     (r) => {
       if (reg.cancelled) return;
       text = r.text || text;
-      Object.assign(job, { state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0) });
+      const opusUsd = opusCost(r.usage, false);
+      Object.assign(job, {
+        state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0),
+        costUsd: opusUsd, costItems: [{ label: "Opus (background task)", usd: opusUsd }],
+      });
       channel.send({ type: "job", job: { ...job } });
       getConversation(conn).push({
         turnId: job.jobId, approach: job.approach,
         user: `(Background task finished: ${spec.question})`, assistant: job.spoken!, detail: text,
       });
-      reg.notices = reg.notices.then(() => announce(conn, channel, deps, spec.config, job, reg)).catch((e) => console.warn("[jobs] notice failed", e));
+      reg.notices = reg.notices
+        .then(() => announce(conn, channel, deps, spec.config, job, reg))
+        .then((item) => {
+          // Speaking the result costs too: add it once the notice has played.
+          if (!item || reg.cancelled) return;
+          job.costItems = [...(job.costItems ?? []), item];
+          job.costUsd = (job.costUsd ?? 0) + item.usd;
+          channel.send({ type: "job", job: { ...job } });
+        })
+        .catch((e) => console.warn("[jobs] notice failed", e));
     },
     (e) => {
       if (reg.cancelled) return;
@@ -93,20 +107,23 @@ export function startJob(
 /** Speak a finished job's result once the connection is idle; retried if a turn starts before any audio. */
 async function announce(
   conn: ConnectionCache, channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo, reg: JobRegistry,
-): Promise<void> {
+): Promise<CostItem | null> {
+  let cost: CostItem | null = null;
   for (let attempt = 0; attempt < 5; attempt++) {
     await channel.whenIdle();
-    if (reg.cancelled) return;
-    const outcome = await speakOnce(conn, channel, deps, config, job);
-    if (outcome !== "preempted") return;
+    if (reg.cancelled) return cost;
+    const { outcome, item } = await speakOnce(conn, channel, deps, config, job);
+    if (item) cost = cost ? { ...item, usd: cost.usd + item.usd } : item;
+    if (outcome !== "preempted") return cost;
   }
+  return cost;
 }
 
 type Outcome = "spoken" | "interrupted" | "preempted";
 
 async function speakOnce(
   conn: ConnectionCache, channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo,
-): Promise<Outcome> {
+): Promise<{ outcome: Outcome; item: CostItem | null }> {
   const text = job.spoken!;
   let aborted = false;
   let started = false;
@@ -125,7 +142,11 @@ async function speakOnce(
   };
 
   const rt = config.approach !== "pipeline" ? idleRealtime(conn) : null;
-  if (rt && rt.attach({ onAudio: emit, onText: () => {}, onToolCall: () => {}, onError: () => {} })) {
+  let noticeUsage: unknown = null;
+  const onResponseDone = (r: { label: string; response: unknown }) => {
+    if (r.label === "notice") noticeUsage = (r.response as { usage?: unknown }).usage ?? null;
+  };
+  if (rt && rt.attach({ onAudio: emit, onText: () => {}, onToolCall: () => {}, onError: () => {}, onResponseDone })) {
     abort = () => rt.session.cancelResponse();
     channel.setNoticeAbort(() => { aborted = true; abort!(); });
     try {
@@ -137,11 +158,12 @@ async function speakOnce(
       rt.attach(null);
       finish();
     }
-    return outcome();
+    const usd = noticeUsage ? realtimeResponseCost(noticeUsage, config.realtimeModel) : 0;
+    return { outcome: outcome(), item: usd ? { label: `OpenAI Realtime (spoken result, ${config.realtimeModel})`, usd } : null };
   }
 
   const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
-  if (!voiceId) return "spoken";
+  if (!voiceId) return { outcome: "spoken", item: null };
   const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer" });
   abort = () => tts.close();
   tts.onAudio(emit);
@@ -153,5 +175,6 @@ async function speakOnce(
   } finally {
     finish();
   }
-  return outcome();
+  const chars = tts.chars;
+  return { outcome: outcome(), item: chars ? { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` } : null };
 }

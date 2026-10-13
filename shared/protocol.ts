@@ -30,6 +30,9 @@ export interface JobInfo {
   detail?: string;
   error?: string;
   elapsedMs?: number;
+  /** What the job cost (its Opus call, then + speaking the result once the notice has played). */
+  costUsd?: number;
+  costItems?: CostItem[];
 }
 
 /** Seconds from turn audio start. */
@@ -115,6 +118,16 @@ export interface LlmResponse {
   /** The final message / response.done payload as received. */
   raw?: unknown;
   error?: string;
+  /** What this call cost, from its usage and the prices in docs/API-NOTES.md. */
+  costUsd?: number;
+}
+
+/** One line of a turn's (or background job's) cost. */
+export interface CostItem {
+  label: string;
+  usd: number;
+  /** e.g. "ack 34 · filler 41 · answer 180 chars" */
+  detail?: string;
 }
 
 /** Everything the user did on the page during a turn (ClientMsg turn.context). */
@@ -204,6 +217,8 @@ export interface Usage {
   anthropic?: unknown;
   openai?: unknown;
   elevenChars?: number;
+  /** ElevenLabs characters per spoken segment, in order (for the cost breakdown). */
+  elevenSegments?: { label: string; chars: number }[];
   scribeSeconds?: number;
 }
 
@@ -223,6 +238,8 @@ export interface RunRecord {
   opusText: string;
   usage: Usage;
   costUsd: number;
+  /** costUsd itemized: each model call kind, TTS and STT. */
+  costItems?: CostItem[];
   clock: { rttMs: number; offsetMs: number };
   markMeta?: Partial<Record<MarkName, Record<string, unknown>>>;
   error?: string;

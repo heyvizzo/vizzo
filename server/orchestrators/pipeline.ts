@@ -108,6 +108,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           } }
           : {}),
         elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0),
+        elevenSegments: ttsStreams.filter((t) => t.chars > 0).map((t) => ({ label: t.label ?? "tts", chars: t.chars })),
         scribeSeconds: scribe.seconds,
       }),
     });

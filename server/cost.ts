@@ -12,7 +12,7 @@
 //   - Realtime: the single "cached" price applies to cached text and cached audio tokens alike.
 //   - Haiku's >100K-token prompt tier is chosen from input + cache read + cache write tokens.
 import type { RunConfig } from "../shared/config.ts";
-import type { Usage } from "../shared/protocol.ts";
+import type { CostItem, Usage } from "../shared/protocol.ts";
 
 const PER_M = 1e-6;
 
@@ -82,4 +82,64 @@ export function costBreakdown(config: RunConfig, usage: Usage): CostBreakdown {
 
 export function computeCost(config: RunConfig, usage: Usage): number {
   return costBreakdown(config, usage).total;
+}
+
+// ── Per call and itemized (debug view: cost of each prompt + response, and of a whole turn) ──────
+
+/** One Realtime `response.done` usage object (OpenAI's raw shape). */
+export function realtimeResponseCost(raw: unknown, model: RunConfig["realtimeModel"]): number {
+  const u = obj(raw);
+  const inD = obj(u.input_token_details), outD = obj(u.output_token_details), cachedD = obj(inD.cached_tokens_details);
+  const cached = num(inD.cached_tokens);
+  const cachedText = num(cachedD.text_tokens) || (cached && !num(cachedD.audio_tokens) ? cached : 0);
+  const cachedAudio = num(cachedD.audio_tokens);
+  const totals = {
+    inputText: num(inD.text_tokens), inputAudio: num(inD.audio_tokens), cachedText, cachedAudio,
+    outputText: num(outD.text_tokens), outputAudio: num(outD.audio_tokens),
+  };
+  return realtimeCost({ totals }, model);
+}
+
+/** Cost of one model call from its usage. */
+export function callCost(target: "router" | "fillers" | "opus" | "realtime", usage: unknown, realtimeModel: RunConfig["realtimeModel"]): number {
+  if (!usage) return 0;
+  if (target === "opus") return opusCost(usage, false);
+  if (target === "realtime") return realtimeResponseCost(usage, realtimeModel);
+  return haikuCost(usage);
+}
+
+const fmtSecs = (s: number) => `${s.toFixed(1)} s`;
+
+/** A turn's cost, itemized (sums to computeCost). Zero items are left out. */
+export function costItems(config: RunConfig, usage: Usage): CostItem[] {
+  const a = obj(usage.anthropic);
+  const items: CostItem[] = [];
+  const tokens = (u: unknown) => {
+    const x = obj(u);
+    const read = num(x.cache_read_input_tokens), write = num(x.cache_creation_input_tokens);
+    return `in ${num(x.input_tokens)}${read ? ` + ${read} cached` : ""}${write ? ` + ${write} cache write` : ""} · out ${num(x.output_tokens)}`;
+  };
+  if (a.haiku) items.push({ label: "Haiku router", usd: haikuCost(a.haiku), detail: tokens(a.haiku) });
+  if (a.fillers) items.push({ label: "Haiku progress lines", usd: haikuCost(a.fillers), detail: tokens(a.fillers) });
+  if (a.opus) items.push({ label: "Opus", usd: opusCost(a.opus, config.opusFast), detail: tokens(a.opus) });
+  if (usage.openai) {
+    const u = obj(usage.openai);
+    const n = Array.isArray(u.responses) ? u.responses.length : 0;
+    const t = obj(u.totals);
+    items.push({
+      label: `OpenAI Realtime (${config.realtimeModel})`, usd: realtimeCost(usage.openai, config.realtimeModel),
+      detail: `${n} response${n === 1 ? "" : "s"} · audio in ${num(t.inputAudio)} · out ${num(t.outputAudio)} tokens`,
+    });
+  }
+  const chars = num(usage.elevenChars);
+  if (chars) {
+    const segs = (usage.elevenSegments ?? []).filter((s) => s.chars > 0);
+    items.push({
+      label: `ElevenLabs TTS (${config.ttsModel})`, usd: chars * PRICES.elevenPerChar,
+      detail: segs.length ? `${segs.map((s) => `${s.label} ${s.chars}`).join(" · ")} chars` : `${chars} chars`,
+    });
+  }
+  const secs = num(usage.scribeSeconds);
+  if (secs) items.push({ label: "Scribe STT", usd: secs * PRICES.scribePerSecond, detail: fmtSecs(secs) });
+  return items.filter((i) => i.usd > 0);
 }

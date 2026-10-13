@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type RunConfig } from "../shared/config.ts";
-import { computeCost, costBreakdown, haikuCost, opusCost, realtimeCost } from "./cost.ts";
+import { callCost, computeCost, costBreakdown, costItems, haikuCost, opusCost, realtimeCost, realtimeResponseCost } from "./cost.ts";
 
 const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...DEFAULT_CONFIG, ...o });
 
@@ -61,5 +61,32 @@ describe("progress lines", () => {
     const b = costBreakdown(DEFAULT_CONFIG, { anthropic: { fillers } });
     // 346 × $0.10 + 809 × $0.125 (cache write) + 85 × $0.50, per million
     expect(b.haiku).toBeCloseTo((346 * 0.1 + 809 * 0.125 + 85 * 0.5) / 1e6, 10);
+  });
+});
+
+describe("itemized and per-call costs", () => {
+  it("costItems sum to computeCost and name each part", () => {
+    const usage = {
+      anthropic: {
+        haiku: { input_tokens: 300, output_tokens: 170, cache_read_input_tokens: 2200 },
+        fillers: { input_tokens: 346, output_tokens: 85, cache_creation_input_tokens: 809 },
+        opus: { input_tokens: 134, output_tokens: 769, cache_read_input_tokens: 10_214, speed: "standard" },
+      },
+      elevenChars: 260, elevenSegments: [{ label: "ack", chars: 40 }, { label: "filler", chars: 41 }, { label: "answer", chars: 179 }],
+      scribeSeconds: 2.2,
+    };
+    const items = costItems(DEFAULT_CONFIG, usage);
+    expect(items.map((i) => i.label)).toEqual(["Haiku router", "Haiku progress lines", "Opus", "ElevenLabs TTS (eleven_v4_turbo)", "Scribe STT"]);
+    expect(items.reduce((n, i) => n + i.usd, 0)).toBeCloseTo(computeCost(DEFAULT_CONFIG, usage), 12);
+    expect(items[3]!.detail).toBe("ack 40 · filler 41 · answer 179 chars");
+  });
+
+  it("prices one raw Realtime response (cached text, audio in/out)", () => {
+    const raw = { input_tokens: 1336, output_tokens: 159, input_token_details: { text_tokens: 1324, audio_tokens: 12, cached_tokens: 896, cached_tokens_details: { text_tokens: 896, audio_tokens: 0 } }, output_token_details: { text_tokens: 60, audio_tokens: 99 } };
+    // gpt-realtime-2.1: text in $4, audio in $32, cached $0.40, text out $24, audio out $64 per M
+    const expected = ((1324 - 896) * 4 + 12 * 32 + 896 * 0.4 + 60 * 24 + 99 * 64) / 1e6;
+    expect(realtimeResponseCost(raw, "gpt-realtime-2.1")).toBeCloseTo(expected, 12);
+    expect(callCost("realtime", raw, "gpt-realtime-2.1")).toBeCloseTo(expected, 12);
+    expect(callCost("router", null, "gpt-realtime-2.1")).toBe(0);
   });
 });
