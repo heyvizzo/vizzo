@@ -12,9 +12,12 @@ export interface SttStream {
   /** Push-to-talk release. */
   commit(): void;
   onPartial(cb: (text: string) => void): void;
-  /** Resolves on committed_transcript_with_timestamps. */
+  /** Resolves on committed_transcript_with_timestamps (3 s fallback to plain committed_transcript, empty words). */
   final(): Promise<{ text: string; words: Word[] }>;
+  /** Idempotent. Rejects a still-pending final(). */
   close(): void;
+  /** Audio seconds sent to the vendor so far, for cost. */
+  readonly seconds: number;
 }
 export interface OpenScribeOpts { mark: Mark; keyterms?: string[] }
 export type OpenScribe = (opts: OpenScribeOpts) => Promise<SttStream>;

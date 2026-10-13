@@ -117,7 +117,7 @@ Built by T2, used by the cursor lab (T9) and the latency lab (T8). Signatures ar
 
 ## 4. Server adapter interfaces
 
-The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `RealtimeSession` exposes `usage`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
+The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `SttStream` exposes `seconds` (audio seconds sent, feeds `usage.scribeSeconds`); `RealtimeSession` exposes `usage`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
 
 Orchestrators depend **only** on these interfaces, so each adapter can be built and smoke-tested on its own. Each adapter emits marks through the injected `mark()` function.
 
@@ -129,9 +129,12 @@ interface SttStream {                          // server/adapters/scribe.ts
   commit(): void;                              // push-to-talk release
   onPartial(cb: (text: string) => void): void;
   final(): Promise<{ text: string; words: Word[] }>;  // resolves on committed_transcript_with_timestamps
-  close(): void;
+  close(): void;                               // idempotent
+  readonly seconds: number;                    // audio seconds sent, for cost (T3 addition)
 }
 function openScribe(opts: { mark: Mark; keyterms?: string[] }): Promise<SttStream>;
+// T3: resolves when the socket is OPEN; audio/commit pushed before `session_started` is buffered and flushed then.
+// stt.final meta: { timestamped, words, commitToFinalMs, plainToTimestampedMs?, fallback?, error? }.
 
 interface TtsStream {                          // server/adapters/elevenTts.ts
   pushText(delta: string): void;               // streamed text in
