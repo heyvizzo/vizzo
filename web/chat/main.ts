@@ -8,7 +8,7 @@
 import "../cursor/cursor.css";
 import "./chat.css";
 import { connectWithStatus } from "../common.ts";
-import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type SpeechLanguage, type TtsModel } from "../../shared/config.ts";
+import { DEFAULT_CONFIG, type Approach, type RealtimeModel, type RouterMode, type RunConfig, type ClaudeBackend, type SpeechLanguage, type TtsModel } from "../../shared/config.ts";
 import type { CostItem, CursorRest, LlmPrompt, LlmResponse, PageEvents, JobInfo, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
 import { startCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
@@ -48,14 +48,16 @@ const labelOf = (a: Approach): string => APPROACHES.find((x) => x.id === a)?.lab
 
 interface Settings {
   approach: ChatApproach; realtimeModel: RealtimeModel; routerMode: RouterMode; ttsModel: TtsModel; longTaskSeconds: number; language: SpeechLanguage;
+  claudeBackend: ClaudeBackend;
 }
 const settings: Settings = {
   approach: "pipeline", realtimeModel: DEFAULT_CONFIG.realtimeModel, routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, longTaskSeconds: 20,
-  language: "auto",
+  language: "auto", claudeBackend: "cli",
 };
 try { Object.assign(settings, JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}")); } catch { /* storage unavailable */ }
 if (!LONG_TASK_CHOICES.includes(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
 if (!LANGUAGES.some((l) => l.id === settings.language)) settings.language = "auto";
+if (settings.claudeBackend !== "cli" && settings.claudeBackend !== "api") settings.claudeBackend = "cli";
 const saveSettings = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch { /* ignore */ } };
 
 // ── layout ─────────────────────────────────────────
@@ -82,6 +84,9 @@ app.innerHTML = `
       </select></label>
       <label title="Spoken language: Scribe transcription and the pointing words (“this”, “ăsta”…). Auto detects English or Romanian.">Language <select id="language">
         ${LANGUAGES.map((l) => `<option value="${l.id}">${l.label}</option>`).join("")}
+      </select></label>
+      <label data-for="pipeline realtime hybrid" title="How Haiku and Opus are called: pre-spawned claude -p agents, or the HTTP API (OpenRouter)">Claude <select id="claude-backend">
+        <option value="cli">claude -p agents</option><option value="api">API (OpenRouter)</option>
       </select></label>
     </div>
     <div class="head-row opts">
@@ -138,6 +143,8 @@ router.onchange = () => { settings.routerMode = router.value as RouterMode; save
 tts.onchange = () => { settings.ttsModel = tts.value as TtsModel; saveSettings(); };
 longTask.onchange = () => { settings.longTaskSeconds = Number(longTask.value); saveSettings(); };
 language.onchange = () => { settings.language = language.value as SpeechLanguage; saveSettings(); };
+const claudeBackend = $<HTMLSelectElement>("claude-backend");
+claudeBackend.onchange = () => { settings.claudeBackend = claudeBackend.value as ClaudeBackend; saveSettings(); };
 
 function renderSettings(): void {
   for (const [id, b] of segButtons) b.setAttribute("aria-pressed", String(id === settings.approach));
@@ -147,6 +154,7 @@ function renderSettings(): void {
   tts.value = settings.ttsModel;
   longTask.value = String(settings.longTaskSeconds);
   language.value = settings.language;
+  claudeBackend.value = settings.claudeBackend;
   for (const el of document.querySelectorAll<HTMLElement>(".opts [data-for]")) {
     el.hidden = !el.dataset.for!.split(" ").includes(settings.approach);
   }
@@ -166,6 +174,7 @@ function config(): RunConfig {
     backgroundLongTasks: true,
     longTaskSeconds: settings.longTaskSeconds,
     language: settings.language,
+    claudeBackend: settings.claudeBackend,
   };
 }
 

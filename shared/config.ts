@@ -2,6 +2,8 @@ export type Approach = "realtime" | "pipeline" | "hybrid" | "cursor-only";
 export type RealtimeModel = "gpt-realtime-2.1" | "gpt-realtime-2.1-mini";
 export type TtsModel = "eleven_v4_turbo" | "eleven_flash_v2_5";
 export type RouterMode = "forced" | "auto";
+/** How Haiku and Opus are called: pre-spawned `claude -p` agents, or the HTTP API (OpenRouter / Anthropic). */
+export type ClaudeBackend = "cli" | "api";
 /** Spoken language: "auto" lets Scribe detect it (en or ro expected); "en"/"ro" pin it. */
 export type SpeechLanguage = "auto" | "en" | "ro";
 
@@ -28,6 +30,8 @@ export interface RunConfig {
   longTaskSeconds: number;
   /** Speech language for Scribe and the pointing word lists (benchmarks stay pinned to "en"). */
   language: SpeechLanguage;
+  /** Claude transport for the router, progress lines and Opus. */
+  claudeBackend: ClaudeBackend;
 }
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -45,6 +49,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   backgroundLongTasks: false,
   longTaskSeconds: 20,
   language: "en",
+  claudeBackend: "cli",
 };
 
 export const MODELS = {

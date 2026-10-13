@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 import { Session } from "./session.ts";
 import { claudeProvider, hasClaudeCredentials } from "./adapters/claude.ts";
+import { agentStatus } from "./adapters/claudeCli.ts";
 import { loadRuns } from "./results.ts";
 import type { Orchestrator } from "./orchestrators/types.ts";
 import type { RunConfig } from "../shared/config.ts";
@@ -46,6 +47,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
         ok: true,
         keys: {
           claude: hasClaudeCredentials(),
+          claudeAgents: agentStatus(),
           claudeProvider: claudeProvider(),
           openai: !!process.env.OPENAI_API_KEY,
           elevenlabs: !!process.env.ELEVENLABS_API_KEY,
@@ -104,6 +106,12 @@ async function fakeVendorOpts(): Promise<StartServerOpts> {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const opts = process.env.FAKE_VENDORS === "1" ? await fakeVendorOpts() : {};
+  // `npm run dev`: spawn the pre-warmed claude -p agents (router, progress lines, Opus). CLAUDE_AGENTS=0 skips.
+  if (process.env.FAKE_VENDORS !== "1" && process.env.CLAUDE_AGENTS !== "0") {
+    const { startClaudeAgents } = await import("./adapters/claudeCli.ts");
+    await import("./adapters/claude.ts"); // registers the agents' prompts/models
+    startClaudeAgents();
+  }
   startServer(Number(process.env.PORT ?? 8787), opts).catch((e) => {
     console.error("[server] failed to start", e);
     process.exit(1);

@@ -10,6 +10,7 @@ import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent } from
 import { kindFor, parseEstimate, RouteInputStream, SpokenLineParser, type RouteFields } from "./claudeParse.ts";
 import type { GenerateFillers, RouteDecision, RouteWithHaiku, SolveWithOpus } from "./types.ts";
 import { trimDetail, type ChatTurn } from "../conversation.ts";
+import { CLI_ARGS_SUMMARY, cliRequest, cliSpec, registerCliSpecs, type CliResult } from "./claudeCli.ts";
 
 // ── Client injection (tests swap in a mock) ────────────────────────────────
 
@@ -78,6 +79,66 @@ export const languageName = (code: string): string => LANGUAGE_NAMES[code] ?? co
 /** A per-turn instruction line when the user didn't speak English ("" otherwise). */
 export function languageLine(language: string | undefined, what: string): string {
   return language ? `The user spoke ${languageName(language)}: write ${what} in ${languageName(language)}.` : "";
+}
+
+// ── claude -p transport (pre-spawned agents, see claudeCli.ts) ───────────────────────────────────
+
+/** The router's output format through the CLI (no forced tool call there): the tool's JSON, as text. */
+const CLI_ROUTER_FORMAT = `
+
+## Output format
+Reply with ONLY one JSON object (no code fences, no other text), keys in exactly this order:
+{"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "say": "<what to speak now>", "question": "<the delegated request, or empty>"}
+"intent" and "estimate_seconds" come first because the reply is streamed and acted on as it arrives.`;
+
+const CLI_FILLERS_FORMAT = `
+
+## Output format
+Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…", "…", "…"]}`;
+
+registerCliSpecs(() => {
+  const p = prompts();
+  return {
+    router: { model: MODELS.haiku, effort: "low", system: () => routerSystem() + CLI_ROUTER_FORMAT },
+    fillers: { model: MODELS.haiku, effort: "low", system: () => p.fillers + CLI_FILLERS_FORMAT },
+    opus: { model: MODELS.opus, effort: "medium", system: () => `${p.opus}\n\n${p.fixture}` },
+  };
+});
+
+/** The API request's messages as one user message: earlier turns as a transcript, then this turn. */
+export function cliUserMessage(params: AnyParams): string {
+  const msgs = params.messages.map((m) => ({ role: m.role, text: blockText(m.content) }));
+  const last = msgs.pop();
+  if (!msgs.length) return last?.text ?? "";
+  const history = msgs.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n\n");
+  return `Conversation so far (oldest first):\n\n${history}\n\n---\n\nThis turn:\n${last?.text ?? ""}`;
+}
+
+/** The first {...} object in a text (strips code fences / stray prose around it). */
+export function extractJsonObject(text: string): string | null {
+  const i = text.indexOf("{");
+  const j = text.lastIndexOf("}");
+  return i >= 0 && j > i ? text.slice(i, j + 1) : null;
+}
+
+/** What a claude -p agent was sent, for the prompt inspector. */
+export function cliPromptInfo(target: "router" | "fillers" | "opus", params: AnyParams): LlmPrompt {
+  const spec = cliSpec(target);
+  const label = target === "router" ? "router.md + JSON output format" : target === "fillers" ? "fillers.md + JSON output format" : "opus.md + fixture codebase";
+  return {
+    target, model: `${spec.model} via claude -p`,
+    system: [{ label: `${label} (--system-prompt)`, text: spec.system() }],
+    messages: [{ role: "user", text: cliUserMessage(params), label: "this turn (one stream-json user message; earlier turns flattened in)" }],
+    settings: { transport: "pre-spawned claude -p agent", effort: spec.effort, args: CLI_ARGS_SUMMARY },
+  };
+}
+
+export function cliResponseInfo(target: LlmPrompt["target"], t0: number, r: CliResult): LlmResponse {
+  return {
+    target, model: r.model, stopReason: r.stopReason, usage: r.usage,
+    durationMs: Math.round(performance.now() - t0),
+    raw: { ...r.raw, warmAgent: r.warm, cliCostUsd: r.cliCostUsd, cliDurationMs: r.durationMs, cliDurationApiMs: r.durationApiMs },
+  };
 }
 
 // ── Provider: OpenRouter (Anthropic-compatible Messages API) or Anthropic directly ──
@@ -316,10 +377,11 @@ export function buildRouterParams(
 }
 
 export const routeWithHaiku: RouteWithHaiku = async ({
-  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse,
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, backend,
 }) => {
   const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language });
-  onPrompt?.(promptInfo("router", params as AnyParams, ["router.md"]));
+  const cli = backend === "cli";
+  onPrompt?.(cli ? cliPromptInfo("router", params as AnyParams) : promptInfo("router", params as AnyParams, ["router.md"]));
   const route = new RouteInputStream(
     {
       onDecision: (d) => onDecision?.(d),
@@ -334,31 +396,61 @@ export const routeWithHaiku: RouteWithHaiku = async ({
   let json = "";
   const first = (): void => { if (!firstToken) { firstToken = true; mark("llm.firstToken"); } };
 
-  mark("llm.request", { model: params.model, mode });
+  mark("llm.request", { model: params.model, mode, ...(cli ? { backend: "claude -p" } : {}) });
   const t0 = performance.now();
-  const stream = getClient().messages.stream(params);
   let streamError: unknown = null;
   let final: Anthropic.Message | null = null;
-  try {
-    for await (const ev of stream) {
-      if (ev.type === "content_block_start" && ev.content_block.type === "tool_use" && toolIndex < 0) {
-        toolIndex = ev.index;
-        mark("llm.toolCall", { name: ev.content_block.name });
-      } else if (ev.type === "content_block_delta" && ev.delta.type === "input_json_delta" && ev.index === toolIndex) {
-        first();
-        json += ev.delta.partial_json;
-        route.feed(ev.delta.partial_json);
-      }
-      // Text blocks can't occur with a forced tool choice; ignore them if they ever do.
+  if (cli) {
+    // claude -p: the same JSON, written as text (no forced tool call through the CLI). Feed it from the first "{".
+    let started = false;
+    try {
+      const res = await cliRequest("router", cliUserMessage(params as AnyParams), {
+        onText: (d) => {
+          first();
+          let chunk = d;
+          if (!started) {
+            const i = chunk.indexOf("{");
+            if (i < 0) return;
+            started = true;
+            chunk = chunk.slice(i);
+            toolIndex = 0;
+            mark("llm.toolCall", { name: "route (json text)" });
+          }
+          json += chunk;
+          route.feed(chunk);
+        },
+      });
+      json = extractJsonObject(json) ?? json;
+      final = { model: res.model ?? params.model, stop_reason: res.stopReason ?? "end_turn", usage: res.usage, content: [] } as unknown as Anthropic.Message;
+      onResponse?.(cliResponseInfo("router", t0, res));
+    } catch (err) {
+      onResponse?.(responseInfo("router", t0, null, err));
+      if (!started) throw err;
+      streamError = err;
     }
-    final = await stream.finalMessage();
-    onResponse?.(responseInfo("router", t0, final));
-  } catch (err) {
-    onResponse?.(responseInfo("router", t0, null, err));
-    // Typed API errors (auth, rate limit, 5xx…) propagate. Anything else here is the SDK failing
-    // to parse eagerly-streamed tool JSON; we handle that below like an invalid input.
-    if (err instanceof Anthropic.APIError || toolIndex < 0) throw err;
-    streamError = err;
+  } else {
+    const stream = getClient().messages.stream(params);
+    try {
+      for await (const ev of stream) {
+        if (ev.type === "content_block_start" && ev.content_block.type === "tool_use" && toolIndex < 0) {
+          toolIndex = ev.index;
+          mark("llm.toolCall", { name: ev.content_block.name });
+        } else if (ev.type === "content_block_delta" && ev.delta.type === "input_json_delta" && ev.index === toolIndex) {
+          first();
+          json += ev.delta.partial_json;
+          route.feed(ev.delta.partial_json);
+        }
+        // Text blocks can't occur with a forced tool choice; ignore them if they ever do.
+      }
+      final = await stream.finalMessage();
+      onResponse?.(responseInfo("router", t0, final));
+    } catch (err) {
+      onResponse?.(responseInfo("router", t0, null, err));
+      // Typed API errors (auth, rate limit, 5xx…) propagate. Anything else here is the SDK failing
+      // to parse eagerly-streamed tool JSON; we handle that below like an invalid input.
+      if (err instanceof Anthropic.APIError || toolIndex < 0) throw err;
+      streamError = err;
+    }
   }
 
   if (final?.stop_reason === "refusal") {
@@ -452,10 +544,20 @@ export function buildFillersParams(
 
 const MAX_FILLERS = 3;
 
-export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, onPrompt, onResponse }) => {
+export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, onPrompt, onResponse, backend }) => {
   const t0 = performance.now();
   try {
     const fp = buildFillersParams(transcript, question, intent, pointing, language);
+    if (backend === "cli") {
+      onPrompt?.(cliPromptInfo("fillers", fp as AnyParams));
+      const res = await cliRequest("fillers", cliUserMessage(fp as AnyParams));
+      onResponse?.(cliResponseInfo("fillers", t0, res));
+      let parsed: { lines?: unknown } | null = null;
+      try { parsed = JSON.parse(extractJsonObject(res.text) ?? "null"); } catch { parsed = null; }
+      const lines = (Array.isArray(parsed?.lines) ? parsed.lines : []).filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean).slice(0, MAX_FILLERS);
+      if (!lines.length) log(`[claude] fillers (claude -p): no usable lines in ${JSON.stringify(res.text.slice(0, 120))}`);
+      return { lines, usage: res.usage ?? null };
+    }
     onPrompt?.(promptInfo("fillers", fp as AnyParams, ["fillers.md"]));
     const msg = await getClient().messages.create(fp);
     onResponse?.(responseInfo("fillers", t0, msg));
@@ -519,13 +621,15 @@ export function buildOpusParams(
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language }) => {
+export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, backend }) => {
   const t0 = performance.now();
+  const cli = backend === "cli";
   let text = "";
   let firstToken = false;
   let spokenReady = false;
   let fastFellBack = false;
   const fallbacks: { from: string; to: string }[] = [];
+  let cliResult: CliResult | null = null;
   const parser = new SpokenLineParser((line, viaPrefix) => {
     spokenReady = true;
     mark("opus.spokenReady", { viaPrefix });
@@ -533,6 +637,22 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
   });
 
   const run = async (useFast: boolean): Promise<Anthropic.Beta.Messages.BetaMessage> => {
+    if (cli) {
+      // claude -p: same system text and messages; fast mode / refusal fallback aren't available through the CLI.
+      const params = buildOpusParams(question, pointing, false, history, intent, pageContext, language);
+      onPrompt?.(cliPromptInfo("opus", params as AnyParams));
+      mark("opus.request", { model: params.model, fast: false, backend: "claude -p", ...(intent === "task" ? { intent } : {}) });
+      const res = await cliRequest("opus", cliUserMessage(params as AnyParams), {
+        onText: (d) => {
+          if (!firstToken) { firstToken = true; mark("opus.firstToken"); }
+          text += d;
+          onDelta(d);
+          parser.feed(d);
+        },
+      });
+      cliResult = res;
+      return { model: res.model ?? params.model, stop_reason: res.stopReason ?? "end_turn", usage: res.usage ?? {}, content: [] } as unknown as Anthropic.Beta.Messages.BetaMessage;
+    }
     const params = buildOpusParams(question, pointing, useFast, history, intent, pageContext, language);
     if (!fastFellBack) onPrompt?.(promptInfo("opus", params as AnyParams, ["opus.md", "fixture codebase"]));
     mark("opus.request", { model: params.model, fast: useFast, ...(intent === "task" ? { intent } : {}), ...(fastFellBack ? { fastFallback: true } : {}) });
@@ -566,14 +686,14 @@ export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, f
     onResponse?.(responseInfo("opus", t0, null, err));
     throw err;
   }
-  onResponse?.(responseInfo("opus", t0, final));
+  onResponse?.(cliResult ? cliResponseInfo("opus", t0, cliResult) : responseInfo("opus", t0, final));
 
   if (!spokenReady) parser.end();
   const usage = final.usage;
   mark("opus.done", {
     stopReason: final.stop_reason,
-    speed: usage.speed ?? null,
-    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+    speed: usage?.speed ?? null,
+    cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0,
     ...(fastFellBack ? { fastFallback: true } : {}),
     ...(fallbacks.length ? { refusalFallbacks: fallbacks } : {}),
   });

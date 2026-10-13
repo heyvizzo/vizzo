@@ -66,7 +66,7 @@ export function startJob(
 
   deps.solveWithOpus({
     mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.opusFast,
-    history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language,
+    history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language, backend: spec.config.claudeBackend,
     ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId)(),
     onSpokenLine: (l) => { spoken = l.trim(); },
     onDelta: (d) => { text += d; },

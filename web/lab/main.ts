@@ -76,6 +76,8 @@ app.innerHTML = `
         <select data-k="routerMode"><option value="forced">forced (tool_choice)</option><option value="auto">auto</option></select></label>
       <label data-for="pipeline">TTS model
         <select data-k="ttsModel"><option>eleven_v4_turbo</option><option>eleven_flash_v2_5</option></select></label>
+      <label data-for="realtime pipeline hybrid">Claude backend
+        <select data-k="claudeBackend"><option value="cli">claude -p agents</option><option value="api">API (OpenRouter)</option></select></label>
       <label data-for="hybrid">Hybrid wait (ms)
         <input data-k="hybridWaitMs" type="number" min="0" max="5000" step="50" /></label>
       <label data-for="pipeline hybrid">Pointing preMs

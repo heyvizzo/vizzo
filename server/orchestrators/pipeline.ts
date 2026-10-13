@@ -161,7 +161,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       };
       const route = await tag("haiku", deps.routeWithHaiku({
         mark: base.mark, transcript: base.markedTranscript(), pointing, mode: cfg.routerMode, history, pageContext, language: base.language,
-        longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined,
+        longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined, backend: cfg.claudeBackend,
         onDecision: (d) => decide(d.intent, d.estimateS),
         ...trace(),
         onSpokenDelta: (d, kind) => {
@@ -200,7 +200,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         const fillers = cfg.fillers && deps.generateFillers
           ? new FillerScheduler(
             base,
-            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, language: base.language, ...trace() })
+            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, language: base.language, backend: cfg.claudeBackend, ...trace() })
               .then((r) => { fillerUsage = r.usage; return r.lines; }),
             async (line) => {
               const t = openTts("filler");
@@ -213,7 +213,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           )
           : null;
         const opus = await tag("opus", deps.solveWithOpus({
-          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext, language: base.language,
+          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext, language: base.language, backend: cfg.claudeBackend,
           onDelta: (d) => base.opus(d),
           ...trace(),
           onSpokenLine: (line) => {

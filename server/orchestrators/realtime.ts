@@ -188,7 +188,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       if (cfg.fillers && deps.generateFillers) {
         fillers = new FillerScheduler(
           base,
-          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, language: base.language, ...trace() })
+          deps.generateFillers({ transcript: base.transcript, question, intent, pointing: base.pointing, language: base.language, backend: cfg.claudeBackend, ...trace() })
             .then((r) => { fillerUsage = r.usage; return r.lines; }),
           async (line) => {
             await s.speak(line, "filler");
@@ -199,7 +199,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
       }
       opusRuns.push(
         deps.solveWithOpus({
-          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, language: base.language, ...trace(),
+          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined, language: base.language, backend: cfg.claudeBackend, ...trace(),
           onSpokenLine: sendResult, onDelta: (d) => base.opus(d),
         })
           .then((r) => {

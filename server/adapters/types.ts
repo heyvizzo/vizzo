@@ -2,7 +2,7 @@
 import type { Mark } from "../clock.ts";
 import type { ChatTurn } from "../conversation.ts";
 import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
-import type { RealtimeModel, RouterMode, TtsModel } from "../../shared/config.ts";
+import type { ClaudeBackend, RealtimeModel, RouterMode, TtsModel } from "../../shared/config.ts";
 
 export type { Mark };
 
@@ -120,6 +120,8 @@ export interface RouteWithHaikuOpts {
   longTaskSeconds?: number;
   /** Called with the exact prompt right before it's sent (debug view). */
   onPrompt?: (p: LlmPrompt) => void;
+  /** Transport: pre-spawned `claude -p` agents ("cli") or the HTTP API ("api", when omitted). RunConfig.claudeBackend defaults to "cli". */
+  backend?: ClaudeBackend;
   /** Called with the raw result (or error) of that request (debug view). */
   onResponse?: (r: LlmResponse) => void;
   /**
@@ -150,6 +152,8 @@ export type GenerateFillers = (opts: {
   onPrompt?: (p: LlmPrompt) => void;
   /** Called with the raw result (or error) of that request (debug view). */
   onResponse?: (r: LlmResponse) => void;
+  /** Transport: pre-spawned `claude -p` agents ("cli") or the HTTP API ("api", when omitted). RunConfig.claudeBackend defaults to "cli". */
+  backend?: ClaudeBackend;
 }) => Promise<{ lines: string[]; usage: unknown }>;
 
 export interface SolveWithOpusOpts {
@@ -164,6 +168,8 @@ export interface SolveWithOpusOpts {
   intent?: Intent;
   /** Called with the exact prompt right before it's sent (debug view). */
   onPrompt?: (p: LlmPrompt) => void;
+  /** Transport: pre-spawned `claude -p` agents ("cli") or the HTTP API ("api", when omitted). RunConfig.claudeBackend defaults to "cli". */
+  backend?: ClaudeBackend;
   /** Called with the raw result (or error) of that request (debug view). */
   onResponse?: (r: LlmResponse) => void;
   /** Fires once the SPOKEN: line is complete. */

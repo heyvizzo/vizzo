@@ -48,6 +48,7 @@ export function variantKey(c: RunConfig): string {
   if (c.approach !== "cursor-only") parts.push(c.opusFast ? "opus:fast" : "opus:std");
   if (!c.prewarm) parts.push("cold");
   if (c.memory) parts.push("chat");
+  if (c.claudeBackend === "api") parts.push("claude:api");
   return parts.join(" · ");
 }
 
