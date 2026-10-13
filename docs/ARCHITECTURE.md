@@ -234,7 +234,7 @@ Algorithms (all of them run, and each is shown in its own color):
 Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders to tune them against labeled sessions.
 
 **Server-side resolution:** in approaches B and C, the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn. The result is formatted into the LLM context as:
-`Pointing: "this" → <button> "Get started" [data-source=web/cursor/demo.html:42]`.
+`Pointing: "this" → <button> "Get started" [data-source=web/cursor/demo/demo.html:27]`.
 
 ## 7. Orchestrator sketches
 
