@@ -102,6 +102,8 @@ export interface RouteWithHaikuOpts {
   mark: Mark; transcript: string; pointing: PointingTarget[]; mode: RouterMode;
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
+  /** Clicks / highlighted text from the turn, preformatted (shared/pointing.ts formatPageContext). */
+  pageContext?: string;
   /**
    * Fires once, as soon as the router's `intent` (and `estimate_seconds`, if given) are parsed, i.e. before
    * `say` streams, so the caller knows whether the spoken text is an ack or the whole reply.
@@ -131,6 +133,8 @@ export interface SolveWithOpusOpts {
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
+  /** Clicks / highlighted text from the turn, preformatted (shared/pointing.ts formatPageContext). */
+  pageContext?: string;
   /** "task": the user wants something changed (Opus describes the change; it can't edit files here). Default question. */
   intent?: Intent;
   /** Fires once the SPOKEN: line is complete. */

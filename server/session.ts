@@ -1,7 +1,7 @@
 // One browser connection = one Session (ARCHITECTURE §1, §3).
 import { randomUUID } from "node:crypto";
 import type { WebSocket, RawData } from "ws";
-import { parseClientMsg, type ClientMsg, type CursorSample, type RunRecord, type Segment, type ServerMsg } from "../shared/protocol.ts";
+import { parseClientMsg, type ClientMsg, type CursorSample, type PageClick, type PageSelection, type RunRecord, type Segment, type ServerMsg } from "../shared/protocol.ts";
 import { deriveMetrics, type MarkName } from "../shared/marks.ts";
 import type { RunConfig } from "../shared/config.ts";
 import { serverToClient } from "../shared/clock.ts";
@@ -42,6 +42,8 @@ interface Turn {
   tAudioStart?: number;
   released: boolean;
   segmentsSent: Set<Segment>;
+  clicks: PageClick[];
+  selection: PageSelection | null;
   segmentsPlayed: Set<Segment>;
   onPlayed?: () => void;
   handlers?: TurnHandlers;
@@ -148,6 +150,12 @@ export class Session {
       case "cursor.samples":
         if (this.turn?.turnId === msg.turnId) this.turn.samples.push(...msg.samples);
         return;
+      case "turn.context":
+        if (this.turn?.turnId === msg.turnId) {
+          this.turn.clicks = msg.clicks.slice(0, 20);
+          this.turn.selection = msg.selection;
+        }
+        return;
       case "turn.audioStart":
         if (this.turn?.turnId === msg.turnId) this.turn.tAudioStart = msg.tAudioStart;
         return;
@@ -202,7 +210,7 @@ export class Session {
     this.turn?.handlers?.cancel();
     const turn: Turn = {
       turnId, config, fixtureId, marks: { press: tPress }, markMeta: {}, samples: [], released: false,
-      segmentsSent: new Set(), segmentsPlayed: new Set(),
+      segmentsSent: new Set(), segmentsPlayed: new Set(), clicks: [], selection: null,
     };
     this.turn = turn;
 
@@ -232,6 +240,7 @@ export class Session {
         sendAudio: (pcm) => this.turn === turn && this.sendAudio(pcm),
         cursorSamples: () => turn.samples,
         tAudioStart: () => turn.tAudioStart,
+        pageEvents: () => ({ clicks: turn.clicks, selection: turn.selection }),
         connection: this.connection,
         channel: this.channel,
       });

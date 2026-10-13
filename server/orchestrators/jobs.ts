@@ -20,6 +20,7 @@ export interface JobSpec {
   estimateS: number | null;
   pointing: PointingTarget[];
   history: ChatTurn[];
+  pageContext?: string;
 }
 
 class JobRegistry {
@@ -62,7 +63,7 @@ export function startJob(
 
   deps.solveWithOpus({
     mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.opusFast,
-    history: spec.history, intent: spec.intent,
+    history: spec.history, intent: spec.intent, pageContext: spec.pageContext,
     onSpokenLine: (l) => { spoken = l.trim(); },
     onDelta: (d) => { text += d; },
   }).then(

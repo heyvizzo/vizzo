@@ -2,7 +2,7 @@ import { isMarkedSegment } from "../../shared/marks.ts";
 // Shared per-turn plumbing for the A/B/C orchestrators: ordered audio segments, text accumulation,
 // socket cleanup, the overall turn timeout and "finish exactly once" semantics.
 import type { MarkName } from "../../shared/marks.ts";
-import { resolvePointing } from "../../shared/pointing.ts";
+import { formatPageContext, resolvePointing } from "../../shared/pointing.ts";
 import type { PointingTarget, Segment, Usage, Word } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
 import type { TurnContext, TurnResult } from "./types.ts";
@@ -153,8 +153,12 @@ export class TurnBase {
     if (!this.finished) this.ctx.send({ type: "stt.partial", turnId: this.ctx.turnId, text });
   }
 
+  /** Words of the final transcript (for aligning clicks). */
+  words: Word[] = [];
+
   sttFinal(text: string, words: Word[]): void {
     this.transcript = text;
+    this.words = words;
     if (!this.finished) this.ctx.send({ type: "stt.final", turnId: this.ctx.turnId, text, words });
   }
 
@@ -168,6 +172,13 @@ export class TurnBase {
     this.mark("pointing.resolved", { targets: targets.length, ...(tAudioStart === undefined ? { noAudioStart: true } : {}), ...meta });
     this.ctx.send({ type: "pointing.resolved", turnId: this.ctx.turnId, targets });
     return targets;
+  }
+
+  /** Clicks / highlighted text from this turn as LLM context lines ("" if none). Call after stt.final for word alignment. */
+  pageContext(words: Word[] = this.words): string {
+    const ev = this.ctx.pageEvents?.();
+    if (!ev || (!ev.clicks.length && !ev.selection)) return "";
+    return formatPageContext(ev.clicks, ev.selection, words, this.ctx.tAudioStart());
   }
 
   onCleanup(fn: (reason: CleanupReason) => void): void {

@@ -151,7 +151,7 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         s.sendToolResult(call.callId, BACKGROUND_TOOL_RESULT, { respond: false });
         pendingTool = Promise.resolve();
         const job = startJob(ctx.connection, ctx.channel!, deps, {
-          turnId: ctx.turnId, config: cfg, intent, question, estimateS, pointing: base.pointing,
+          turnId: ctx.turnId, config: cfg, intent, question, estimateS, pointing: base.pointing, pageContext: base.pageContext() || undefined,
           history: cfg.memory ? getConversation(ctx.connection).slice() : [],
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
@@ -178,7 +178,10 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         );
       }
       opusRuns.push(
-        deps.solveWithOpus({ mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, onSpokenLine: sendResult, onDelta: (d) => base.opus(d) })
+        deps.solveWithOpus({
+          mark: base.mark, question, pointing: base.pointing, fast: cfg.opusFast, intent, pageContext: base.pageContext() || undefined,
+          onSpokenLine: sendResult, onDelta: (d) => base.opus(d),
+        })
           .then((r) => {
             opusUsage = r.usage;
             // Normally onSpokenLine already fired; if not, speak the start of the answer.
@@ -210,6 +213,9 @@ export function createRealtimeLikeOrchestrator(deps: OrchestratorDeps, hybrid: b
         if (finalArrived) context = formatPointingContext(base.pointing) || undefined;
         base.markMeta["llm.request"] = { ...base.markMeta["llm.request"], pointingInjected: !!context, pointingMissed: !finalArrived };
       }
+      // Clicks / highlighted text (no word timestamps needed, so A gets them too).
+      const page = base.pageContext();
+      if (page) context = context ? `${context}\n${page}` : page;
       if (cfg.memory) {
         // Turns this session didn't hear (handled by B, or before a reopen) go in as a text recap.
         const unseen = getConversation(ctx.connection).filter((t) => !l.seenTurns.has(t.turnId));

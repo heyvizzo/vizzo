@@ -132,6 +132,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       if (base.isFinished) return;
       base.sttFinal(fin.text, fin.words);
       const pointing = base.resolvePointing(fin.words);
+      const pageContext = base.pageContext() || undefined;
 
       // The router's intent decides the label: question/task → its speech is the "ack"; clarify/answer → "answer".
       let label: Segment | null = null;
@@ -156,7 +157,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background });
       };
       const route = await tag("haiku", deps.routeWithHaiku({
-        mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history,
+        mark: base.mark, transcript: fin.text, pointing, mode: cfg.routerMode, history, pageContext,
         onDecision: (d) => decide(d.intent, d.estimateS),
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;
@@ -182,7 +183,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         // Long task: the ack said "I'll get back to you"; Opus runs as a job that outlives this turn.
         const job = startJob(ctx.connection, ctx.channel!, deps, {
           turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question,
-          estimateS: delegate.estimateS, pointing, history: history ?? [],
+          estimateS: delegate.estimateS, pointing, history: history ?? [], pageContext,
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
       } else if (delegate) {
@@ -207,7 +208,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           )
           : null;
         const opus = await tag("opus", deps.solveWithOpus({
-          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent,
+          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext,
           onDelta: (d) => base.opus(d),
           onSpokenLine: (line) => {
             if (base.isFinished || spokenLine) return;
