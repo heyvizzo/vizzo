@@ -41,6 +41,11 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       res.writeHead(200, { "content-type": file.type, "cache-control": "no-cache" });
       return res.end(file.data);
     }
+    if (req.method === "GET" && url.pathname === "/api/tts/voices") {
+      const { ttsVoices } = await import("./ttsVoices.ts");
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(ttsVoices()));
+    }
     if (req.method === "GET" && url.pathname === "/api/health") {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({

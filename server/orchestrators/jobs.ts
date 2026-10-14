@@ -168,7 +168,7 @@ async function speakOnce(
 
   const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
   if (!voiceId && config.ttsModel.startsWith("eleven_")) return { outcome: "spoken", item: null };
-  const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer", language: job.language });
+  const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer", language: job.language, ...(config.ttsVoice ? { voice: config.ttsVoice } : {}) });
   abort = () => tts.close();
   tts.onAudio(emit);
   channel.setNoticeAbort(() => { aborted = true; abort!(); });

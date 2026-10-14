@@ -42,6 +42,7 @@ class SegmentTts {
     this.ready = tag("tts", base.track(deps.openTts({
       mark: relabelTtsMark(base.mark, () => this.label ?? hint), voiceId, model: cfg.ttsModel, segment: hint === "answer" ? "answer" : "ack",
       language: () => base.language,
+      ...(cfg.ttsVoice ? { voice: cfg.ttsVoice } : {}),
     }))).then((s) => {
       this.stream = s;
       s.onAudio((pcm) => (this.writer ? this.writer.push(pcm) : this.preAudio.push(pcm)));

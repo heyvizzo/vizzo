@@ -19,7 +19,14 @@ K=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
 P=https://huggingface.co/rhasspy/piper-voices/resolve/main
 fetch "$K/kokoro-v1.0.onnx" .models/kokoro/kokoro-v1.0.onnx
 fetch "$K/voices-v1.0.bin" .models/kokoro/voices-v1.0.bin
-for v in en/en_US/lessac/medium/en_US-lessac-medium ro/ro_RO/mihai/medium/ro_RO-mihai-medium; do
+# Piper: the original two, plus the best-regarded English voices (high = least robotic, ~2x the size).
+PIPER_VOICES="en/en_US/lessac/medium/en_US-lessac-medium ro/ro_RO/mihai/medium/ro_RO-mihai-medium
+  en/en_US/lessac/high/en_US-lessac-high en/en_US/ryan/high/en_US-ryan-high en/en_US/ljspeech/high/en_US-ljspeech-high
+  en/en_GB/cori/high/en_GB-cori-high en/en_US/amy/medium/en_US-amy-medium en/en_US/hfc_female/medium/en_US-hfc_female-medium
+  en/en_US/hfc_male/medium/en_US-hfc_male-medium en/en_GB/alba/medium/en_GB-alba-medium
+  en/en_GB/jenny_dioco/medium/en_GB-jenny_dioco-medium en/en_US/libritts_r/medium/en_US-libritts_r-medium"
+[ "${PIPER_MINIMAL:-0}" = 1 ] && PIPER_VOICES="en/en_US/lessac/medium/en_US-lessac-medium ro/ro_RO/mihai/medium/ro_RO-mihai-medium"
+for v in $PIPER_VOICES; do
   fetch "$P/$v.onnx" ".models/piper/$(basename $v).onnx"
   fetch "$P/$v.onnx.json" ".models/piper/$(basename $v).onnx.json"
 done

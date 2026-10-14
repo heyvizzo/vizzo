@@ -49,10 +49,12 @@ const labelOf = (a: Approach): string => APPROACHES.find((x) => x.id === a)?.lab
 interface Settings {
   approach: ChatApproach; realtimeModel: RealtimeModel; routerMode: RouterMode; ttsModel: TtsModel; longTaskSeconds: number; language: SpeechLanguage;
   claudeBackend: ClaudeBackend;
+  /** Chosen voice per TTS model (Piper / Kokoro / OpenAI). */
+  ttsVoices: Partial<Record<TtsModel, string>>;
 }
 const settings: Settings = {
   approach: "pipeline", realtimeModel: DEFAULT_CONFIG.realtimeModel, routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, longTaskSeconds: 20,
-  language: "auto", claudeBackend: "cli",
+  language: "auto", claudeBackend: "cli", ttsVoices: {},
 };
 try { Object.assign(settings, JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}")); } catch { /* storage unavailable */ }
 if (!LONG_TASK_CHOICES.includes(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
@@ -86,6 +88,7 @@ app.innerHTML = `
       <option value="kokoro">Kokoro (local)</option>
       <option value="piper">Piper (local)</option>
       </select></label>
+      <label id="tts-voice-label" hidden title="Voice for the chosen model (English). Romanian always uses Piper's mihai / Kokoro's Italian voice.">Speaker <select id="tts-voice"></select></label>
       <label title="Spoken language: Scribe transcription and the pointing words (“this”, “ăsta”…). Auto detects English or Romanian.">Language <select id="language">
         ${LANGUAGES.map((l) => `<option value="${l.id}">${l.label}</option>`).join("")}
       </select></label>
@@ -145,7 +148,21 @@ const longTask = $<HTMLSelectElement>("long-task");
 const language = $<HTMLSelectElement>("language");
 rtModel.onchange = () => { settings.realtimeModel = rtModel.value as RealtimeModel; saveSettings(); };
 router.onchange = () => { settings.routerMode = router.value as RouterMode; saveSettings(); };
-tts.onchange = () => { settings.ttsModel = tts.value as TtsModel; saveSettings(); };
+tts.onchange = () => { settings.ttsModel = tts.value as TtsModel; saveSettings(); renderVoices(); };
+
+// Per-model voices (Piper / Kokoro / OpenAI), from GET /api/tts/voices; the choice is remembered per model.
+const ttsVoice = $<HTMLSelectElement>("tts-voice");
+let voiceOptions: Record<string, { id: string; label: string; default?: boolean }[]> = {};
+function renderVoices(): void {
+  const list = voiceOptions[settings.ttsModel] ?? [];
+  const label = $("tts-voice-label");
+  label.hidden = list.length === 0 || settings.approach !== "pipeline";
+  ttsVoice.replaceChildren(...list.map((v) => { const o = document.createElement("option"); o.value = v.id; o.textContent = v.label; return o; }));
+  const chosen = settings.ttsVoices[settings.ttsModel];
+  ttsVoice.value = chosen && list.some((v) => v.id === chosen) ? chosen : (list.find((v) => v.default) ?? list[0])?.id ?? "";
+}
+ttsVoice.onchange = () => { settings.ttsVoices = { ...settings.ttsVoices, [settings.ttsModel]: ttsVoice.value }; saveSettings(); };
+fetch("/api/tts/voices").then((r) => r.json()).then((v) => { voiceOptions = v; renderVoices(); }).catch(() => {});
 longTask.onchange = () => { settings.longTaskSeconds = Number(longTask.value); saveSettings(); };
 language.onchange = () => { settings.language = language.value as SpeechLanguage; saveSettings(); };
 const claudeBackend = $<HTMLSelectElement>("claude-backend");
@@ -157,6 +174,7 @@ function renderSettings(): void {
   rtModel.value = settings.realtimeModel;
   router.value = settings.routerMode;
   tts.value = settings.ttsModel;
+  renderVoices();
   longTask.value = String(settings.longTaskSeconds);
   language.value = settings.language;
   claudeBackend.value = settings.claudeBackend;
@@ -173,6 +191,7 @@ function config(): RunConfig {
     realtimeModel: settings.realtimeModel,
     routerMode: settings.routerMode,
     ttsModel: settings.ttsModel,
+    ...(settings.ttsVoices[settings.ttsModel] ? { ttsVoice: settings.ttsVoices[settings.ttsModel] } : {}),
     prewarm: true,
     memory: true,
     fillers: true,

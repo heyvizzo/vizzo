@@ -43,6 +43,8 @@ export interface RunConfig {
   language: SpeechLanguage;
   /** Claude transport for the router, progress lines and Opus. */
   claudeBackend: ClaudeBackend;
+  /** Voice for the chosen TTS model, when it has several (Piper / Kokoro / OpenAI voice name); default = the engine's. */
+  ttsVoice?: string;
 }
 
 export const DEFAULT_CONFIG: RunConfig = {

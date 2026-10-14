@@ -2,7 +2,8 @@
 
 Started by server/adapters/localTts.ts (`npm run dev`), one process per engine, models loaded once.
 Same framed protocol as tools/mactts:
-  stdin, one JSON per line:  {"id":"1","text":"Hello.","lang":"en"}       (lang: en | ro)
+  stdin, one JSON per line:  {"id":"1","text":"Hello.","lang":"en","voice":"en_US-ryan-high"}   (lang: en | ro; voice optional)
+                             {"cmd":"load","voice":"en_US-ryan-high"}   load + warm a voice ahead of use (Piper)
   stdout:                    {"id":"1","pcm":N}\\n + N bytes of PCM16 mono 24 kHz little-endian
                              {"id":"1","done":true,"voice":"…","ms":123}\\n
                              {"id":"1","error":"…"}\\n
@@ -62,8 +63,13 @@ class KokoroEngine:
         if os.environ.get("KOKORO_VOICE_EN"):
             self.VOICES = {**self.VOICES, "en": (os.environ["KOKORO_VOICE_EN"], "en-us")}
 
-    async def speak(self, rid, text, lang, silent=False):
+    def load(self, voice):
+        pass  # all Kokoro voices live in one voices file, loaded at start
+
+    async def speak(self, rid, text, lang, silent=False, voice_name=None):
         voice, klang = self.VOICES.get(lang, self.VOICES["en"])
+        if voice_name and lang != "ro":
+            voice = voice_name
         if lang == "ro":
             klang = "ro"  # espeak-ng Romanian phonemes, Italian voice
         async for samples, rate in self.k.create_stream(text, voice=voice, lang=klang):
@@ -76,17 +82,48 @@ class KokoroEngine:
 
 
 class PiperEngine:
-    VOICES = {"en": "en_US-lessac-medium", "ro": "ro_RO-mihai-medium"}
+    """Piper voices load on demand and stay cached (LRU, PIPER_CACHE voices, default 4). Romanian always
+    uses ro_RO-mihai-medium (Piper's only Romanian voice); English uses the requested voice, else
+    PIPER_VOICE, else en_US-lessac-high (falling back to -medium)."""
+
+    RO = "ro_RO-mihai-medium"
 
     def __init__(self, models):
+        from collections import OrderedDict
+
         from piper import PiperVoice
 
-        d = os.path.join(models, "piper")
-        self.voices = {lang: PiperVoice.load(os.path.join(d, f"{name}.onnx")) for lang, name in self.VOICES.items()}
+        self.PiperVoice = PiperVoice
+        self.dir = os.path.join(models, "piper")
+        self.cache = OrderedDict()
+        self.max = int(os.environ.get("PIPER_CACHE", "4"))
+        preferred = [os.environ.get("PIPER_VOICE"), "en_US-lessac-high", "en_US-lessac-medium"]
+        self.default_en = next(v for v in preferred if v and self.exists(v))
+        self.get(self.default_en)
+        self.get(self.RO)
 
-    async def speak(self, rid, text, lang, silent=False):
-        name = self.VOICES.get(lang, self.VOICES["en"])
-        voice = self.voices.get(lang, self.voices["en"])
+    def exists(self, name):
+        return bool(name) and os.path.exists(os.path.join(self.dir, f"{name}.onnx"))
+
+    def get(self, name):
+        if name in self.cache:
+            self.cache.move_to_end(name)
+            return self.cache[name]
+        voice = self.PiperVoice.load(os.path.join(self.dir, f"{name}.onnx"))
+        self.cache[name] = voice
+        while len(self.cache) > self.max:
+            oldest = next(k for k in self.cache if k not in (self.default_en, self.RO))
+            del self.cache[oldest]
+        return voice
+
+    def load(self, name):
+        if self.exists(name):
+            for _ in self.get(name).synthesize("Ready."):  # warm the ONNX session
+                pass
+
+    async def speak(self, rid, text, lang, silent=False, voice_name=None):
+        name = self.RO if lang == "ro" else (voice_name if self.exists(voice_name) else self.default_en)
+        voice = self.get(name)
         for chunk in voice.synthesize(text):  # one chunk per sentence
             pcm = resample_int16(chunk.audio_int16_bytes, chunk.sample_rate)
             if not silent and pcm:
@@ -115,12 +152,19 @@ async def main():
             req = json.loads(line)
         except ValueError:
             continue
+        if req.get("cmd") == "load":
+            try:
+                engine.load(req.get("voice"))
+                emit({"loaded": req.get("voice")})
+            except Exception as e:
+                emit({"error": f"load {req.get('voice')}: {type(e).__name__}: {e}"})
+            continue
         rid, text = req.get("id"), req.get("text", "")
         if not rid:
             continue
         t0 = time.perf_counter()
         try:
-            voice = await engine.speak(rid, text, req.get("lang", "en"))
+            voice = await engine.speak(rid, text, req.get("lang", "en"), voice_name=req.get("voice"))
             emit({"id": rid, "done": True, "voice": voice, "ms": int((time.perf_counter() - t0) * 1000)})
         except Exception as e:  # report and keep serving
             emit({"id": rid, "error": f"{type(e).__name__}: {e}"})

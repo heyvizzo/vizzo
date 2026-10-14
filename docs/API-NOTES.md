@@ -259,6 +259,7 @@ Other events you'll see: `session.created`, `session.updated`, `conversation.ite
 - Setup: `npm run setup:local-tts` → `.venv-tts` (Python 3.12 via uv: `kokoro-onnx` 0.6, `onnxruntime` 1.31, `piper-tts` 1.8) and `.models/` (gitignored).
 - **Kokoro-82M** (Apache-2.0): `kokoro-v1.0.onnx` (310 MB) + `voices-v1.0.bin` (26 MB) from the kokoro-onnx `model-files-v1.0` release. `Kokoro.create_stream(text, voice, lang)` yields float32 at 24 kHz. Voices used: `af_heart` (en); no Romanian voice — `lang="ro"` (espeak-ng phonemes) with `if_sara`. CPU (CoreML EP partial, not faster).
 - **Piper** (OHF-Voice piper1): voices from `huggingface.co/rhasspy/piper-voices` — `en_US-lessac-medium`, `ro_RO-mihai-medium` (60 MB each + `.onnx.json`). `PiperVoice.synthesize(text)` yields one `AudioChunk` (int16, 22.05 kHz) per sentence → resampled to 24 kHz.
+- Extra Piper voices installed: en_US lessac/ryan/ljspeech (high), en_GB cori (high), en_US amy, hfc_female, hfc_male, libritts_r (904 speakers, speaker 0), en_GB alba, jenny_dioco (medium). Catalogue: `rhasspy/piper-voices/voices.json`. `{"cmd":"load","voice":…}` preloads one; requests carry `"voice"`.
 - Both run in `tools/localtts/server.py` (one persistent process per engine, framed PCM like tools/mactts), started by `npm run dev` (`LOCAL_TTS=0` skips local engines).
 
 ## Sources

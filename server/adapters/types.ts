@@ -42,6 +42,8 @@ export interface OpenTtsOpts {
   mark: Mark; voiceId: string; model: TtsModel; segment: "ack" | "answer";
   /** Spoken language (en / ro) for on-device voices; a getter when it's only known later (pre-opened sockets). */
   language?: string | (() => string | undefined);
+  /** Engine-specific voice (Piper voice name, Kokoro voice id, OpenAI voice); the engine's default when omitted. */
+  voice?: string;
 }
 export type OpenTts = (opts: OpenTtsOpts) => Promise<TtsStream>;
 

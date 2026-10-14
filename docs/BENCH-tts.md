@@ -69,6 +69,8 @@ Raw runs: `docs/report-data/bench-tts.json`.
 
 **Quality (by ear, not measured):** ElevenLabs most natural; **Kokoro is the most natural of the local options** in English (af_heart); Piper is clear but flatter; tts-1 decent; the compact macOS voices the most robotic unless a Premium/Enhanced voice is installed (System Settings → Accessibility → **Read & Speak** → System voice → Manage Voices…; restart `npm run dev`). **Romanian:** Piper has a native Romanian voice (ro_RO-mihai); Kokoro has none — Romanian is phonemized by espeak-ng and read with the Italian voice (accented); tts-1 voices are "optimized for English"; macOS uses Ioana.
 
+**Piper voices** (`npm run setup:local-tts` installs 12; pick one in Chat → Voice: Piper → Speaker). Warm first audio for a short sentence: **medium voices ~50–70 ms** (amy, hfc_female, hfc_male, alba, jenny_dioco, lessac, libritts_r) vs **high voices ~400–525 ms** (lessac, ryan, ljspeech, cori) — the high models sound fuller but are ~8× slower per sentence. A voice's first use costs 0.5–1.3 s to load; it starts loading when you press talk (the stream opens then), so that mostly overlaps your speech. Up to 4 Piper voices stay loaded (PIPER_CACHE). Default: en_US-lessac-high (PIPER_VOICE to change); Romanian always uses ro_RO-mihai-medium.
+
 **Startup:** `npm run dev` loads all local engines (Piper ~1.7 s, Kokoro ~2.6 s, macOS ~0.6 s incl. warm-up) — after `npm run setup:local-tts` once (~470 MB of models).
 
 **Run notes:** turns are measured up to the ack and then cancelled (the answer's timing is Opus's, and Opus via `claude -p` was mid-refactor in the working tree).

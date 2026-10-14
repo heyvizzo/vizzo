@@ -111,13 +111,18 @@ export class FramedHelper {
   }
 
   /** Synthesize one piece of text; PCM arrives through onPcm in order. */
-  say(text: string, lang: string, onPcm: (b: Buffer) => void): Promise<{ voice: string; ms: number }> {
+  say(text: string, lang: string, onPcm: (b: Buffer) => void, voice?: string): Promise<{ voice: string; ms: number }> {
     if (this.dead) return Promise.reject(new Error(`${this.name} helper isn't running`));
     const id = String(++this.seq);
     return new Promise((resolve, reject) => {
       this.pending.set(id, { onPcm, resolve, reject });
-      this.proc.stdin.write(JSON.stringify({ id, text, lang }) + "\n");
+      this.proc.stdin.write(JSON.stringify({ id, text, lang, ...(voice ? { voice } : {}) }) + "\n");
     });
+  }
+
+  /** Load and warm a voice ahead of use (no reply needed; requests after it run once it's loaded). */
+  load(voice: string): void {
+    if (!this.dead) this.proc.stdin.write(JSON.stringify({ cmd: "load", voice }) + "\n");
   }
 
   kill(): void { if (!this.dead) this.proc.kill("SIGTERM"); }
@@ -173,8 +178,10 @@ export async function localTtsStatus(): Promise<Record<string, boolean>> {
 
 /** An on-device engine behind the same interface as ElevenLabs. */
 export function openLocalTts(engine: LocalEngine): OpenTts {
-  return async ({ mark, segment, language }) => {
+  return async ({ mark, segment, language, voice }) => {
     const h = await getHelper(engine);
+    // Streams are opened when the user presses talk: start loading a non-default voice right away.
+    if (voice) h.load(voice);
     // Resolved per piece: a stream opened before the transcript exists learns the language later.
     const lang = () => ((typeof language === "function" ? language() : language) === "ro" ? "ro" : "en");
     const clauses = ENGINES[engine].clauses;
@@ -192,7 +199,7 @@ export function openLocalTts(engine: LocalEngine): OpenTts {
       if (closed) return;
       if (!firstByte) {
         firstByte = true;
-        mark(segment === "answer" ? "answer.ttsFirstByte" : "ack.ttsFirstByte", { model: engine, bytes: b.length, ms: Math.round(performance.now() - t0) });
+        mark(segment === "answer" ? "answer.ttsFirstByte" : "ack.ttsFirstByte", { model: engine, ...(voice ? { voice } : {}), bytes: b.length, ms: Math.round(performance.now() - t0) });
       }
       if (audioCbs.length) for (const cb of audioCbs) cb(b);
       else early.push(b);
@@ -200,7 +207,7 @@ export function openLocalTts(engine: LocalEngine): OpenTts {
     const speak = (text: string) => {
       if (!text.trim() || closed) return;
       for (const piece of clauses ? splitClauses(text) : [text]) {
-        const p = h.say(piece, lang(), onPcm);
+        const p = h.say(piece, lang(), onPcm, voice);
         p.catch(() => {});
         jobs.push(p);
       }

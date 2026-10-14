@@ -21,10 +21,11 @@ export interface OpenAiTtsDeps {
 interface Piece { chunks: Buffer[]; done: boolean; error?: Error; ready: Promise<void> }
 
 export function createOpenAiTts(deps: OpenAiTtsDeps = {}): OpenTts {
-  return async ({ mark, segment, model }) => {
+  return async ({ mark, segment, model, voice: requested }) => {
     const apiKey = deps.apiKey ?? process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error("OPENAI_API_KEY not set");
-    const voice = deps.voice ?? process.env.OPENAI_TTS_VOICE ?? DEFAULT_VOICE;
+    const valid = (v?: string) => (v && (TTS1_VOICES as readonly string[]).includes(v) ? v : undefined);
+    const voice = valid(requested) ?? deps.voice ?? process.env.OPENAI_TTS_VOICE ?? DEFAULT_VOICE;
     const doFetch = deps.fetch ?? fetch;
     const apiModel = model === "openai_tts_1" ? "tts-1" : model;
     const audioCbs: ((b: Buffer) => void)[] = [];
