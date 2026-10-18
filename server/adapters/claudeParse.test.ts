@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { JsonStringFieldExtractor, JsonTopLevelStream, parseEstimate, RouteInputStream, SpokenLineParser, type RouteIntentName } from "./claudeParse.ts";
+import {
+  JsonStringFieldExtractor, JsonTopLevelStream, NarrationGate, parseEstimate, resolveThreadRoute, RouteInputStream, SpokenLineParser, type RouteIntentName,
+  type ThreadRouteContext,
+} from "./claudeParse.ts";
 
 function feedAll(chunks: string[], field = "ack"): { out: string[]; ex: JsonStringFieldExtractor } {
   const ex = new JsonStringFieldExtractor(field);
@@ -250,5 +253,107 @@ describe("RouteInputStream", () => {
     expect(parseEstimate(0)).toBeNull();
     expect(parseEstimate("soon")).toBeNull();
     expect(parseEstimate(null)).toBeNull();
+  });
+});
+
+describe("NarrationGate", () => {
+  const run = (deltas: string[]): string => {
+    let out = "";
+    const g = new NarrationGate((d) => { out += d; });
+    for (const d of deltas) g.feed(d);
+    g.end();
+    return out;
+  };
+
+  it("drops narration before the SPOKEN: line, even split across deltas and on the same line", () => {
+    expect(run(["I'll look at the grid.", "SPO", "KEN: Cards line up.\n\nDetail"])).toBe("SPOKEN: Cards line up.\n\nDetail");
+    expect(run(["Checking the CSS.\n\n**SPOKEN:** It's a grid.", " More."])).toBe("**SPOKEN:** It's a grid. More.");
+  });
+
+  it("passes a reply that starts with SPOKEN: straight through", () => {
+    const seen: string[] = [];
+    const g = new NarrationGate((d) => seen.push(d));
+    g.feed("SPOKEN: Hi.");
+    g.feed(" Rest");
+    expect(seen).toEqual(["SPOKEN: Hi.", " Rest"]);
+  });
+
+  it("releases everything at the end when no SPOKEN: line came", () => {
+    expect(run(["Just an answer", " without the prefix."])).toBe("Just an answer without the prefix.");
+  });
+});
+
+describe("resolveThreadRoute", () => {
+  const ctx = (o: Partial<ThreadRouteContext> = {}): ThreadRouteContext => ({ threadIds: ["t1", "t2"], pointed: true, forced: false, ...o });
+
+  it("a known id with its relation (followup by default)", () => {
+    expect(resolveThreadRoute("task", { target: "t1", relation: "correction", tell: null }, ctx()))
+      .toEqual({ intent: "task", target: { kind: "thread", threadId: "t1", relation: "correction" } });
+    expect(resolveThreadRoute("task", { target: "t2", relation: "bogus" }, ctx()).target)
+      .toEqual({ kind: "thread", threadId: "t2", relation: "followup" });
+  });
+  it("unknown or missing target: new when pointing, else central; new without an element is central", () => {
+    expect(resolveThreadRoute("task", { target: "t9" }, ctx()).target).toEqual({ kind: "new" });
+    expect(resolveThreadRoute("task", { target: "t9" }, ctx({ pointed: false })).target).toEqual({ kind: "central" });
+    expect(resolveThreadRoute("task", {}, ctx()).target).toEqual({ kind: "new" });
+    expect(resolveThreadRoute("task", { target: "new" }, ctx({ pointed: false })).target).toEqual({ kind: "central" });
+    expect(resolveThreadRoute("question", { target: "central" }, ctx()).target).toEqual({ kind: "central" });
+  });
+  it("tell: a known id with intent answer; it targets its thread", () => {
+    expect(resolveThreadRoute("answer", { target: "central", tell: "t2" }, ctx()))
+      .toEqual({ intent: "answer", target: { kind: "thread", threadId: "t2", relation: "followup" }, tell: "t2" });
+    expect(resolveThreadRoute("answer", { target: "central", tell: "t9" }, ctx()).tell).toBeUndefined();
+    expect(resolveThreadRoute("task", { target: "t1", tell: "t1" }, ctx()).tell).toBeUndefined();
+  });
+  it("delegate mode: answer only with tell (else clarify)", () => {
+    expect(resolveThreadRoute("answer", { target: "t1", tell: null }, ctx({ forced: true })).intent).toBe("clarify");
+    expect(resolveThreadRoute("answer", { tell: "t1" }, ctx({ forced: true })).intent).toBe("answer");
+  });
+});
+
+describe("RouteInputStream, threads mode", () => {
+  function make() {
+    const events: string[] = [];
+    const decisions: unknown[] = [];
+    const ctx: ThreadRouteContext = { threadIds: ["t1"], pointed: true, forced: false };
+    const s = new RouteInputStream({
+      onDecision: (d) => { decisions.push(d); events.push(`decision:${d.intent}`); },
+      onSay: (d, k) => events.push(`say:${k}:${d}`),
+      onSayEnd: (k) => events.push(`end:${k}`),
+    }, ["question", "task", "clarify", "answer"], "answer", (i, raw) => resolveThreadRoute(i, raw, ctx));
+    return { s, events, decisions, feedChars: (j: string) => { for (const c of j) s.feed(c); } };
+  }
+
+  it("waits for intent, estimate and the thread fields; decides at `tell`, before say streams", () => {
+    const { events, decisions, feedChars } = make();
+    feedChars(`{"intent":"task","estimate_seconds":60,"target":"t1","relation":"correction"`);
+    expect(events).toEqual([]);
+    feedChars(`,"tell":null`);
+    expect(events).toEqual([]); // null could still be nullx… (primitive ends at the comma)
+    feedChars(`,"say":"Ok"`);
+    expect(decisions).toEqual([{ intent: "task", estimateS: 60, target: { kind: "thread", threadId: "t1", relation: "correction" } }]);
+    expect(events).toEqual(["decision:task", "say:ack:O", "say:ack:k", "end:ack"]);
+  });
+
+  it("an answer waits for the thread fields too; a tell with an empty say", () => {
+    const { events, decisions, feedChars } = make();
+    feedChars(`{"intent":"answer","estimate_seconds":null,"target":"t1","relation":null,"tell":"t1"`);
+    expect(decisions).toEqual([{ intent: "answer", estimateS: null, target: { kind: "thread", threadId: "t1", relation: "followup" }, tell: "t1" }]);
+    feedChars(`,"say":"","question":""}`);
+    expect(events).toEqual(["decision:answer", "end:answer"]);
+  });
+
+  it("fields missing: decides when say starts", () => {
+    const { events, decisions, feedChars } = make();
+    feedChars(`{"intent":"clarify","say":"Which one?"}`);
+    expect(decisions).toEqual([{ intent: "clarify", estimateS: null, target: { kind: "new" } }]);
+    expect(events[0]).toBe("decision:clarify");
+    expect(events.at(-1)).toBe("end:answer");
+  });
+
+  it("finish() fills the thread fields from the final object", () => {
+    const { s, decisions } = make();
+    s.finish({ intent: "question", question: "q", target: "t1" });
+    expect(decisions).toEqual([{ intent: "question", estimateS: null, target: { kind: "thread", threadId: "t1", relation: "followup" } }]);
   });
 });

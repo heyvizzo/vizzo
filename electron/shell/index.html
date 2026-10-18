@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Browser</title>
+  <style>
+    :root {
+      --bar: #f4f4f5;
+      --field: #ffffff;
+      --line: #d4d4d8;
+      --text: #18181b;
+      --muted: #71717a;
+      --accent: #2563eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bar: #27272a;
+        --field: #18181b;
+        --line: #3f3f46;
+        --text: #f4f4f5;
+        --muted: #a1a1aa;
+        --accent: #60a5fa;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bar: #27272a;
+      --field: #18181b;
+      --line: #3f3f46;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --accent: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .toolbar {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px 0 78px; /* room for the macOS traffic lights (hiddenInset title bar) */
+      border-bottom: 1px solid var(--line);
+      background: var(--bar);
+      -webkit-app-region: drag;
+    }
+    .toolbar > * { -webkit-app-region: no-drag; }
+    button {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      flex: none;
+    }
+    button:hover:not(:disabled) { background: var(--line); }
+    button:disabled { opacity: 0.35; cursor: default; }
+    button[aria-pressed="true"] { color: var(--accent); }
+    svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    form { flex: 1; min-width: 0; display: flex; }
+    #url {
+      flex: 1;
+      min-width: 0;
+      height: 30px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--field);
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+    #url:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+    [hidden] { display: none !important; }
+    /* Mic: hold to talk; the box on its corner is Always listen, whose level shows faintly behind it. */
+    .mic { position: relative; flex: none; width: 30px; height: 30px; display: grid; place-items: center; }
+    #mic-meter { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 6px; opacity: 0.55; pointer-events: none; }
+    #mic { position: relative; color: var(--text); }
+    #mic.live { color: #dc2626; }
+    /* Red dot: Always listen is on (or a turn is recording). */
+    #mic-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: #dc2626; pointer-events: none; }
+    /* Feedback queue: Instant on runs each turn right away; off queues them until Send. */
+    #instant[aria-pressed="false"] { color: var(--muted); }
+    #send-queue { width: auto; min-width: 30px; padding: 0 8px; gap: 4px; display: flex; align-items: center; font: inherit; font-variant-numeric: tabular-nums; }
+    #send-queue:not(:disabled) { color: var(--accent); }
+    #send-queue svg { width: 14px; height: 14px; }
+    .loading { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .loading { animation: none; } }
+  </style>
+</head>
+<body>
+  <nav class="toolbar">
+    <button id="back" title="Back (⌘[)" aria-label="Back" disabled>
+      <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <button id="forward" title="Forward (⌘])" aria-label="Forward" disabled>
+      <svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+    <button id="reload" title="Reload (⌘R)" aria-label="Reload">
+      <svg id="reload-icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
+    </button>
+    <form id="address" autocomplete="off">
+      <input id="url" type="text" placeholder="Search or enter address" spellcheck="false" aria-label="Address" />
+    </form>
+    <button id="comment-mode" title="Comment mode: off. Click to point at elements on the page and leave feedback on them." aria-label="Comment mode" aria-pressed="false">
+      <svg viewBox="0 0 24 24"><path d="M4.04 4.69a.5.5 0 0 1 .65-.65l16 6.5a.5.5 0 0 1-.06.95l-6.13 1.58a2 2 0 0 0-1.43 1.43l-1.58 6.13a.5.5 0 0 1-.95.06z"/></svg>
+    </button>
+    <div class="mic" id="mic-box" hidden>
+      <canvas id="mic-meter" hidden aria-hidden="true"></canvas>
+      <button id="mic" title="Click: Always listen. Hold: talk." aria-label="Microphone" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
+        <span id="mic-dot" hidden></span>
+      </button>
+    </div>
+    <button id="instant" title="Instant feedback: on" aria-label="Instant feedback" aria-pressed="true" hidden>
+      <svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>
+    </button>
+    <button id="send-queue" title="Send queued feedback" aria-label="Send queued feedback" disabled hidden>
+      <span id="queue-count">0</span>
+      <svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+    </button>
+  </nav>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const url = $("url");
+    let editing = false;
+    let loading = false;
+
+    $("back").onclick = () => shell.back();
+    $("forward").onclick = () => shell.forward();
+    // Reload while idle, stop while the page is loading.
+    $("reload").onclick = () => (loading ? shell.stop() : shell.reload());
+    $("address").onsubmit = (e) => { e.preventDefault(); editing = false; shell.go(url.value); url.blur(); };
+
+    // Show the page's address unless the user is typing in the field.
+    url.onfocus = () => { editing = true; url.select(); };
+    url.onblur = () => { editing = false; };
+
+    shell.onState((s) => {
+      $("back").disabled = !s.canGoBack;
+      $("forward").disabled = !s.canGoForward;
+      loading = s.loading;
+      $("reload").title = loading ? "Stop" : "Reload (⌘R)";
+      $("reload-icon").classList.toggle("loading", loading);
+      if (!editing && s.url && s.url !== "about:blank") url.value = s.url;
+      document.title = s.title ? `${s.title} — Browser` : "Browser";
+    });
+    shell.onFocusAddress(() => { url.focus(); });
+    shell.bindShiftPtt(); // Shift is push-to-talk here too (not in the address field)
+
+    // Feedback queue (the chat sidebar holds it). Hidden until the chat reports its state.
+    const instant = $("instant");
+    const sendQueue = $("send-queue");
+    let queue = null;
+    function showQueue(s) {
+      if (!s || typeof s !== "object") return;
+      queue = s;
+      instant.hidden = false;
+      instant.setAttribute("aria-pressed", s.instant ? "true" : "false");
+      instant.title = s.instant
+        ? "Instant feedback: on. Each turn runs as soon as you finish talking. Click to queue feedback instead."
+        : "Instant feedback: off. Turns are queued until you send them. Click to run each turn right away.";
+      $("queue-count").textContent = String(s.count);
+      sendQueue.hidden = s.count === 0;
+      sendQueue.disabled = s.count === 0 || s.sending;
+      sendQueue.title = s.sending
+        ? `Sending queued feedback… (${s.count} left)`
+        : s.count
+          ? `Send ${s.count} queued feedback turn${s.count === 1 ? "" : "s"}, with the sidebar's current settings`
+          : "No queued feedback";
+    }
+    instant.onclick = () => { if (queue) shell.queue.setInstant(!queue.instant); };
+    sendQueue.onclick = () => shell.queue.send();
+    shell.queue.onState(showQueue);
+    shell.queue.getState().then(showQueue);
+
+    // Mic (the chat sidebar owns the microphone). Three looks: plain = push to talk; red dot = Always listen on;
+    // red icon and dot = a turn is recording. A click toggles Always listen; holding it is push to talk, and while
+    // Always listen is on the last few seconds of level are drawn faintly behind the icon.
+    const micBox = $("mic-box");
+    const micBtn = $("mic");
+    const micDot = $("mic-dot");
+    const micMeter = $("mic-meter");
+    let mic = null;
+    const levels = [];
+    const LEVEL_WINDOW = 60; // ~3 s at the sidebar's 20 a second
+    function showMic(s) {
+      if (!s || typeof s !== "object") return;
+      mic = s;
+      micBox.hidden = false;
+      const live = s.live === true;
+      const always = s.always === true;
+      micBtn.classList.toggle("live", live);
+      micBtn.setAttribute("aria-pressed", always ? "true" : "false");
+      micDot.hidden = !(always || live);
+      micBtn.title = live
+        ? "Listening… release (or press Shift) to send"
+        : !s.ready ? "Microphone not ready. Click: Always listen " + (always ? "off" : "on")
+        : always ? "Always listen: on. Talk to start a turn. Click to turn it off; hold to talk."
+        : "Push to talk: hold (or hold Shift). Click to turn on Always listen.";
+      micMeter.hidden = !always;
+      if (!always) levels.length = 0;
+      drawMeter();
+    }
+    const dbPos = (rms) => Math.min(1, Math.max(0, (20 * Math.log10(Math.max(rms, 1e-8)) + 60) / 60));
+    function drawMeter() {
+      if (micMeter.hidden) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = micMeter.clientWidth, h = micMeter.clientHeight;
+      if (w < 2 || h < 2) return;
+      if (micMeter.width !== Math.round(w * dpr)) { micMeter.width = Math.round(w * dpr); micMeter.height = Math.round(h * dpr); }
+      const ctx = micMeter.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      const css = getComputedStyle(document.documentElement);
+      const accent = css.getPropertyValue("--accent").trim() || "#2563eb";
+      const hot = mic && mic.live;
+      const color = hot ? "#dc2626" : accent;
+      const y = (rms) => h - 2 - dbPos(rms) * (h - 4);
+      if (mic && typeof mic.threshold === "number") {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.35;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.moveTo(0, y(mic.threshold) + 0.5);
+        ctx.lineTo(w, y(mic.threshold) + 0.5);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      if (levels.length < 2) return;
+      const step = w / (LEVEL_WINDOW - 1);
+      const x0 = w - (levels.length - 1) * step;
+      ctx.beginPath();
+      ctx.moveTo(x0, h);
+      levels.forEach((l, i) => ctx.lineTo(x0 + i * step, y(l)));
+      ctx.lineTo(w, h);
+      ctx.closePath();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.beginPath();
+      levels.forEach((l, i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, x0 + i * step, y(l)));
+      ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.25;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    shell.mic.onLevel((rms) => {
+      if (!mic || !mic.always) return;
+      levels.push(rms);
+      if (levels.length > LEVEL_WINDOW) levels.shift();
+      drawMeter();
+    });
+    // A press shorter than HOLD_MS is a click (toggle Always listen); held longer, it's push to talk until release.
+    const HOLD_MS = 250;
+    let pressTimer = null;
+    let micHeld = false;
+    const micDown = (e) => {
+      if (e.button !== 0 || pressTimer !== null || micHeld) return;
+      e.preventDefault();
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        if (!mic || !mic.ready) return;
+        micHeld = true;
+        shell.mic.ptt(true);
+      }, HOLD_MS);
+    };
+    const micUp = (e) => {
+      if (pressTimer !== null) {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+        if (e && e.type === "pointerup" && mic) shell.mic.setAlways(!mic.always);
+      }
+      if (micHeld) { micHeld = false; shell.mic.ptt(false); }
+    };
+    micBtn.addEventListener("pointerdown", micDown);
+    for (const ev of ["pointerup", "pointercancel", "pointerleave"]) micBtn.addEventListener(ev, micUp);
+    window.addEventListener("blur", () => micUp());
+    micBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+    // Keyboard: Enter/Space toggles Always listen (Shift is push to talk).
+    micBtn.addEventListener("click", (e) => { if (e.detail === 0 && mic) shell.mic.setAlways(!mic.always); });
+    shell.mic.onState(showMic);
+    shell.mic.getState().then(showMic);
+
+    // Comment mode: click an element on the page to type or dictate feedback on it (main keeps the state).
+    const commentBtn = $("comment-mode");
+    let commenting = false;
+    function showComment(on) {
+      commenting = on === true;
+      commentBtn.setAttribute("aria-pressed", commenting ? "true" : "false");
+      commentBtn.title = commenting
+        ? "Comment mode: on. Click an element on the page to leave feedback on it; Esc or click here to stop."
+        : "Comment mode: off. Click to point at elements on the page and leave feedback on them.";
+    }
+    commentBtn.onclick = () => shell.comment.set(!commenting);
+    shell.comment.onState(showComment);
+    shell.comment.get().then(showComment);
+
+  </script>
+</body>
+</html>

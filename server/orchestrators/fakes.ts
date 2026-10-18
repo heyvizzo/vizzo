@@ -1,7 +1,7 @@
 // Fake adapters with plausible timing and the same marks as the real ones. Used by the orchestrator
 // unit tests and by `npm run smoke:e2e -- --fake` (exercises the whole server path without keys).
-import type { GenerateFillers,
-  OpenRealtime, OpenScribe, OpenTts, RealtimeSession, RealtimeUsage, RouteWithHaiku, SolveWithOpus, SttStream, ToolCall, TtsStream,
+import type { GenerateFillers, HarnessThread, OpenHarnessThread, RouteDecision, RouteTarget, SolveInThread,
+  OpenScribe, OpenTts, RouteTurn, SolveTask, SttStream, TtsStream,
 } from "../adapters/types.ts";
 import type { Mark } from "../clock.ts";
 import type { LlmPrompt, LlmResponse, RouteIntent, Word } from "../../shared/protocol.ts";
@@ -12,33 +12,39 @@ export interface FakeTiming {
   openMs: number;
   /** Commit → Scribe final. */
   sttFinalMs: number;
-  /** Request → first token (Realtime, Haiku). */
+  /** Request → first token (router). */
   llmFirstMs: number;
-  /** Request → first token (Opus); spoken line follows after the same again. */
-  opusFirstMs: number;
+  /** Request → first token (the solver); spoken line follows after the same again. */
+  solverFirstMs: number;
   /** flush → first TTS audio. */
   ttsFirstMs: number;
   /** Gap between audio chunks. */
   chunkMs: number;
 }
 
-export const FAST_TIMING: FakeTiming = { openMs: 2, sttFinalMs: 5, llmFirstMs: 3, opusFirstMs: 5, ttsFirstMs: 3, chunkMs: 1 };
-export const REALISTIC_TIMING: FakeTiming = { openMs: 120, sttFinalMs: 180, llmFirstMs: 250, opusFirstMs: 900, ttsFirstMs: 150, chunkMs: 20 };
+export const FAST_TIMING: FakeTiming = { openMs: 2, sttFinalMs: 5, llmFirstMs: 3, solverFirstMs: 5, ttsFirstMs: 3, chunkMs: 1 };
+export const REALISTIC_TIMING: FakeTiming = { openMs: 120, sttFinalMs: 180, llmFirstMs: 250, solverFirstMs: 900, ttsFirstMs: 150, chunkMs: 20 };
 
 export interface FakeScenario {
-  /** Realtime: the model calls ask_opus (otherwise it answers directly). Haiku (auto mode): delegate. */
+  /** The router (auto mode): delegate to the solver (otherwise it answers directly). */
   delegate: boolean;
   transcript: string;
   words: Word[];
   /** Throw from this adapter (on open, unless noted). */
-  failIn?: "scribe" | "realtime" | "tts" | "haiku" | "opus" | "realtime-response";
-  /** Scribe never produces a final (tests the hybrid timeout path). */
+  failIn?: "scribe" | "tts" | "router" | "solver";
+  /** Scribe never produces a final. */
   scribeHangs?: boolean;
-  /** Router / Realtime decision (default question, 10 s). "clarify": asks a follow-up instead of delegating. */
+  /** Router decision (default question, 10 s). "clarify": asks a follow-up instead of delegating. */
   intent?: "question" | "task" | "clarify";
   estimateS?: number;
   /** Lines generateFillers returns (default two lines). */
   fillerLines?: string[];
+  /** Threads mode (the router got `threads`): where the router sends the turn (default new) and a tell. */
+  target?: RouteTarget;
+  tell?: string;
+  /** Element threads: how long one thread request takes (default 3 × solverFirstMs) and the files it edits. */
+  threadRunMs?: number;
+  filesTouched?: string[];
 }
 
 export const DEFAULT_SCENARIO: FakeScenario = {
@@ -71,15 +77,14 @@ function tone(n: number): Buffer[] {
 
 export interface FakeLog {
   opened: string[]; closed: string[];
-  sentToolResults: { callId: string; output: string; respond?: false }[];
-  contexts: (string | undefined)[];
-  /** Realtime speak() calls and cancelResponse() count. */
-  spoken: { text: string; kind: "filler" | "notice" }[];
-  cancels: number;
+  /** Element threads: every request sent to a thread session, and thread aborts/closes. */
+  threadSends: { threadId: string; kind: string; question: string; replay: string }[];
+  threadAborts: string[];
+  threadClosed: string[];
 }
 
 export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = DEFAULT_SCENARIO): OrchestratorDeps & { log: FakeLog } {
-  const log: FakeLog = { opened: [], closed: [], sentToolResults: [], contexts: [], spoken: [], cancels: 0 };
+  const log: FakeLog = { opened: [], closed: [], threadSends: [], threadAborts: [], threadClosed: [] };
   const intent = sc.intent ?? "question";
   const estimateS = sc.estimateS ?? 10;
   let seq = 0;
@@ -162,146 +167,32 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     return s;
   };
 
-  const openRealtime: OpenRealtime = async ({ mark: initialMark }) => {
-    await wait(t.openMs);
-    if (sc.failIn === "realtime") throw new Error("fake realtime: connect failed");
-    const id = `realtime#${++seq}`;
-    log.opened.push(id);
-    let mark: Mark = initialMark;
-    let closed = false;
-    type Seg = "ack" | "filler" | "answer" | "notice";
-    let segment: Seg = "ack";
-    let active: { seg: Seg; cancelled: boolean } | null = null;
-    const queue: { seg: Seg; text?: string; done?: () => void }[] = [];
-    let waiters: { res: () => void; rej: (e: Error) => void }[] = [];
-    let marked = { first: false, ack: false, answer: false };
-    const audioCbs: ((b: Buffer) => void)[] = [];
-    const textCbs: ((d: string) => void)[] = [];
-    const toolCbs: ((c: ToolCall) => void)[] = [];
-    const errCbs: ((e: Error) => void)[] = [];
-    const doneCbs: Parameters<RealtimeSession["onResponseDone"]>[0][] = [];
-    const usage: RealtimeUsage = {
-      responses: [],
-      totals: { inputTokens: 0, outputTokens: 0, inputText: 0, inputAudio: 0, cachedText: 0, cachedAudio: 0, cached: 0, outputText: 0, outputAudio: 0 },
-    };
-    let audioBytes = 0;
-    const marks = (seg: Seg) => seg === "ack" || seg === "answer";
-    const pendingMain = () => (active && marks(active.seg) && !active.cancelled) || queue.some((q) => marks(q.seg));
-
-    const respond = (seg: Seg, text?: string, done?: () => void) => {
-      if (active) { queue.push({ seg, text, done }); return; }
-      const me = { seg, cancelled: false };
-      active = me;
-      segment = seg;
-      void (async () => {
-        await wait(t.llmFirstMs);
-        if (closed) return;
-        if (sc.failIn === "realtime-response" && marks(seg)) {
-          for (const cb of errCbs) cb(new Error("fake realtime: server_error"));
-          return;
-        }
-        const say = async (line: string) => {
-          for (const [i, b] of tone(5).entries()) {
-            if (closed || me.cancelled) return;
-            if (marks(seg) && !marked.first) { marked.first = true; mark("llm.firstToken"); }
-            if (seg === "ack" && !marked.ack) { marked.ack = true; mark("ack.ttsFirstByte"); }
-            if (seg === "answer" && !marked.answer) { marked.answer = true; mark("answer.ttsFirstByte"); }
-            if (i === 0) for (const cb of textCbs) cb(line);
-            for (const cb of audioCbs) cb(b);
-            await wait(t.chunkMs);
-          }
-        };
-        const delegates = sc.delegate && intent !== "clarify";
-        if (seg === "ack") await say(delegates ? ACK : intent === "clarify" ? CLARIFY : DIRECT_ANSWER);
-        else if (seg === "answer") await say(SPOKEN_LINE);
-        else await say(text ?? "");
-        if (closed) return;
-        if (seg === "ack" && delegates && !me.cancelled) {
-          const callId = `call_${seq}`;
-          mark("llm.toolCall", { name: "ask_opus" });
-          for (const cb of toolCbs) cb({ callId, name: "ask_opus", args: { intent, estimated_seconds: estimateS, question: "Why is the features section a CSS grid?" } });
-        }
-        if (marks(seg)) {
-          const resp = { input_tokens: 100, output_tokens: 50, input_token_details: { text_tokens: 60, audio_tokens: 40, cached_tokens: 20, cached_tokens_details: { text_tokens: 20, audio_tokens: 0 } }, output_token_details: { text_tokens: 10, audio_tokens: 40 } };
-          usage.responses.push(resp);
-          const u = usage.totals;
-          u.inputTokens += 100; u.outputTokens += 50; u.inputText += 60; u.inputAudio += 40; u.cached += 20; u.cachedText += 20;
-          u.outputText += 10; u.outputAudio += 40;
-        }
-        active = null;
-        for (const cb of doneCbs) cb({ label: seg, stale: me.cancelled, response: { object: "realtime.response", status: me.cancelled ? "cancelled" : "completed", usage: marks(seg) ? usage.responses.at(-1) : null } });
-        done?.();
-        const next = queue.shift();
-        if (next) respond(next.seg, next.text, next.done);
-        if (!pendingMain()) { const w = waiters; waiters = []; for (const x of w) x.res(); }
-      })();
-    };
-
-    const s: RealtimeSession = {
-      beginTurn() {
-        marked = { first: false, ack: false, answer: false }; segment = "ack"; audioBytes = 0;
-        if (active) active.cancelled = true; // stale: its audio stops
-      },
-      setMark(m) { mark = m; },
-      pushAudio(b) { audioBytes += b.length; },
-      commitAndRespond(extra) {
-        log.contexts.push(extra);
-        mark("llm.request");
-        respond("ack");
-      },
-      onAudio(cb) { audioCbs.push(cb); },
-      onText(cb) { textCbs.push(cb); },
-      onToolCall(cb) { toolCbs.push(cb); },
-      onError(cb) { errCbs.push(cb); },
-      onResponseDone(cb) { doneCbs.push(cb); },
-      sendToolResult(callId, output, opts) {
-        if (opts?.respond === false) { log.sentToolResults.push({ callId, output, respond: false }); return; }
-        log.sentToolResults.push({ callId, output });
-        respond("answer");
-      },
-      speak(text, kind) {
-        log.spoken.push({ text, kind });
-        return new Promise<void>((res) => respond(kind, text, res));
-      },
-      cancelResponse() {
-        log.cancels++;
-        if (active) active.cancelled = true;
-        for (let i = queue.length - 1; i >= 0; i--) if (marks(queue[i]!.seg)) queue.splice(i, 1);
-      },
-      responseDone() {
-        if (closed) return Promise.reject(new Error("fake realtime: closed"));
-        if (!pendingMain()) return Promise.resolve();
-        return new Promise((res, rej) => waiters.push({ res, rej }));
-      },
-      get currentSegment() { return segment; },
-      get usage() { return usage; },
-      close() {
-        if (closed) return;
-        closed = true;
-        log.closed.push(id);
-        const w = waiters; waiters = [];
-        for (const x of w) x.rej(new Error("fake realtime: closed"));
-      },
-    };
-    return s;
-  };
-
   const fakePrompt = (target: LlmPrompt["target"], text: string): LlmPrompt =>
     ({ target, model: `fake-${target}`, system: [{ label: `${target}.md`, text: "(fake instructions)", cached: true }], messages: [{ role: "user", text, label: "this turn" }] });
 
   const fakeResponse = (target: LlmPrompt["target"], stopReason: string, usage: unknown): LlmResponse =>
     ({ target, model: `fake-${target}`, stopReason, usage, durationMs: 1, raw: { type: "message", stop_reason: stopReason, usage } });
 
-  const routeWithHaiku: RouteWithHaiku = async ({ mark, mode, transcript, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse }) => {
+  const routeTurn: RouteTurn = async ({ mark, mode, transcript, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, threads }) => {
     onPrompt?.(fakePrompt("router", `Transcript: "${transcript}"`));
     mark("llm.request", { mode });
     await wait(t.llmFirstMs);
-    if (sc.failIn === "haiku") throw new Error("fake haiku: 529 overloaded");
+    if (sc.failIn === "router") throw new Error("fake router: 529 overloaded");
     const usage = { input_tokens: 900, output_tokens: 40, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
     mark("llm.firstToken");
     mark("llm.toolCall", { name: "route" });
+    if (threads && sc.tell) {
+      // A tell: say and question empty, the server speaks the stored result.
+      const decision: RouteDecision = { intent: "answer", estimateS: null, target: { kind: "thread", threadId: sc.tell, relation: "followup" }, tell: sc.tell };
+      onDecision?.(decision);
+      onResponse?.(fakeResponse("router", "tool_use", usage));
+      return { delegate: null, decision, usage };
+    }
     const routed: RouteIntent = intent === "clarify" ? "clarify" : mode === "forced" || sc.delegate ? intent : "answer";
-    const decision = { intent: routed, estimateS: routed === "question" || routed === "task" ? estimateS : null };
+    const decision: RouteDecision = {
+      intent: routed, estimateS: routed === "question" || routed === "task" ? estimateS : null,
+      ...(threads ? { target: sc.target ?? { kind: "new" } } : {}),
+    };
     onDecision?.(decision);
     if (routed === "clarify" || routed === "answer") {
       for (const w of (routed === "clarify" ? CLARIFY : DIRECT_ANSWER).split(/(?<= )/)) { onSpokenDelta(w, "answer"); await wait(t.chunkMs); }
@@ -323,23 +214,73 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     return { lines: sc.fillerLines ?? FILLER_LINES, usage: { input_tokens: 300, output_tokens: 30 } };
   };
 
-  const solveWithOpus: SolveWithOpus = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt, onResponse }) => {
-    onPrompt?.(fakePrompt("opus", `Question: ${question}`));
-    mark("opus.request", { fast });
-    await wait(t.opusFirstMs);
-    if (sc.failIn === "opus") throw new Error("fake opus: 500");
-    mark("opus.firstToken");
+  const solveTask: SolveTask = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt, onResponse }) => {
+    onPrompt?.(fakePrompt("solver", `Question: ${question}`));
+    mark("solver.request", { fast });
+    await wait(t.solverFirstMs);
+    if (sc.failIn === "solver") throw new Error("fake solver: 500");
+    mark("solver.firstToken");
     const text = `SPOKEN: ${SPOKEN_LINE}\n\nThe features section uses \`display: grid\` (demo.css:40) so the cards share column widths.`;
     onDelta(`SPOKEN: ${SPOKEN_LINE}\n`);
-    await wait(t.opusFirstMs);
-    mark("opus.spokenReady", { viaPrefix: true });
+    await wait(t.solverFirstMs);
+    mark("solver.spokenReady", { viaPrefix: true });
     onSpokenLine(SPOKEN_LINE);
     onDelta(text.slice(`SPOKEN: ${SPOKEN_LINE}\n`.length));
-    await wait(t.opusFirstMs);
-    mark("opus.done", { stopReason: "end_turn" });
-    onResponse?.(fakeResponse("opus", "end_turn", { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000 }));
+    await wait(t.solverFirstMs);
+    mark("solver.done", { stopReason: "end_turn" });
+    onResponse?.(fakeResponse("solver", "end_turn", { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000 }));
     return { text, usage: { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000, cache_creation_input_tokens: 0, speed: fast ? "fast" : "standard" } };
   };
 
-  return { openScribe, openTts, openRealtime, routeWithHaiku, solveWithOpus, generateFillers, voiceId: "fake-voice", log };
+  const threadRunMs = sc.threadRunMs ?? t.solverFirstMs * 3;
+  let threadSeq = 0;
+  const openThread: OpenHarnessThread = ({ choice, replay }) => {
+    const id = `thread#${++threadSeq}`;
+    let pending: { reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+    let live = false;
+    const h: HarnessThread = {
+      id, choice,
+      send(user, onText) {
+        const reopened = !live && replay() !== "";
+        log.threadSends.push({ threadId: id, kind: "", question: user, replay: live ? "" : replay() });
+        live = true;
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            pending = null;
+            const text = `SPOKEN: Done: ${user.split("\n")[0]}\n\nDetails of the change.`;
+            onText?.(text);
+            resolve({ text, model: "fake-thread", stopReason: "end_turn", usage: { input_tokens: 100, output_tokens: 50 }, filesTouched: sc.filesTouched ?? [], reopened } as Awaited<ReturnType<HarnessThread["send"]>>);
+          }, threadRunMs);
+          pending = { reject, timer };
+        });
+      },
+      abort() {
+        log.threadAborts.push(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        const e = new Error("aborted");
+        e.name = "AbortError";
+        pending.reject(e);
+        pending = null;
+      },
+      close() { log.threadClosed.push(id); h.abort(); live = false; },
+      get live() { return live; },
+    };
+    return h;
+  };
+
+  const solveInThread: SolveInThread = async ({ thread, kind, question, onSpokenLine, onDelta, onPrompt, onResponse }) => {
+    onPrompt?.(fakePrompt("solver", `(${kind}) ${question}`));
+    const n = log.threadSends.length;
+    const p = thread.send(question, undefined, 60_000);
+    if (log.threadSends[n]) log.threadSends[n]!.kind = kind;
+    const r = await p;
+    const spoken = r.text.split("\n")[0]!.replace(/^SPOKEN:\s*/, "");
+    onSpokenLine(spoken);
+    onDelta(r.text);
+    onResponse?.(fakeResponse("solver", "end_turn", r.usage));
+    return { text: r.text, usage: r.usage, filesTouched: r.filesTouched };
+  };
+
+  return { openScribe, openTts, routeTurn, solveTask, generateFillers, openThread, solveInThread, voiceId: "fake-voice", log };
 }

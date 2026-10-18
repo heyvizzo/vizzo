@@ -1,5 +1,6 @@
-// Pointing resolution (ARCHITECTURE §6). Pure functions, shared by the server and the cursor lab.
+// Pointing resolution (ARCHITECTURE §6). Pure functions.
 import type { CursorRest, CursorSample, ElementRef, PageClick, PageEvents, PointingTarget, Word } from "./protocol.ts";
+import { formatCoords } from "./clickCoords.ts";
 
 /** @deprecated English only; use POINTING_LEXICON / isPointingWord. */
 export const POINTING_WORDS = /^(this|that|these|those|here|there)$/i;
@@ -379,7 +380,7 @@ const saying = (t: number, words: Word[], tAudioStart: number | undefined, targe
 /**
  * What the user did on the page during the turn, as lines for the LLM context ("" if nothing). Times are
  * seconds from the first audio sample (the words' clock):
- *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] at 1.4 s (while saying "this")`
+ *   `Clicked: <th> "Price / month" in "Pricing table" [data-source=…] at 1.4 s (while saying "this") — at 30%, 68% (120, 34 px) of its 400×100 box, 25%, 18.5% (500, 740 px) of the 2000×4000 page`
  *   `Double-clicked: <h3> "Live queries" … at 2.1 s` · `Triple-clicked: …` · `Clicked 5 times: <button> … from 1.0 to 2.3 s`
  *   `Already highlighted when recording started: "…" in <p> …`
  *   `Highlight 1 (made from 0.8 to 1.6 s, while saying "these"): "…" in <td> …`
@@ -390,8 +391,11 @@ export function formatPageContext(
   ev: PageEvents | null | undefined, words: Word[], tAudioStart: number | undefined, targets?: readonly PointingTarget[],
 ): string {
   if (!ev) return "";
-  const lines = sortClicks(ev.clicks ?? []).map((c) =>
-    `${clickVerb(c)}: ${describeRef(c)}${when(c.t, c.kind === "single" ? c.t : c.tEnd, tAudioStart)}${saying(c.t, words, tAudioStart, targets)}`);
+  const lines = sortClicks(ev.clicks ?? []).map((c) => {
+    // A group's clicks are on the same spot, so the first click's coords stand for the group.
+    const at = c.coords?.[0] ? ` — at ${formatCoords(c.coords[0])}` : "";
+    return `${clickVerb(c)}: ${describeRef(c)}${when(c.t, c.kind === "single" ? c.t : c.tEnd, tAudioStart)}${saying(c.t, words, tAudioStart, targets)}${at}`;
+  });
   const pre = ev.preselected ? truncateText(ev.preselected.text) : "";
   if (ev.preselected && pre) lines.push(`Already highlighted when recording started: ${describeText(pre, ev.preselected)}`);
   const hs = (ev.highlights ?? []).filter((h) => truncateText(h.text)).slice(-MAX_HIGHLIGHT_LINES);

@@ -1,75 +1,101 @@
-// Claude adapter (T6): Haiku router + Opus solver. Settings follow ARCHITECTURE §4 "Claude settings"
-// and API-NOTES §Anthropic.
+// The model tiers' three jobs: the router and the progress lines (fast tier, the router's job) and the solver
+// (smart tier, the solver's job), each run on a warm harness agent (warmPool.ts / harnesses.ts) chosen per tier in
+// RunConfig.llm. The fast tier can instead call a model API directly (llmApi.ts), with the same prompts. The router and the progress lines write their answer as one JSON object in text (no tool
+// call through a harness), streamed and acted on as it arrives; the solver answers in the SPOKEN:-first format.
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import Anthropic from "@anthropic-ai/sdk";
-import type { BetaMessage, BetaMessageStreamParams } from "@anthropic-ai/sdk/resources/beta/messages/messages";
-import { MODELS, type RouterMode } from "../../shared/config.ts";
+import { join } from "node:path";
+import { DEFAULT_CONFIG, isApiProvider, LLM_PROVIDER_LABELS, type LlmChoice, type LlmProvider, type RouterMode } from "../../shared/config.ts";
 import { formatPointingLine } from "../../shared/pointing.ts";
 import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
-import { kindFor, parseEstimate, RouteInputStream, SpokenLineParser, type RouteFields } from "./claudeParse.ts";
-import type { GenerateFillers, RouteDecision, RouteWithHaiku, SolveWithOpus } from "./types.ts";
+import {
+  kindFor, NarrationGate, parseEstimate, resolveThreadRoute, RouteInputStream, SpokenLineParser, type RouteFields, type ThreadRouteContext,
+} from "./claudeParse.ts";
+import type { GenerateFillers, RouteDecision, RouteTurn, SolveInThread, SolveTask, ThreadBrief } from "./types.ts";
 import { trimDetail, type ChatTurn } from "../conversation.ts";
-import { CLI_ARGS_SUMMARY, cliRequest, cliSpec, registerCliSpecs, type CliResult } from "./claudeCli.ts";
+import type { CliRole } from "./claudeCli.ts";
+import { describeAgent, type HarnessResult } from "./harnesses.ts";
+import { agentSpec, harnessRequest, registerRoleSpecs, ROLE_TIER } from "./warmPool.ts";
+import { apiRequest, describeApi } from "./llmApi.ts";
+import { projectDir } from "../project.ts";
+import { SERVER_DIR } from "../paths.ts";
+import { FISH_ACK_CUES, FISH_FILLER_CUES, FISH_SOLVER_CUES } from "./voiceCues.ts";
 
-// ── Client injection (tests swap in a mock) ────────────────────────────────
-
-/** The subset of the SDK client this adapter uses. A real `Anthropic` instance satisfies it. */
-export type ClaudeClient = Pick<Anthropic, "messages" | "beta">;
-
-let client: ClaudeClient | null = null;
 let log: (msg: string) => void = (msg) => console.info(msg);
-
-/** Inject a client (tests) or reset to the default lazily-created SDK client with `null`. */
-export function setClient(c: ClaudeClient | null): void { client = c; }
 /** Redirect the adapter's one-line usage logs (default: console.info). */
 export function setLogger(fn: (msg: string) => void): void { log = fn; }
 
+/** How long each role may take before the request is given up. */
+export const ROLE_TIMEOUT_MS: Record<CliRole, number> = { router: 30_000, fillers: 20_000, solver: 180_000 };
+
+// ── Requests (what a role sends: earlier turns + this turn) ──────────────────
+
+export interface ChatMessage { role: "user" | "assistant"; content: string }
+/** The messages of one request. A harness gets them flattened into one user message (`flattenMessages`). */
+export interface ChatParams { messages: ChatMessage[] }
+
+/** The request's messages as one user message: earlier turns as a transcript, then this turn. */
+export function flattenMessages(params: ChatParams): string {
+  const msgs = [...params.messages];
+  const last = msgs.pop();
+  if (!msgs.length) return last?.content ?? "";
+  const history = msgs.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n\n");
+  return `Conversation so far (oldest first):\n\n${history}\n\n---\n\nThis turn:\n${last?.content ?? ""}`;
+}
+
+/** The first {...} object in a text (strips code fences / stray prose around it). */
+export function extractJsonObject(text: string): string | null {
+  const i = text.indexOf("{");
+  const j = text.lastIndexOf("}");
+  return i >= 0 && j > i ? text.slice(i, j + 1) : null;
+}
+
 // ── Prompt capture (debug view on the Chat page) ───────────────────────────
 
-type AnyParams = {
-  model: string; system?: unknown; messages: { role: string; content: unknown }[];
-  tools?: { name?: string }[]; tool_choice?: { type: string; name?: string };
-  max_tokens?: number; output_config?: unknown; betas?: unknown; speed?: unknown; fallbacks?: unknown;
-};
+const ROLE_PROMPT_LABEL: Record<CliRole, string> = { router: "router.md + JSON output format", fillers: "fillers.md + JSON output format", solver: "solver.md" };
 
-const blockText = (c: unknown): string =>
-  typeof c === "string" ? c
-    : Array.isArray(c) ? c.map((b: { type?: string; text?: string }) => (b.type === "text" ? b.text ?? "" : `[${b.type ?? "block"}]`)).join("\n")
-    : "";
-
-/** The request as sent, for display: labelled system blocks, messages (last one = this turn), tools, settings. */
-export function promptInfo(target: LlmPrompt["target"], params: AnyParams, systemLabels: string[]): LlmPrompt {
-  const sys = Array.isArray(params.system) ? params.system as { text?: string; cache_control?: unknown }[] : params.system ? [{ text: String(params.system) }] : [];
-  const n = params.messages.length;
+/** What a call was sent, for the prompt inspector. */
+export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: ChatParams): LlmPrompt {
+  const provider = choice.provider;
+  if (isApiProvider(provider)) {
+    // A model API gets the turns as real messages, not flattened.
+    return {
+      target: role, model: `${choice.model || "no model"} via ${LLM_PROVIDER_LABELS[provider]}`,
+      system: [{ label: ROLE_PROMPT_LABEL[role], text: roleSystem(role, provider).system }],
+      messages: params.messages.map((m, i) => ({ role: m.role, text: m.content, ...(i === params.messages.length - 1 ? { label: "this turn" } : {}) })),
+      settings: { api: LLM_PROVIDER_LABELS[provider], ...(choice.level ? { level: choice.level } : {}), run: describeApi(provider, choice) },
+    };
+  }
+  const spec = agentSpec(role, choice);
   return {
-    target,
-    model: params.model,
-    system: sys.map((b, i) => ({ label: systemLabels[i] ?? `system ${i + 1}`, text: b.text ?? "", ...(b.cache_control ? { cached: true } : {}) })),
-    messages: params.messages.map((m, i) => ({
-      role: m.role as "user" | "assistant",
-      text: blockText(m.content),
-      label: i === n - 1 ? "this turn" : "earlier turn",
-    })),
-    ...(params.tools?.length ? { tools: params.tools.map((t) => t.name ?? "?") } : {}),
-    ...(params.tool_choice ? { toolChoice: params.tool_choice.name ? `${params.tool_choice.type}: ${params.tool_choice.name}` : params.tool_choice.type } : {}),
-    settings: Object.fromEntries(Object.entries({
-      max_tokens: params.max_tokens, output_config: params.output_config, betas: params.betas, speed: params.speed, fallbacks: params.fallbacks,
-    }).filter(([, v]) => v !== undefined)),
+    target: role, model: `${spec.model || "default model"} via ${LLM_PROVIDER_LABELS[spec.harness]}`,
+    system: [{ label: ROLE_PROMPT_LABEL[role] + (spec.project ? " + project note" : ""), text: spec.system }],
+    messages: [{ role: "user", text: flattenMessages(params), label: "this turn (earlier turns flattened in)" }],
+    settings: {
+      harness: LLM_PROVIDER_LABELS[spec.harness], ...(spec.level ? { level: spec.level } : {}), ...(spec.speed ? { speed: spec.speed } : {}),
+      ...(spec.project ? { cwd: spec.project } : {}), run: describeAgent(spec),
+    },
   };
 }
 
-/** The final message as a debug response (or the error), with the time since the request. */
-export function responseInfo(
-  target: LlmPrompt["target"], t0: number, final: { model?: string; stop_reason?: string | null; usage?: unknown } | null, err?: unknown,
-): LlmResponse {
+/** The result of a call as a debug response, with the time since the request. */
+export function harnessResponseInfo(target: LlmPrompt["target"], t0: number, r: HarnessResult, choice: LlmChoice): LlmResponse {
+  const own = (r.usage as { llmCost?: { billing?: "api" | "subscription" } } | null)?.llmCost;
+  const speed = (r.usage as { speed?: string } | null)?.speed;
   return {
-    target,
-    ...(final?.model ? { model: final.model } : {}),
-    ...(final ? { stopReason: final.stop_reason ?? null, usage: final.usage, raw: final } : {}),
+    target, model: r.model, stopReason: r.stopReason, usage: r.usage,
+    // Claude Code runs on the subscription; the others say who pays.
+    billing: own?.billing ?? "subscription",
     durationMs: Math.round(performance.now() - t0),
-    ...(err !== undefined ? { error: err instanceof Error ? err.message : String(err) } : {}),
+    raw: {
+      ...(typeof r.raw === "object" && r.raw ? r.raw as object : { raw: r.raw }), warmAgent: r.warm,
+      ...(choice.speed === "fast" && speed && speed !== "fast" ? { speedNote: `fast requested, served ${speed}` } : {}),
+    },
   };
+}
+
+/** A failed call as a debug response. */
+export function errorResponseInfo(target: LlmPrompt["target"], t0: number, err: unknown): LlmResponse {
+  return { target, durationMs: Math.round(performance.now() - t0), error: err instanceof Error ? err.message : String(err) };
 }
 
 // ── Spoken language ─────────────────────────────────────────────────────────
@@ -81,104 +107,74 @@ export function languageLine(language: string | undefined, what: string): string
   return language ? `The user spoke ${languageName(language)}: write ${what} in ${languageName(language)}.` : "";
 }
 
-// ── claude -p transport (pre-spawned agents, see claudeCli.ts) ───────────────────────────────────
+// ── Role prompts ────────────────────────────────────────────────────────────
 
-/** The router's output format through the CLI (no forced tool call there): the tool's JSON, as text. */
-const CLI_ROUTER_FORMAT = `
+/** The router's output format: one JSON object, written as text. */
+const ROUTER_FORMAT = `
 
 ## Output format
 Reply with ONLY one JSON object (no code fences, no other text), keys in exactly this order:
 {"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "say": "<what to speak now>", "question": "<the delegated request, or empty>"}
 "intent" and "estimate_seconds" come first because the reply is streamed and acted on as it arrives.`;
 
-const CLI_FILLERS_FORMAT = `
+const FILLERS_FORMAT = `
 
 ## Output format
 Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…", "…", "…"]}`;
 
-registerCliSpecs(() => {
-  const p = prompts();
-  return {
-    router: { model: MODELS.haiku, effort: "low", system: () => routerSystem() + CLI_ROUTER_FORMAT },
-    fillers: { model: MODELS.haiku, effort: "low", system: () => p.fillers + CLI_FILLERS_FORMAT },
-    opus: { model: MODELS.opus, effort: "medium", system: () => `${p.opus}\n\n${p.fixture}` },
-  };
-});
+/** Added to the solver's system prompt when it works in the project folder (Claude Code's tool names). */
+const PROJECT_NOTE = `Your working directory is the project you're answering about. Find the code behind the pointed elements with Glob, Grep and Read: start from the \`selector\` line (tag, ids, classes, text), then read the markup, CSS and script that render it, and the project's DECISIONS.md. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, make the change with Edit or Write, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`;
+/** Added to the solver's system prompt when there's no project folder (no tools). */
+const NO_TOOLS_NOTE = `You have no tools in this session: no files, no shell, no web. Answer from the request and the conversation alone, in the format above, and never write a tool call.`;
+/** PROJECT_NOTE for the other harnesses (their file tools have other names). */
+const PROJECT_NOTE_ANY_HARNESS = PROJECT_NOTE
+  .replace("with Glob, Grep and Read", "with your file search and read tools")
+  .replace("make the change with Edit or Write", "make the change with your file editing tools");
 
-/** The API request's messages as one user message: earlier turns as a transcript, then this turn. */
-export function cliUserMessage(params: AnyParams): string {
-  const msgs = params.messages.map((m) => ({ role: m.role, text: blockText(m.content) }));
-  const last = msgs.pop();
-  if (!msgs.length) return last?.text ?? "";
-  const history = msgs.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n\n");
-  return `Conversation so far (oldest first):\n\n${history}\n\n---\n\nThis turn:\n${last?.text ?? ""}`;
+const readText = (p: string): string => readFileSync(join(SERVER_DIR, p), "utf8");
+
+/** router.md's threads section starts here: it goes in the turn's message (threads mode), not the system prompt. */
+const THREADS_MARKER = "<!-- threads";
+
+let cachedPrompts: { router: string; routerThreads: string; solver: string; fillers: string } | null = null;
+function prompts(): { router: string; routerThreads: string; solver: string; fillers: string } {
+  return (cachedPrompts ??= (() => {
+    const router = readText("prompts/router.md");
+    const i = router.indexOf(THREADS_MARKER);
+    return {
+      router: (i < 0 ? router : router.slice(0, i)).trim(),
+      routerThreads: i < 0 ? "" : router.slice(router.indexOf("\n", i) + 1).trim(),
+      solver: readText("prompts/solver.md").trim(),
+      fillers: readText("prompts/fillers.md").trim(),
+    };
+  })());
 }
 
-/** The first {...} object in a text (strips code fences / stray prose around it). */
-export function extractJsonObject(text: string): string | null {
-  const i = text.indexOf("{");
-  const j = text.lastIndexOf("}");
-  return i >= 0 && j > i ? text.slice(i, j + 1) : null;
+/** Each role's system prompt on a harness; the solver works in the project folder when there is one. */
+export function roleSystem(role: CliRole, harness: LlmProvider): { system: string; project?: string } {
+  if (role === "router") return { system: routerSystem() + ROUTER_FORMAT };
+  if (role === "fillers") return { system: prompts().fillers + FILLERS_FORMAT };
+  const dir = projectDir();
+  // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
+  if (!dir) return { system: `${prompts().solver}\n\n${NO_TOOLS_NOTE}` };
+  return { system: `${prompts().solver}\n\n${harness === "claude-code" ? PROJECT_NOTE : PROJECT_NOTE_ANY_HARNESS}`, project: dir };
 }
+registerRoleSpecs(roleSystem);
 
-/** What a claude -p agent was sent, for the prompt inspector. */
-export function cliPromptInfo(target: "router" | "fillers" | "opus", params: AnyParams): LlmPrompt {
-  const spec = cliSpec(target);
-  const label = target === "router" ? "router.md + JSON output format" : target === "fillers" ? "fillers.md + JSON output format" : "opus.md + fixture codebase";
-  return {
-    target, model: `${spec.model} via claude -p`,
-    system: [{ label: `${label} (--system-prompt)`, text: spec.system() }],
-    messages: [{ role: "user", text: cliUserMessage(params), label: "this turn (one stream-json user message; earlier turns flattened in)" }],
-    settings: { transport: "pre-spawned claude -p agent", effort: spec.effort, args: CLI_ARGS_SUMMARY },
-  };
-}
+/** The tier's choice for a role (the default when a caller gives none). */
+const choiceFor = (llm: LlmChoice | undefined, role: CliRole): LlmChoice => llm ?? DEFAULT_CONFIG.llm[ROLE_TIER[role]];
 
-export function cliResponseInfo(target: LlmPrompt["target"], t0: number, r: CliResult): LlmResponse {
-  return {
-    target, model: r.model, stopReason: r.stopReason, usage: r.usage, billing: "subscription",
-    durationMs: Math.round(performance.now() - t0),
-    raw: { ...r.raw, warmAgent: r.warm, cliCostUsd: r.cliCostUsd, cliDurationMs: r.durationMs, cliDurationApiMs: r.durationApiMs },
-  };
-}
-
-// ── Provider: OpenRouter (Anthropic-compatible Messages API) or Anthropic directly ──
-
-export type ClaudeProvider = "openrouter" | "anthropic";
-
-/** CLAUDE_PROVIDER wins; otherwise OpenRouter whenever OPENROUTER_API_KEY is set. */
-export function claudeProvider(): ClaudeProvider {
-  const p = process.env.CLAUDE_PROVIDER;
-  if (p === "openrouter" || p === "anthropic") return p;
-  return process.env.OPENROUTER_API_KEY ? "openrouter" : "anthropic";
-}
-
-export function hasClaudeCredentials(): boolean {
-  return claudeProvider() === "openrouter" ? !!process.env.OPENROUTER_API_KEY : !!process.env.ANTHROPIC_API_KEY;
-}
-
-const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
-const OPENROUTER_MODELS: Record<string, string> = {
-  [MODELS.haiku]: "anthropic/claude-haiku-5.5",
-  [MODELS.opus]: "anthropic/claude-opus-5.5",
-};
-
-/** Model ID for the active provider. */
-export function modelId(model: string): string {
-  return claudeProvider() === "openrouter" ? (OPENROUTER_MODELS[model] ?? model) : model;
-}
-
-function getClient(): ClaudeClient {
-  // maxRetries: 2 is the SDK default; fast-mode requests override it to 0 (see solveWithOpus).
-  if (client) return client;
-  if (claudeProvider() === "openrouter") {
-    return (client = new Anthropic({
-      baseURL: OPENROUTER_BASE_URL,
-      apiKey: null,
-      authToken: process.env.OPENROUTER_API_KEY ?? null,
-      defaultHeaders: { "X-Title": "Realtime Voice Latency Lab" },
-    }));
-  }
-  return (client = new Anthropic());
+/**
+ * One fast-tier request (router, progress lines): on a model API with the role's system prompt and the real
+ * messages, or on a warm harness agent with the messages flattened into one.
+ */
+function fastRequest(
+  role: "router" | "fillers", choice: LlmChoice, params: ChatParams, onText: ((d: string) => void) | undefined, timeoutMs: number,
+): Promise<HarnessResult> {
+  const provider = choice.provider;
+  return isApiProvider(provider)
+    ? apiRequest(provider, choice, { system: roleSystem(role, provider).system, messages: params.messages }, onText, timeoutMs)
+    : harnessRequest(role, choice, flattenMessages(params), onText, timeoutMs);
 }
 
 export class ClaudeRefusalError extends Error {
@@ -188,58 +184,15 @@ export class ClaudeRefusalError extends Error {
   }
 }
 
-// ── Prompts and fixture context (loaded once, byte-stable so the cache prefix matches) ──
-
-const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
-const readText = (p: string): string => readFileSync(here(p), "utf8");
-
-/** Files Opus answers questions about, in a fixed order. `path` is how the model sees them. */
-const FIXTURE_FILES: { file: string; path: string; numbered: boolean }[] = [
-  { file: "demo.html", path: "web/cursor/demo/demo.html", numbered: true },
-  { file: "demo.css", path: "web/cursor/demo/demo.css", numbered: true },
-  { file: "demo.ts", path: "web/cursor/demo/demo.ts", numbered: true },
-  { file: "DECISIONS.md", path: "DECISIONS.md", numbered: false },
-  { file: "claude-code-session.md", path: "notes/claude-code-session-2026-03-18.md", numbered: false },
-];
-
-let cachedPrompts: { router: string; opus: string; fillers: string; fixture: string } | null = null;
-
-export function loadFixtureContext(): string {
-  const parts = FIXTURE_FILES.map(({ file, path, numbered }) => {
-    const text = readText(`../fixtures-context/${file}`).replace(/\s+$/, "");
-    const body = numbered
-      ? text.split("\n").map((line, i) => `${String(i + 1).padStart(3, " ")}| ${line}`).join("\n")
-      : text;
-    return `<file path="${path}"${numbered ? ' line_numbers="true"' : ""}>\n${body}\n</file>`;
-  });
-  return `<codebase name="lumen-site">\nCode files are shown with line numbers ("NN| ") that are not part of the file.\n\n${parts.join("\n\n")}\n</codebase>`;
-}
-
-function prompts(): { router: string; opus: string; fillers: string; fixture: string } {
-  return (cachedPrompts ??= {
-    router: readText("../prompts/router.md").trim(),
-    opus: readText("../prompts/opus.md").trim(),
-    fillers: readText("../prompts/fillers.md").trim(),
-    fixture: loadFixtureContext(),
-  });
-}
-
-// ── Pointing formatter (local; shared/pointing.ts formatPointingContext belongs to T9) ──
+// ── Pointing formatter ──────────────────────────────────────────────────────
 
 const ALGO_PREFERENCE = ["dwellMode", "dwell", "mode", "atStart"];
-
-function tagFromPath(path: string | null): string {
-  if (!path) return "element";
-  const last = path.split(">").pop()!.trim();
-  const tag = /^[a-zA-Z][a-zA-Z0-9-]*/.exec(last)?.[0];
-  return tag ? tag.toLowerCase() : "element";
-}
 
 /**
  * One line per pointing word, using the preferred algorithm's pick:
  * `Pointing: "this" → <div> "Feature card grid" [data-source=web/cursor/demo/demo.html:34]`
  */
-export function formatPointingForPrompt(targets: PointingTarget[]): string {
+export function formatPointingForPrompt(targets: PointingTarget[], opts: { selectors?: boolean } = {}): string {
   // One line per pointing word (keyed by its reference number), using the best algorithm that resolved it.
   const byWord = new Map<string, PointingTarget[]>();
   for (const t of targets) {
@@ -253,76 +206,41 @@ export function formatPointingForPrompt(targets: PointingTarget[]): string {
       return (t.sample ? 0 : 100) + (i < 0 ? ALGO_PREFERENCE.length : i);
     };
     const best = [...group].sort((a, b) => rank(a) - rank(b))[0]!;
-    lines.push(formatPointingLine({ ...best, word: best.word.replace(/[^\p{L}\p{N}'-]/gu, "") }));
+    const line = formatPointingLine({ ...best, word: best.word.replace(/[^\p{L}\p{N}'-]/gu, "") });
+    // The CSS selector that matches the element on the live page: the handle the solver uses to find its markup.
+    const selector = opts.selectors ? best.sample?.elementPath : null;
+    lines.push(selector ? `${line}\n   selector: ${selector}` : line);
   }
   return lines.length ? lines.join("\n") : "Pointing: none (the user was not pointing at anything we could resolve)";
 }
 
-// ── Haiku router ───────────────────────────────────────────────────────────
+// ── Router ───────────────────────────────────────────────────────────────────
 
 /**
  * Estimates above this many seconds count as long tasks. The router prompt tells the user "this will take a
  * while" above it (the number is substituted into router.md's {{LONG_TASK_SECONDS}}). Keep it in sync with
- * `RunConfig.longTaskSeconds`' default; the prompt can't follow a per-run override (types.ts has no field for it).
+ * `RunConfig.longTaskSeconds`' default; another threshold is given per turn.
  */
 export const DEFAULT_LONG_TASK_SECONDS = 20;
 
 const ROUTE_INTENTS_AUTO = ["question", "task", "clarify", "answer"] as const satisfies readonly RouteIntent[];
 const ROUTE_INTENTS_FORCED = ["question", "task", "clarify"] as const satisfies readonly RouteIntent[];
 
-/**
- * The router's one tool, always forced (forced tool choice skips thinking: fastest first token). Property
- * order is the generation order: decision fields first, then the spoken text, then the question.
- * `forced` mode drops "answer" from the enum.
- */
-export function routerTool(mode: RouterMode): Anthropic.Tool {
-  return {
-    name: "route",
-    description:
-      "Decide what the user wants and what to say right now. Fill the fields in order: intent, estimate_seconds, say, question. `say` is spoken aloud the moment you write it.",
-    input_schema: {
-      type: "object",
-      properties: {
-        intent: {
-          type: "string",
-          enum: mode === "forced" ? [...ROUTE_INTENTS_FORCED] : [...ROUTE_INTENTS_AUTO],
-          description: mode === "forced"
-            ? "question = wants information; task = wants something changed or done; clarify = you'd have to guess, so ask one follow-up question."
-            : "question = wants information; task = wants something changed or done; clarify = you'd have to guess, so ask one follow-up question; answer = small talk you answer yourself.",
-        },
-        estimate_seconds: {
-          type: "integer",
-          description: "question/task only: how many seconds the colleague needs. Leave out for clarify/answer.",
-        },
-        say: { type: "string", description: "Spoken immediately. Rules depend on intent and estimate (see instructions)." },
-        question: {
-          type: "string",
-          description: "question/task only: precise, self-contained request for the colleague, with pointing words resolved (label + data-source). Leave out for clarify/answer.",
-        },
-      },
-      required: ["intent", "say"],
-    },
-    eager_input_streaming: true,
-  };
-}
-
 export interface RouterInput { intent: RouteIntent; estimateS: number | null; say: string; question: string }
 
-type HistoryMessage = { role: "user" | "assistant"; content: string };
-
 /** Earlier chat turns as alternating user/assistant messages (never empty content). */
-export function historyMessages(history: ChatTurn[], forOpus: boolean): HistoryMessage[] {
-  return history.flatMap((t): HistoryMessage[] => [
+export function historyMessages(history: ChatTurn[], forSolver: boolean): ChatMessage[] {
+  return history.flatMap((t): ChatMessage[] => [
     { role: "user", content: t.user || "(inaudible)" },
     {
       role: "assistant",
-      // Opus answers in the SPOKEN:-first format; replay its own detailed answer when it gave one.
-      content: (forOpus ? (t.detail ? trimDetail(t.detail) : `SPOKEN: ${t.assistant}`) : t.assistant) || "(no reply)",
+      // The solver answers in the SPOKEN:-first format; replay its own detailed answer when it gave one.
+      content: (forSolver ? (t.detail ? trimDetail(t.detail) : `SPOKEN: ${t.assistant}`) : t.assistant) || "(no reply)",
     },
   ]);
 }
 
-/** Validates the complete `route` input. question/task need a question; clarify/answer need something to say. */
+/** Validates the complete router JSON. question/task need a question; clarify/answer need something to say. */
 export function validateRouterInput(v: unknown, mode: RouterMode = "auto"): RouterInput | null {
   if (typeof v !== "object" || v === null) return null;
   const { intent, estimate_seconds, say, question } = v as Record<string, unknown>;
@@ -347,162 +265,168 @@ const MODE_LINE: Record<RouterMode, string> = {
   auto: "Mode: auto. You may use answer for small talk or trivial things; otherwise question, task or clarify.",
 };
 
+/** Threads mode's output format: the thread fields between `estimate_seconds` and `say`. */
+const THREADS_FORMAT = `Output format for this turn (instead of the one in your instructions), keys in exactly this order:
+{"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "target": "new" | "<thread id>" | "central", "relation": "followup" | "correction" | null, "tell": "<thread id>" | null, "say": "<what to speak now>", "question": "<the delegated request, or empty>"}`;
+
+/** One line per thread: `- t1: the 'Get started' button (running, under the cursor): Making it bigger.` */
+export function formatThreadBriefs(threads: readonly ThreadBrief[]): string {
+  if (!threads.length) return "Threads: none yet.";
+  return ["Threads:", ...threads.map((t) => {
+    const where = [t.state, ...(t.onCurrentPage ? [] : ["on another page"]), ...(t.underCursor ? ["under the cursor"] : [])].join(", ");
+    return `- ${t.threadId}: ${t.title} (${where})${t.summary ? `: ${t.summary}` : ""}`;
+  })].join("\n");
+}
+
+/** The threads block of the turn's message: rules, the pointed element, the threads, the output format. */
+export function threadsBlock(threads: readonly ThreadBrief[], anchorLabel?: string): string {
+  return [
+    prompts().routerThreads,
+    `Pointed element this turn: ${anchorLabel ?? "none"}.`,
+    formatThreadBriefs(threads),
+    THREADS_FORMAT,
+  ].join("\n\n");
+}
+
 export function buildRouterParams(
   transcript: string, pointing: PointingTarget[], mode: RouterMode, history: ChatTurn[] = [],
-  extra: { pageContext?: string; longTaskSeconds?: number; language?: string } = {},
-): Anthropic.MessageStreamParams {
-  // Per-turn context goes in the user message so the cached system prompt stays byte-identical.
+  extra: { pageContext?: string; longTaskSeconds?: number; language?: string; voiceCues?: boolean; threads?: ThreadBrief[]; anchorLabel?: string } = {},
+): ChatParams {
+  // Per-turn context goes in the user message so the system prompt stays the same (warm agents start with it).
   const lines = [`${MODE_LINE[mode]}`, `Transcript: "${transcript}"`, formatPointingForPrompt(pointing)];
   if (extra.pageContext) lines.push(extra.pageContext);
   const lang = languageLine(extra.language, "`say` (and a clarifying question)");
   if (lang) lines.push(lang);
+  if (extra.voiceCues) lines.push(FISH_ACK_CUES);
   if (extra.longTaskSeconds !== undefined && extra.longTaskSeconds !== DEFAULT_LONG_TASK_SECONDS) {
     lines.push(`Long-task threshold for this conversation: ${extra.longTaskSeconds} seconds (use it instead of ${DEFAULT_LONG_TASK_SECONDS}).`);
   }
-  const tool = routerTool(mode);
-  return {
-    model: modelId(MODELS.haiku),
-    max_tokens: 2048,
-    output_config: { effort: "low" },
-    // No temperature/top_p/top_k: non-default values are a 400 on Haiku 5.5.
-    system: [{ type: "text", text: routerSystem(), cache_control: { type: "ephemeral" } }],
-    tools: [tool],
-    // Forced in both modes: no thinking block, the tool input starts streaming right away.
-    tool_choice: { type: "tool", name: tool.name, disable_parallel_tool_use: true },
-    messages: [...historyMessages(history, false), {
-      role: "user",
-      content: lines.join("\n"),
-    }],
-  };
+  if (extra.threads) lines.push("", threadsBlock(extra.threads, extra.anchorLabel));
+  return { messages: [...historyMessages(history, false), { role: "user", content: lines.join("\n") }] };
 }
 
-export const routeWithHaiku: RouteWithHaiku = async ({
-  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, backend,
+/**
+ * Threads mode: the complete router JSON validated like validateRouterInput (any mode's intents; `answer` is
+ * checked by resolveThreadRoute), plus a `tell` answer, whose `say` may be empty (the server speaks the result).
+ */
+function validateThreadsInput(v: unknown, ctx: ThreadRouteContext): RouterInput | null {
+  const input = validateRouterInput(v, "auto");
+  if (input) return input;
+  const { intent, tell } = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  if (intent === "answer" && typeof tell === "string" && ctx.threadIds.includes(tell)) return { intent: "answer", estimateS: null, say: "", question: "" };
+  return null;
+}
+
+export const routeTurn: RouteTurn = async ({
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, voiceCues, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, llm,
+  threads, anchorLabel,
 }) => {
-  const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language });
-  const cli = backend === "cli";
-  onPrompt?.(cli ? cliPromptInfo("router", params as AnyParams) : promptInfo("router", params as AnyParams, ["router.md"]));
+  const choice = choiceFor(llm, "router");
+  const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language, voiceCues, threads, anchorLabel });
+  onPrompt?.(harnessPromptInfo("router", choice, params));
+  const ctx: ThreadRouteContext | null = threads
+    ? { threadIds: threads.map((t) => t.threadId), pointed: !!anchorLabel, forced: mode === "forced" }
+    : null;
   const route = new RouteInputStream(
     {
       onDecision: (d) => onDecision?.(d),
       onSay: (d, kind) => onSpokenDelta(d, kind),
       onSayEnd: (kind) => onSpokenEnd?.(kind),
     },
-    mode === "forced" ? ROUTE_INTENTS_FORCED : ROUTE_INTENTS_AUTO,
+    // Threads mode: `answer` streams in any mode (a tell); resolveThreadRoute turns a forced-mode answer without it into clarify.
+    mode === "forced" && !ctx ? ROUTE_INTENTS_FORCED : ROUTE_INTENTS_AUTO,
     mode === "forced" ? "clarify" : "answer",
+    ctx ? (intent, raw) => resolveThreadRoute(intent, raw, ctx) : undefined,
   );
   let firstToken = false;
-  let toolIndex = -1;
+  let started = false;
   let json = "";
-  const first = (): void => { if (!firstToken) { firstToken = true; mark("llm.firstToken"); } };
 
-  mark("llm.request", { model: params.model, mode, ...(cli ? { backend: "claude -p" } : {}) });
+  mark("llm.request", { model: choice.model, mode, backend: choice.provider });
   const t0 = performance.now();
+  let res: HarnessResult | null = null;
   let streamError: unknown = null;
-  let final: Anthropic.Message | null = null;
-  if (cli) {
-    // claude -p: the same JSON, written as text (no forced tool call through the CLI). Feed it from the first "{".
-    let started = false;
-    try {
-      const res = await cliRequest("router", cliUserMessage(params as AnyParams), {
-        onText: (d) => {
-          first();
-          let chunk = d;
-          if (!started) {
-            const i = chunk.indexOf("{");
-            if (i < 0) return;
-            started = true;
-            chunk = chunk.slice(i);
-            toolIndex = 0;
-            mark("llm.toolCall", { name: "route (json text)" });
-          }
-          json += chunk;
-          route.feed(chunk);
-        },
-      });
-      json = extractJsonObject(json) ?? json;
-      final = { model: res.model ?? params.model, stop_reason: res.stopReason ?? "end_turn", usage: res.usage, content: [] } as unknown as Anthropic.Message;
-      onResponse?.(cliResponseInfo("router", t0, res));
-    } catch (err) {
-      onResponse?.(responseInfo("router", t0, null, err));
-      if (!started) throw err;
-      streamError = err;
-    }
-  } else {
-    const stream = getClient().messages.stream(params);
-    try {
-      for await (const ev of stream) {
-        if (ev.type === "content_block_start" && ev.content_block.type === "tool_use" && toolIndex < 0) {
-          toolIndex = ev.index;
-          mark("llm.toolCall", { name: ev.content_block.name });
-        } else if (ev.type === "content_block_delta" && ev.delta.type === "input_json_delta" && ev.index === toolIndex) {
-          first();
-          json += ev.delta.partial_json;
-          route.feed(ev.delta.partial_json);
-        }
-        // Text blocks can't occur with a forced tool choice; ignore them if they ever do.
+  try {
+    // The JSON is fed to the stream parser from its first "{" (models sometimes open with a code fence).
+    res = await fastRequest("router", choice, params, (d) => {
+      if (!firstToken) { firstToken = true; mark("llm.firstToken"); }
+      let chunk = d;
+      if (!started) {
+        const i = chunk.indexOf("{");
+        if (i < 0) return;
+        started = true;
+        chunk = chunk.slice(i);
+        mark("llm.toolCall", { name: "route (json text)" });
       }
-      final = await stream.finalMessage();
-      onResponse?.(responseInfo("router", t0, final));
-    } catch (err) {
-      onResponse?.(responseInfo("router", t0, null, err));
-      // Typed API errors (auth, rate limit, 5xx…) propagate. Anything else here is the SDK failing
-      // to parse eagerly-streamed tool JSON; we handle that below like an invalid input.
-      if (err instanceof Anthropic.APIError || toolIndex < 0) throw err;
-      streamError = err;
-    }
+      json += chunk;
+      route.feed(chunk);
+    }, ROLE_TIMEOUT_MS.router);
+    json = extractJsonObject(json) ?? json;
+    onResponse?.(harnessResponseInfo("router", t0, res, choice));
+  } catch (err) {
+    onResponse?.(errorResponseInfo("router", t0, err));
+    // Nothing usable arrived: the failure is the turn's. Otherwise degrade below with what streamed.
+    if (!started) throw err;
+    streamError = err;
   }
 
-  if (final?.stop_reason === "refusal") {
-    // No server-side fallback exists for Haiku 5.5 (API-NOTES): surface it.
-    throw new ClaudeRefusalError(params.model, final.stop_details?.category ?? null, final.stop_details?.explanation ?? null);
-  }
-  const usage = final?.usage ?? null;
-  if (usage) logUsage("haiku", usage);
+  if (res?.stopReason === "refusal") throw new ClaudeRefusalError(res.model, null, null);
+  const usage = res?.usage ?? null;
+  if (usage) logUsage("router", usage, res?.model);
 
-  // Validate the eagerly-streamed input ourselves (it isn't validated server-side).
   let parsed: unknown = null;
-  if (!streamError && final?.stop_reason !== "max_tokens") {
-    if (json) {
-      try { parsed = JSON.parse(json); } catch { parsed = null; }
-    } else {
-      parsed = final?.content.find((b) => b.type === "tool_use")?.input ?? null;
-    }
+  if (!streamError && res?.stopReason !== "max_tokens" && json) {
+    try { parsed = JSON.parse(json); } catch { parsed = null; }
   }
-  const input = validateRouterInput(parsed, mode);
+  const input = ctx ? validateThreadsInput(parsed, ctx) : validateRouterInput(parsed, mode);
 
   if (input) {
     route.finish({ ...(parsed as RouteFields), intent: input.intent });
-    const decision: RouteDecision = { intent: input.intent, estimateS: input.estimateS };
-    const streamed = route.decision!;
-    if (streamed.intent !== decision.intent || streamed.estimateS !== decision.estimateS) {
-      log(`[claude] haiku route: streamed decision ${JSON.stringify(streamed)} differs from final ${JSON.stringify(decision)}`);
+    let decision: RouteDecision = { intent: input.intent, estimateS: input.estimateS };
+    if (ctx) {
+      const t = resolveThreadRoute(input.intent, parsed as RouteFields, ctx);
+      decision = { intent: t.intent, estimateS: kindFor(t.intent) === "ack" ? input.estimateS : null, target: t.target, ...(t.tell ? { tell: t.tell } : {}) };
     }
-    if (input.intent === "question" || input.intent === "task") {
-      return { delegate: { question: input.question, intent: input.intent, estimateS: input.estimateS }, decision, usage };
+    const streamed = route.decision!;
+    if (
+      streamed.intent !== decision.intent || streamed.estimateS !== decision.estimateS ||
+      JSON.stringify(streamed.target) !== JSON.stringify(decision.target) || streamed.tell !== decision.tell
+    ) {
+      log(`[claude] router: streamed decision ${JSON.stringify(streamed)} differs from final ${JSON.stringify(decision)}`);
+    }
+    if (decision.intent === "question" || decision.intent === "task") {
+      return { delegate: { question: input.question, intent: decision.intent, estimateS: input.estimateS }, decision, usage };
     }
     return { delegate: null, decision, usage };
   }
 
-  // Invalid or truncated input.
-  const why = `stop_reason=${final?.stop_reason ?? "error"}`;
+  // Invalid or truncated output.
+  const why = streamError ? `error: ${streamError instanceof Error ? streamError.message : String(streamError)}` : `stop_reason=${res?.stopReason ?? "?"}`;
   const streamed = route.decision;
+  if (streamed?.tell) {
+    // A tell needs nothing more than its decision.
+    log(`[claude] router output invalid after a tell (${why}); keeping it`);
+    route.finish();
+    return { delegate: null, decision: streamed, usage };
+  }
   if (streamed && kindFor(streamed.intent) === "answer" && route.sayComplete && route.spoken.trim()) {
     // The reply (a follow-up question or a direct answer) was complete and already spoken; only the tail broke.
-    log(`[claude] haiku route input invalid after a complete ${streamed.intent} (${why}); keeping it`);
+    log(`[claude] router output invalid after a complete ${streamed.intent} (${why}); keeping it`);
     route.finish();
     return { delegate: null, decision: streamed, usage };
   }
   if (!transcript.trim()) {
-    log(`[claude] haiku route input invalid (${why}) and the transcript is empty; nothing to delegate`);
+    log(`[claude] router output invalid (${why}) and the transcript is empty; nothing to delegate`);
     route.finish({ intent: "clarify" });
     return { delegate: null, decision: route.decision!, usage };
   }
   // Degrade gracefully: delegate the raw transcript + pointing (keeping a question/task decision already announced).
-  log(`[claude] haiku route input invalid (${why}); delegating raw transcript`);
+  log(`[claude] router output invalid (${why}); delegating raw transcript`);
   route.finish({ intent: "question" });
   const d = route.decision!;
-  const decision: RouteDecision = kindFor(d.intent) === "ack" ? d : { intent: "question", estimateS: null };
+  const decision: RouteDecision = kindFor(d.intent) === "ack"
+    ? d
+    : { intent: "question", estimateS: null, ...(d.target ? { target: d.target } : {}) };
   return {
     delegate: { question: `${transcript}\n${formatPointingForPrompt(pointing)}`, intent: decision.intent as Intent, estimateS: decision.estimateS },
     decision,
@@ -510,211 +434,214 @@ export const routeWithHaiku: RouteWithHaiku = async ({
   };
 };
 
-// ── Fillers (spoken progress lines while Opus works on a short task) ───────
-
-export const FILLERS_TOOL: Anthropic.Tool = {
-  name: "progress",
-  description: "Three short spoken progress updates, in the order they will be said.",
-  input_schema: {
-    type: "object",
-    properties: {
-      lines: { type: "array", items: { type: "string" }, description: "Exactly 3 lines, 4 to 10 words each." },
-    },
-    required: ["lines"],
-  },
-};
+// ── Progress lines (spoken while the solver works on a short task) ──────────
 
 export function buildFillersParams(
-  transcript: string, question: string, intent: Intent, pointing: PointingTarget[], language?: string,
-): Anthropic.MessageCreateParamsNonStreaming {
+  transcript: string, question: string, intent: Intent, pointing: PointingTarget[], language?: string, voiceCues = false,
+): ChatParams {
   const lang = languageLine(language, "the lines");
+  const cues = voiceCues ? `\n\n${FISH_FILLER_CUES}` : "";
   return {
-    model: modelId(MODELS.haiku),
-    max_tokens: 512,
-    output_config: { effort: "low" },
-    system: [{ type: "text", text: prompts().fillers, cache_control: { type: "ephemeral" } }],
-    tools: [FILLERS_TOOL],
-    tool_choice: { type: "tool", name: FILLERS_TOOL.name, disable_parallel_tool_use: true },
     messages: [{
       role: "user",
-      content: `Intent: ${intent === "task" ? "task (the user wants something changed)" : "question (the user wants information)"}\nUser said: "${transcript}"\nRequest passed to the colleague: ${question}\n${formatPointingForPrompt(pointing)}${lang ? `\n${lang}` : ""}`,
+      content: `Intent: ${intent === "task" ? "task (the user wants something changed)" : "question (the user wants information)"}\nUser said: "${transcript}"\nRequest passed to the colleague: ${question}\n${formatPointingForPrompt(pointing)}${lang ? `\n${lang}` : ""}${cues}`,
     }],
   };
 }
 
 const MAX_FILLERS = 3;
 
-export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, onPrompt, onResponse, backend }) => {
+export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, voiceCues, onPrompt, onResponse, llm }) => {
   const t0 = performance.now();
+  const choice = choiceFor(llm, "fillers");
   try {
-    const fp = buildFillersParams(transcript, question, intent, pointing, language);
-    if (backend === "cli") {
-      onPrompt?.(cliPromptInfo("fillers", fp as AnyParams));
-      const res = await cliRequest("fillers", cliUserMessage(fp as AnyParams));
-      onResponse?.(cliResponseInfo("fillers", t0, res));
-      let parsed: { lines?: unknown } | null = null;
-      try { parsed = JSON.parse(extractJsonObject(res.text) ?? "null"); } catch { parsed = null; }
-      const lines = (Array.isArray(parsed?.lines) ? parsed.lines : []).filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean).slice(0, MAX_FILLERS);
-      if (!lines.length) log(`[claude] fillers (claude -p): no usable lines in ${JSON.stringify(res.text.slice(0, 120))}`);
-      return { lines, usage: res.usage ?? null };
-    }
-    onPrompt?.(promptInfo("fillers", fp as AnyParams, ["fillers.md"]));
-    const msg = await getClient().messages.create(fp);
-    onResponse?.(responseInfo("fillers", t0, msg));
-    if (msg.usage) logUsage("haiku fillers", msg.usage);
-    if (msg.stop_reason === "refusal") {
-      log("[claude] haiku fillers refused; no fillers");
-      return { lines: [], usage: msg.usage ?? null };
-    }
-    const input = msg.content.find((b) => b.type === "tool_use")?.input as { lines?: unknown } | undefined;
-    const raw = Array.isArray(input?.lines) ? input.lines : [];
-    const lines = raw.filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean).slice(0, MAX_FILLERS);
-    if (!lines.length) log(`[claude] haiku fillers: no usable lines (stop_reason=${msg.stop_reason})`);
-    return { lines, usage: msg.usage ?? null };
+    const params = buildFillersParams(transcript, question, intent, pointing, language, voiceCues);
+    onPrompt?.(harnessPromptInfo("fillers", choice, params));
+    const res = await fastRequest("fillers", choice, params, undefined, ROLE_TIMEOUT_MS.fillers);
+    onResponse?.(harnessResponseInfo("fillers", t0, res, choice));
+    let parsed: { lines?: unknown } | null = null;
+    try { parsed = JSON.parse(extractJsonObject(res.text) ?? "null"); } catch { parsed = null; }
+    const lines = (Array.isArray(parsed?.lines) ? parsed.lines : [])
+      .filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean).slice(0, MAX_FILLERS);
+    if (!lines.length) log(`[claude] progress lines (${choice.provider}): no usable lines in ${JSON.stringify(res.text.slice(0, 120))}`);
+    return { lines, usage: res.usage ?? null };
   } catch (err) {
-    onResponse?.(responseInfo("fillers", t0, null, err));
-    log(`[claude] haiku fillers failed: ${err instanceof Error ? err.message : String(err)}`);
+    onResponse?.(errorResponseInfo("fillers", t0, err));
+    log(`[claude] progress lines failed: ${err instanceof Error ? err.message : String(err)}`);
     return { lines: [], usage: null };
   }
 };
 
-// ── Opus solver ────────────────────────────────────────────────────────────
+// ── Solver ───────────────────────────────────────────────────────────────────
 
-const FAST_BETA = "fast-mode-2026-02-01";
-const FALLBACK_BETA = "server-side-fallback-2026-07-01";
-
-/** The last user message for Opus. Tasks are framed as change requests here, so the system blocks never change (cache). */
-export function opusUserMessage(
-  question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string, language?: string,
+/** The last user message for the solver. Tasks are framed as change requests here, so the system prompt never changes. */
+export function solverUserMessage(
+  question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string, language?: string, voiceCues = false,
 ): string {
   const lang = languageLine(language, "the SPOKEN line and the detailed answer");
-  const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing)}${pageContext ? `\n${pageContext}` : ""}${lang ? `\n\n${lang}` : ""}`;
+  const cues = voiceCues ? `\n\n${FISH_SOLVER_CUES}` : "";
+  const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing, { selectors: true })}${pageContext ? `\n${pageContext}` : ""}${lang ? `\n\n${lang}` : ""}${cues}`;
   if (intent === "task") {
-    return `Request type: TASK. This is a change request: the user wants something changed. You can't edit files in this session, so describe the change you would make, using the task format.\n\nTask: ${question}\n\n${pointed}`;
+    return `Request type: TASK. This is a change request: the user wants something changed. If you have file tools, make the change in the project and report it in the task format. If you don't, describe the change you would make, using the task format.\n\nTask: ${question}\n\n${pointed}`;
   }
   return `Question: ${question}\n\n${pointed}`;
 }
 
-export function buildOpusParams(
-  question: string, pointing: PointingTarget[], fast: boolean, history: ChatTurn[] = [], intent: Intent = "question",
-  pageContext?: string, language?: string,
-): BetaMessageStreamParams {
-  const p = prompts();
+export function buildSolverParams(
+  question: string, pointing: PointingTarget[], history: ChatTurn[] = [], intent: Intent = "question",
+  pageContext?: string, language?: string, voiceCues = false,
+): ChatParams {
   return {
-    model: modelId(MODELS.opus),
-    max_tokens: 16000,
-    output_config: { effort: "medium" }, // explicit: Opus 5.5 can't disable thinking; effort is the control
-    system: [
-      { type: "text", text: p.opus },
-      { type: "text", text: p.fixture, cache_control: { type: "ephemeral" } },
-    ],
-    messages: [...historyMessages(history, true), {
-      role: "user",
-      content: opusUserMessage(question, pointing, intent, pageContext, language),
-    }],
-    // OpenRouter rejects `fallbacks: "default"` (400), so the refusal fallback is Anthropic-direct only.
-    // It accepts `speed: "fast"` but serves standard speed (usage.speed === "standard"); cost follows usage.speed.
-    ...(claudeProvider() === "anthropic"
-      ? { betas: fast ? [FAST_BETA, FALLBACK_BETA] : [FALLBACK_BETA], fallbacks: "default" as const }
-      : fast ? { betas: [FAST_BETA] } : {}),
-    ...(fast ? { speed: "fast" as const } : {}),
+    messages: [...historyMessages(history, true), { role: "user", content: solverUserMessage(question, pointing, intent, pageContext, language, voiceCues) }],
   };
 }
 
-export const solveWithOpus: SolveWithOpus = async ({ mark, question, pointing, fast, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, backend }) => {
+export const solveTask: SolveTask = async ({ mark, question, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm }) => {
   const t0 = performance.now();
-  const cli = backend === "cli";
+  const choice = choiceFor(llm, "solver");
   let text = "";
   let firstToken = false;
   let spokenReady = false;
-  let fastFellBack = false;
-  const fallbacks: { from: string; to: string }[] = [];
-  let cliResult: CliResult | null = null;
   const parser = new SpokenLineParser((line, viaPrefix) => {
     spokenReady = true;
-    mark("opus.spokenReady", { viaPrefix });
+    mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-
-  const run = async (useFast: boolean): Promise<Anthropic.Beta.Messages.BetaMessage> => {
-    if (cli) {
-      // claude -p: same system text and messages; fast mode / refusal fallback aren't available through the CLI.
-      const params = buildOpusParams(question, pointing, false, history, intent, pageContext, language);
-      onPrompt?.(cliPromptInfo("opus", params as AnyParams));
-      mark("opus.request", { model: params.model, fast: false, backend: "claude -p", ...(intent === "task" ? { intent } : {}) });
-      const res = await cliRequest("opus", cliUserMessage(params as AnyParams), {
-        onText: (d) => {
-          if (!firstToken) { firstToken = true; mark("opus.firstToken"); }
-          text += d;
-          onDelta(d);
-          parser.feed(d);
-        },
-      });
-      cliResult = res;
-      return { model: res.model ?? params.model, stop_reason: res.stopReason ?? "end_turn", usage: res.usage ?? {}, content: [] } as unknown as Anthropic.Beta.Messages.BetaMessage;
-    }
-    const params = buildOpusParams(question, pointing, useFast, history, intent, pageContext, language);
-    if (!fastFellBack) onPrompt?.(promptInfo("opus", params as AnyParams, ["opus.md", "fixture codebase"]));
-    mark("opus.request", { model: params.model, fast: useFast, ...(intent === "task" ? { intent } : {}), ...(fastFellBack ? { fastFallback: true } : {}) });
-    // Fast mode: no SDK retries, so a 429 falls back to standard speed right away.
-    const stream = getClient().beta.messages.stream(params, useFast ? { maxRetries: 0 } : undefined);
-    for await (const ev of stream) {
-      if (ev.type === "content_block_start" && ev.content_block.type === "fallback") {
-        fallbacks.push({ from: ev.content_block.from.model, to: ev.content_block.to.model });
-      } else if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
-        if (!firstToken) { firstToken = true; mark("opus.firstToken"); }
-        text += ev.delta.text;
-        onDelta(ev.delta.text);
-        parser.feed(ev.delta.text);
-      }
-    }
-    return stream.finalMessage();
+  const params = buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues);
+  onPrompt?.(harnessPromptInfo("solver", choice, params));
+  mark("solver.request", {
+    model: choice.model, backend: choice.provider, fast: choice.speed === "fast",
+    ...(choice.level ? { level: choice.level } : {}), ...(intent === "task" ? { intent } : {}),
+  });
+  const onText = (d: string): void => {
+    if (!firstToken) { firstToken = true; mark("solver.firstToken"); }
+    text += d;
+    onDelta(d);
+    parser.feed(d);
   };
-
-  let final: Anthropic.Beta.Messages.BetaMessage;
+  // Harnesses other than Claude Code narrate before using their tools ("I'll check the CSS…"): that text is
+  // dropped up to the SPOKEN: line.
+  const gate = choice.provider !== "claude-code" && projectDir() ? new NarrationGate(onText) : null;
+  let res: HarnessResult;
   try {
-    try {
-      final = await run(fast);
-    } catch (err) {
-      // Fast mode has its own rate limit: on a 429 before any output, retry at standard speed.
-      if (!(fast && err instanceof Anthropic.RateLimitError && !firstToken)) throw err;
-      fastFellBack = true;
-      log("[claude] opus fast mode 429; falling back to standard speed");
-      final = await run(false);
-    }
+    res = await harnessRequest("solver", choice, flattenMessages(params), gate ? (d) => gate.feed(d) : onText, ROLE_TIMEOUT_MS.solver);
+    gate?.end();
   } catch (err) {
-    onResponse?.(responseInfo("opus", t0, null, err));
+    onResponse?.(errorResponseInfo("solver", t0, err));
     throw err;
   }
-  onResponse?.(cliResult ? cliResponseInfo("opus", t0, cliResult) : responseInfo("opus", t0, final));
+  onResponse?.(harnessResponseInfo("solver", t0, res, choice));
 
   if (!spokenReady) parser.end();
-  const usage = final.usage;
-  mark("opus.done", {
-    stopReason: final.stop_reason,
-    speed: usage?.speed ?? null,
-    cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0,
-    ...(fastFellBack ? { fastFallback: true } : {}),
-    ...(fallbacks.length ? { refusalFallbacks: fallbacks } : {}),
-  });
-  logUsage("opus", usage, final.model);
+  const usage = res.usage as { speed?: string; cache_read_input_tokens?: number } | null;
+  mark("solver.done", { stopReason: res.stopReason, speed: usage?.speed ?? null, cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0 });
+  logUsage("solver", res.usage, res.model);
 
-  if (final.stop_reason === "refusal") {
-    // The whole fallback chain declined; any partial text must be discarded by the caller.
-    throw new ClaudeRefusalError(final.model, final.stop_details?.category ?? null, final.stop_details?.explanation ?? null);
-  }
-  if (final.stop_reason === "max_tokens") log(`[claude] opus hit max_tokens; answer is truncated`);
-  return { text, usage };
+  if (res.stopReason === "refusal") throw new ClaudeRefusalError(res.model, null, null);
+  if (res.stopReason === "max_tokens") log(`[claude] solver hit its output limit; answer is truncated`);
+  return { text, usage: res.usage };
 };
 
-function logUsage(
-  who: string,
-  u: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null; cache_creation_input_tokens: number | null; speed?: string | null },
-  model?: string,
-): void {
-  log(
-    `[claude] ${who}${model ? ` (${model})` : ""} usage: input=${u.input_tokens} cache_read=${u.cache_read_input_tokens ?? 0} ` +
-      `cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens}${u.speed ? ` speed=${u.speed}` : ""}`,
-  );
+// ── Solver on an element thread (docs/PLAN-threads.md) ───────────────────────
+
+/** The pointing block of a follow-up, when the user pointed at something ("" otherwise). */
+function pointedTail(pointing: PointingTarget[], pageContext?: string, language?: string, voiceCues = false): string {
+  const lang = languageLine(language, "the SPOKEN line and the detailed answer");
+  const parts = [
+    ...(pointing.length ? [`Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing, { selectors: true })}`] : []),
+    ...(pageContext ? [pageContext] : []), ...(lang ? [lang] : []), ...(voiceCues ? [FISH_SOLVER_CUES] : []),
+  ];
+  return parts.length ? `\n\n${parts.join("\n\n")}` : "";
 }
 
+/**
+ * The message for one request on a thread (its session holds the history). request: the solver's usual message.
+ * followup: more feedback on the same element. correction: replaces the earlier instruction. reconcile: `question`
+ * is a system note to act on.
+ */
+export function threadUserMessage(
+  kind: "request" | "followup" | "correction" | "reconcile", question: string, pointing: PointingTarget[], intent: Intent = "question",
+  pageContext?: string, language?: string, voiceCues = false,
+): string {
+  const tail = pointedTail(pointing, pageContext, language, voiceCues);
+  switch (kind) {
+    case "request": return solverUserMessage(question, pointing, intent, pageContext, language, voiceCues);
+    case "followup":
+      return intent === "task"
+        ? `Follow-up on the same element (more feedback from the user; build on what you did so far). Request type: TASK: make the change and report it in the task format.\n\nTask: ${question}${tail}`
+        : `Follow-up on the same element (a further question from the user; what you found so far still applies).\n\nQuestion: ${question}${tail}`;
+    case "correction":
+      return `Correction: the user changed their mind about this element. This replaces their previous instruction: ${question}\n\nMake the final state match this request: adjust or undo what you already changed for the previous instruction where it no longer applies. Report it in the task format (SPOKEN line first, past tense).${tail}`;
+    case "reconcile":
+      return `System note (not from the user): ${question}\n\nReply in the usual format: the SPOKEN line first (one short sentence: whether your change is intact, or what you fixed), then the details.`;
+  }
+}
+
+/** The thread's harness choice, when its implementation exposes one (picks the NarrationGate and the debug labels). */
+const threadChoice = (thread: { choice?: LlmChoice }): LlmChoice | undefined => thread.choice;
+
+export const solveInThread: SolveInThread = async ({
+  thread, kind, mark, question, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues,
+}) => {
+  const t0 = performance.now();
+  const choice = threadChoice(thread);
+  let text = "";
+  let firstToken = false;
+  let spokenReady = false;
+  const parser = new SpokenLineParser((line, viaPrefix) => {
+    spokenReady = true;
+    mark("solver.spokenReady", { viaPrefix });
+    onSpokenLine(line);
+  });
+  const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues);
+  const params: ChatParams = { messages: [{ role: "user", content: user }] };
+  if (onPrompt) {
+    const info: LlmPrompt = choice
+      ? harnessPromptInfo("solver", choice, params)
+      : { target: "solver", model: "the thread's session", system: [], messages: [{ role: "user", text: user }] };
+    onPrompt({
+      ...info,
+      messages: [{ role: "user", text: user, label: `thread ${kind} (the session holds the history)` }],
+      settings: { ...info.settings, thread: thread.id, live: thread.live },
+    });
+  }
+  mark("solver.request", {
+    ...(choice ? { model: choice.model, backend: choice.provider, fast: choice.speed === "fast", ...(choice.level ? { level: choice.level } : {}) } : {}),
+    thread: thread.id, kind, ...(intent === "task" ? { intent } : {}),
+  });
+  const onText = (d: string): void => {
+    if (!firstToken) { firstToken = true; mark("solver.firstToken"); }
+    text += d;
+    onDelta(d);
+    parser.feed(d);
+  };
+  // As in solveTask: other harnesses' narration is dropped up to the SPOKEN: line (also when the harness is unknown).
+  const gate = choice?.provider !== "claude-code" && projectDir() ? new NarrationGate(onText) : null;
+  let res: Awaited<ReturnType<typeof thread.send>>;
+  try {
+    res = await thread.send(user, gate ? (d) => gate.feed(d) : onText, ROLE_TIMEOUT_MS.solver);
+    gate?.end();
+  } catch (err) {
+    onResponse?.(errorResponseInfo("solver", t0, err));
+    throw err;
+  }
+  const info = harnessResponseInfo("solver", t0, res, choice ?? { provider: "claude-code", model: res.model });
+  onResponse?.({ ...info, raw: { ...(info.raw as object), thread: thread.id, reopened: res.reopened, filesTouched: res.filesTouched } });
+
+  if (!spokenReady) parser.end();
+  const usage = res.usage as { speed?: string; cache_read_input_tokens?: number } | null;
+  mark("solver.done", { stopReason: res.stopReason, speed: usage?.speed ?? null, cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0 });
+  logUsage(`solver (thread ${thread.id})`, res.usage, res.model);
+
+  if (res.stopReason === "refusal") throw new ClaudeRefusalError(res.model, null, null);
+  if (res.stopReason === "max_tokens") log(`[claude] solver hit its output limit; answer is truncated`);
+  return { text, usage: res.usage, filesTouched: res.filesTouched };
+};
+
+function logUsage(who: string, usage: unknown, model?: string): void {
+  const u = (usage ?? {}) as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; speed?: string | null };
+  log(
+    `[claude] ${who}${model ? ` (${model})` : ""} usage: input=${u.input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0} ` +
+      `cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens ?? 0}${u.speed ? ` speed=${u.speed}` : ""}`,
+  );
+}

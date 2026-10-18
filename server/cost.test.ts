@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, type RunConfig } from "../shared/config.ts";
-import { callCost, computeCost, costBreakdown, costItems, haikuCost, opusCost, realtimeCost, realtimeResponseCost } from "./cost.ts";
+import { DEFAULT_CONFIG, llmOf, type RunConfig } from "../shared/config.ts";
+import { callCost, computeCost, costBreakdown, costItems, haikuCost, llmCallCost, opusCost } from "./cost.ts";
+import { setPriceCatalog } from "./prices.ts";
 
-/** Claude over the API (billed); DEFAULT_CONFIG uses claude -p (subscription). */
-const API: RunConfig = { ...DEFAULT_CONFIG, claudeBackend: "api" };
-const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...API, ...o });
+/** DEFAULT_CONFIG: both tiers on Claude Code (subscription). */
+const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...DEFAULT_CONFIG, ...o });
+/** The fast tier on OhMyPi (billed through its API keys: calls carry their own llmCost), the smart one on Claude Code. */
+const OMP: RunConfig = cfg({ llm: { fast: { provider: "omp", model: "cerebras/gpt-oss-120b", level: "low" }, smart: DEFAULT_CONFIG.llm.smart } });
+const billed = (usd: number, o: Record<string, number> = {}) => ({ input_tokens: 300, output_tokens: 80, ...o, llmCost: { usd, billing: "api" } });
 
 describe("cost", () => {
   it("Haiku: input, output, cache read/write", () => {
@@ -29,14 +32,6 @@ describe("cost", () => {
     expect(opusCost({ cache_creation_input_tokens: 1000 }, false)).toBeCloseTo(0.005, 10);
   });
 
-  it("Realtime full and mini, cached tokens billed at the cached rate", () => {
-    const usage = { responses: [], totals: { inputText: 1000, inputAudio: 2000, cachedText: 400, cachedAudio: 500, outputText: 100, outputAudio: 1500 } };
-    // full: 600×4 + 1500×32 + 900×0.40 + 100×24 + 1500×64 = 2400 + 48000 + 360 + 2400 + 96000 = 149160 per M
-    expect(realtimeCost(usage, "gpt-realtime-2.1")).toBeCloseTo(0.14916, 10);
-    // mini: 600×0.6 + 1500×10 + 900×0.3 + 100×2.4 + 1500×20 = 360 + 15000 + 270 + 240 + 30000 = 45870 per M
-    expect(realtimeCost(usage, "gpt-realtime-2.1-mini")).toBeCloseTo(0.04587, 10);
-  });
-
   it("ElevenLabs TTS chars and Scribe seconds", () => {
     const b = costBreakdown(cfg(), { elevenChars: 250, scribeSeconds: 36 });
     expect(b.tts).toBeCloseTo(0.01, 10); // 250 × 0.04/1000
@@ -45,24 +40,30 @@ describe("cost", () => {
   });
 
   it("sums a whole pipeline turn and tolerates junk", () => {
-    const total = computeCost(cfg({ opusFast: false }), {
-      anthropic: { haiku: { input_tokens: 1000, output_tokens: 200 }, opus: { input_tokens: 500, output_tokens: 1000, speed: "standard" } },
+    const total = computeCost(OMP, {
+      anthropic: { router: billed(0.0002), solver: { input_tokens: 500, output_tokens: 1000, speed: "standard" } },
       elevenChars: 100,
       scribeSeconds: 3.6,
     });
-    // haiku 200e-6 + opus (2000+20000)e-6 + tts 0.004 + stt 0.00039
-    expect(total).toBeCloseTo(200e-6 + 0.022 + 0.004 + 0.00039, 10);
+    // router (OhMyPi, billed) 0.0002 + solver on Claude Code ($0, subscription) + tts 0.004 + stt 0.00039
+    expect(total).toBeCloseTo(0.0002 + 0.004 + 0.00039, 10);
     expect(computeCost(cfg(), {})).toBe(0);
-    expect(computeCost(cfg(), { anthropic: "nope", openai: 42, elevenChars: Number.NaN })).toBe(0);
+    expect(computeCost(cfg(), { anthropic: "nope", elevenChars: Number.NaN })).toBe(0);
   });
 });
 
 describe("progress lines", () => {
-  it("the Haiku call that writes them is billed with the router", () => {
+  it("are billed with the router (fast tier)", () => {
+    const b = costBreakdown(OMP, { anthropic: { router: billed(0.001), fillers: billed(0.0004) } });
+    expect(b.fast).toBeCloseTo(0.0014, 12);
+  });
+
+  it("on Claude Code, priced from the Claude table as saved (cache writes included)", () => {
     const fillers = { input_tokens: 346, output_tokens: 85, cache_creation_input_tokens: 809, cache_read_input_tokens: 0 };
-    const b = costBreakdown(API, { anthropic: { fillers } });
+    const item = costItems(DEFAULT_CONFIG, { anthropic: { fillers } })[0]!;
     // 346 × $0.10 + 809 × $0.125 (cache write) + 85 × $0.50, per million
-    expect(b.haiku).toBeCloseTo((346 * 0.1 + 809 * 0.125 + 85 * 0.5) / 1e6, 10);
+    expect(item).toMatchObject({ usd: 0, savedVia: "subscription" });
+    expect(item.savedUsd).toBeCloseTo((346 * 0.1 + 809 * 0.125 + 85 * 0.5) / 1e6, 10);
   });
 });
 
@@ -70,53 +71,91 @@ describe("itemized and per-call costs", () => {
   it("costItems sum to computeCost and name each part", () => {
     const usage = {
       anthropic: {
-        haiku: { input_tokens: 300, output_tokens: 170, cache_read_input_tokens: 2200 },
-        fillers: { input_tokens: 346, output_tokens: 85, cache_creation_input_tokens: 809 },
-        opus: { input_tokens: 134, output_tokens: 769, cache_read_input_tokens: 10_214, speed: "standard" },
+        router: billed(0.0003),
+        fillers: billed(0.0001),
+        solver: { input_tokens: 134, output_tokens: 769, cache_read_input_tokens: 10_214, speed: "standard" },
       },
       elevenChars: 260, elevenSegments: [{ label: "ack", chars: 40 }, { label: "filler", chars: 41 }, { label: "answer", chars: 179 }],
       scribeSeconds: 2.2,
     };
-    const items = costItems(API, usage);
-    expect(items.map((i) => i.label)).toEqual(["Haiku router", "Haiku progress lines", "Opus", "ElevenLabs TTS (eleven_v4_turbo)", "Scribe STT"]);
-    expect(items.reduce((n, i) => n + i.usd, 0)).toBeCloseTo(computeCost(API, usage), 12);
+    const items = costItems(OMP, usage);
+    expect(items.map((i) => i.label)).toEqual([
+      "Router · cerebras/gpt-oss-120b (OhMyPi)", "Progress lines · cerebras/gpt-oss-120b (OhMyPi)",
+      "Solver · claude-opus-5-5 (Claude Code · subscription)", "ElevenLabs TTS (eleven_v4_turbo)", "Scribe STT",
+    ]);
+    expect(items.reduce((n, i) => n + i.usd, 0)).toBeCloseTo(computeCost(OMP, usage), 12);
     expect(items[3]!.detail).toBe("ack 40 · filler 41 · answer 179 chars");
   });
 
-  it("prices one raw Realtime response (cached text, audio in/out)", () => {
-    const raw = { input_tokens: 1336, output_tokens: 159, input_token_details: { text_tokens: 1324, audio_tokens: 12, cached_tokens: 896, cached_tokens_details: { text_tokens: 896, audio_tokens: 0 } }, output_token_details: { text_tokens: 60, audio_tokens: 99 } };
-    // gpt-realtime-2.1: text in $4, audio in $32, cached $0.40, text out $24, audio out $64 per M
-    const expected = ((1324 - 896) * 4 + 12 * 32 + 896 * 0.4 + 60 * 24 + 99 * 64) / 1e6;
-    expect(realtimeResponseCost(raw, "gpt-realtime-2.1")).toBeCloseTo(expected, 12);
-    expect(callCost("realtime", raw, "gpt-realtime-2.1")).toBeCloseTo(expected, 12);
-    expect(callCost("router", null, "gpt-realtime-2.1")).toBe(0);
-  });
 });
 
-describe("claude -p (subscription)", () => {
+describe("Claude Code (subscription)", () => {
   const usage = {
-    anthropic: { haiku: { input_tokens: 300, output_tokens: 170 }, opus: { input_tokens: 134, output_tokens: 769, cache_read_input_tokens: 10_214, speed: "standard" } },
+    anthropic: { router: { input_tokens: 300, output_tokens: 170 }, solver: { input_tokens: 134, output_tokens: 769, cache_read_input_tokens: 10_214, speed: "standard" } },
     elevenChars: 100, scribeSeconds: 2,
   };
   it("Claude calls cost $0 in the total and show what they saved; other vendors are still billed", () => {
-    const sub = { ...DEFAULT_CONFIG, claudeBackend: "cli" as const };
+    const sub = DEFAULT_CONFIG;
     const items = costItems(sub, usage);
-    const claude = items.filter((i) => /claude -p · subscription/.test(i.label));
+    const claude = items.filter((i) => /Claude Code · subscription/.test(i.label));
     expect(claude.map((i) => i.usd)).toEqual([0, 0]);
-    expect(claude[1]!.savedUsd).toBeCloseTo(opusCost(usage.anthropic.opus, false), 12);
+    expect(claude[1]!.savedUsd).toBeCloseTo(opusCost(usage.anthropic.solver, false), 12);
     expect(computeCost(sub, usage)).toBeCloseTo(100 * 0.04 / 1000 + 2 * 0.39 / 3600, 12);
-    expect(computeCost(API, usage)).toBeGreaterThan(computeCost(sub, usage) + 0.01);
   });
 });
 
 describe("on-device TTS", () => {
-  it("is \$0, saved vs ElevenLabs and tagged on-device; claude -p is tagged subscription", () => {
+  it("is \$0, saved vs ElevenLabs and tagged on-device; Claude Code is tagged subscription", () => {
     const items = costItems({ ...DEFAULT_CONFIG, ttsModel: "macos" }, {
-      anthropic: { opus: { input_tokens: 100, output_tokens: 500 } }, localTtsChars: 130, elevenSegments: [{ label: "ack", chars: 40 }, { label: "answer", chars: 90 }],
+      anthropic: { solver: { input_tokens: 100, output_tokens: 500 } }, localTtsChars: 130, elevenSegments: [{ label: "ack", chars: 40 }, { label: "answer", chars: 90 }],
     });
     const tts = items.find((i) => i.label === "macOS TTS (on-device)")!;
     expect(tts).toMatchObject({ usd: 0, savedVia: "on-device", detail: "ack 40 · answer 90 chars · saved vs ElevenLabs" });
     expect(tts.savedUsd).toBeCloseTo(130 * 0.04 / 1000, 12);
-    expect(items.find((i) => i.label.startsWith("Opus"))!.savedVia).toBe("subscription");
+    expect(items.find((i) => i.label.startsWith("Solver"))!.savedVia).toBe("subscription");
+  });
+});
+
+describe("other harnesses and APIs", () => {
+  const cfgWith = (fast: RunConfig["llm"]["fast"], smart: RunConfig["llm"]["smart"]): RunConfig => ({ ...DEFAULT_CONFIG, llm: { fast, smart } });
+
+  it("a call's own price (llmCost) wins: billed for an API, saved for a subscription", () => {
+    const config = cfgWith({ provider: "opencode", model: "cerebras/gpt-oss-120b" }, { provider: "codex", model: "gpt-6.1-sol" });
+    const usage = {
+      anthropic: {
+        router: { input_tokens: 1000, output_tokens: 100, llmCost: { usd: 0.002, billing: "api" } },
+        solver: { input_tokens: 5000, output_tokens: 900, llmCost: { usd: 0.03, billing: "subscription" } },
+      },
+    };
+    expect(costBreakdown(config, usage)).toMatchObject({ fast: 0.002, smart: 0 });
+    const items = costItems(config, usage);
+    expect(items[0]).toMatchObject({ label: "Router · cerebras/gpt-oss-120b (opencode)", usd: 0.002 });
+    expect(items[1]).toMatchObject({ label: "Solver · gpt-6.1-sol (Codex · subscription)", usd: 0, savedUsd: 0.03, savedVia: "subscription" });
+  });
+
+  it("an unknown price is 0 and says so", () => {
+    const config = cfgWith({ provider: "pi", model: "" }, DEFAULT_CONFIG.llm.smart);
+    const u = { input_tokens: 10, output_tokens: 5, llmCost: { usd: null, billing: "api" } };
+    expect(llmCallCost(config, "fast", u)).toEqual({ usd: 0, billing: "api", known: false });
+    expect(costItems(config, { anthropic: { router: { ...u, llmCost: { usd: null, billing: "subscription" } } } })[0]!.detail).toMatch(/price unknown/);
+  });
+
+  it("Claude Code with another Claude model is priced from the catalog", () => {
+    setPriceCatalog({ "anthropic/claude-sonnet-5-5": { input: 3, output: 15 } });
+    try {
+      const config = cfgWith({ provider: "claude-code", model: "claude-sonnet-5-5" }, DEFAULT_CONFIG.llm.smart);
+      expect(llmCallCost(config, "fast", { input_tokens: 1000, output_tokens: 1000 })).toEqual({ usd: 0.018, billing: "subscription", known: true });
+      expect(callCost("router", { input_tokens: 1000, output_tokens: 1000 }, "claude-sonnet-5-5")).toBeCloseTo(0.018, 12);
+    } finally {
+      setPriceCatalog(null);
+    }
+  });
+
+  it("configs from before tiers, an unknown provider, or a model API on the smart tier get the default (Claude Code)", () => {
+    expect(llmOf({})).toEqual(DEFAULT_CONFIG.llm);
+    const old = { fast: { provider: "claude-api", model: "x" }, smart: { provider: "codex", model: "gpt-6.1-sol" } } as unknown as RunConfig["llm"];
+    expect(llmOf({ llm: old })).toEqual({ fast: DEFAULT_CONFIG.llm.fast, smart: { provider: "codex", model: "gpt-6.1-sol" } });
+    const api = { fast: { provider: "openrouter", model: "x" }, smart: { provider: "openrouter", model: "y" } } as RunConfig["llm"];
+    expect(llmOf({ llm: api })).toEqual({ fast: { provider: "openrouter", model: "x" }, smart: DEFAULT_CONFIG.llm.smart });
   });
 });

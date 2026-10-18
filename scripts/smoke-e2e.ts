@@ -1,10 +1,9 @@
 // T7 end-to-end smoke: starts the server in-process on a random port, connects to the real /ws as a
 // headless client, syncs clocks, replays fixtures/smoke/hello.wav at real-time pace (20 ms frames)
-// for each approach, and prints one RunRecord summary per approach (marks in ms relative to release).
+// through the pipeline, and prints a RunRecord summary (marks in ms relative to release).
 //
-//   npm run smoke:e2e                 real adapters; each approach SKIPs if its keys are missing
+//   npm run smoke:e2e                 real adapters; SKIPs if keys are missing
 //   npm run smoke:e2e -- --fake       fake adapters (no keys), whole server + WS path exercised
-//   npm run smoke:e2e -- --only pipeline
 //
 // Headless approximation: there is no audio output, so `audio.played` is reported the moment the
 // first binary frame of a segment arrives (no player buffering / output latency). Real TTFA/TTA come
@@ -14,9 +13,7 @@ import { performance } from "node:perf_hooks";
 import WebSocket from "ws";
 import { startServer } from "../server/index.ts";
 import { createFakeDeps, REALISTIC_TIMING } from "../server/orchestrators/fakes.ts";
-import { createHybridOrchestrator } from "../server/orchestrators/hybrid.ts";
 import { createPipelineOrchestrator } from "../server/orchestrators/pipeline.ts";
-import { createRealtimeOrchestrator } from "../server/orchestrators/realtime.ts";
 import { parseWav } from "../server/wav.ts";
 import { bestOffset, type PingSample } from "../shared/clock.ts";
 import { DEFAULT_CONFIG, type Approach, type RunConfig } from "../shared/config.ts";
@@ -25,16 +22,12 @@ import type { ClientMsg, CursorSample, RunRecord, Segment, ServerMsg } from "../
 
 const args = process.argv.slice(2);
 const FAKE = args.includes("--fake");
-const onlyIdx = args.indexOf("--only");
-const ONLY = onlyIdx >= 0 ? (args[onlyIdx + 1] as Approach) : null;
 // "A|B" means either key will do.
 const env = (k: string) => k.split("|").some((name) => !!process.env[name]);
 
 type Main = Exclude<Approach, "cursor-only">;
 const REQUIRED_KEYS: Record<Main, string[]> = {
-  realtime: ["OPENAI_API_KEY"],
   pipeline: ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "OPENROUTER_API_KEY|ANTHROPIC_API_KEY"],
-  hybrid: ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "OPENROUTER_API_KEY|ANTHROPIC_API_KEY"],
 };
 
 const wav = parseWav(readFileSync(new URL("../fixtures/smoke/hello.wav", import.meta.url)));
@@ -43,7 +36,7 @@ if (wav.sampleRate !== 24000 || wav.channels !== 1) {
   process.exit(1);
 }
 
-const approaches: Main[] = (["realtime", "pipeline", "hybrid"] as Main[]).filter((a) => !ONLY || a === ONLY);
+const approaches: Main[] = ["pipeline"];
 const runnable = approaches.filter((a) => {
   if (FAKE) return true;
   const missing = REQUIRED_KEYS[a].filter((k) => !env(k));
@@ -57,9 +50,7 @@ if (!runnable.length) {
 
 const fakeOrchestrators = FAKE
   ? {
-      realtime: createRealtimeOrchestrator(createFakeDeps(REALISTIC_TIMING)),
       pipeline: createPipelineOrchestrator(createFakeDeps(REALISTIC_TIMING)),
-      hybrid: createHybridOrchestrator(createFakeDeps(REALISTIC_TIMING)),
     }
   : undefined;
 
@@ -144,13 +135,13 @@ async function runTurn(approach: Main): Promise<{ run: RunRecord | null; errors:
 
 // ── report ─────────────────────────────────────────────────────────────────
 
-const DELEGATION: MarkName[] = ["llm.toolCall", "ack.ttsFirstByte", "ack.played", "opus.request", "opus.firstToken", "opus.spokenReady", "opus.done"];
+const DELEGATION: MarkName[] = ["llm.toolCall", "ack.ttsFirstByte", "ack.played", "solver.request", "solver.firstToken", "solver.spokenReady", "solver.done"];
 const STT: MarkName[] = ["stt.final", "pointing.resolved"];
 function applicable(approach: Main, run: RunRecord): MarkName[] {
   const base: MarkName[] = ["press", "release", "llm.request", "llm.firstToken", "answer.ttsFirstByte", "answer.played", "turn.end"];
-  const delegated = FAKE || approach === "pipeline" && run.config.routerMode === "forced" || run.marks["opus.request"] !== undefined;
+  const delegated = FAKE || approach === "pipeline" && run.config.routerMode === "forced" || run.marks["solver.request"] !== undefined;
   // Scribe sends no partials for the first ~2 s of audio (API-NOTES), so firstPartial is only required with fakes.
-  const stt: MarkName[] = approach === "realtime" ? [] : FAKE ? ["stt.firstPartial", ...STT] : STT;
+  const stt: MarkName[] = FAKE ? ["stt.firstPartial", ...STT] : STT;
   return [...base, ...stt, ...(delegated ? DELEGATION : [])];
 }
 
@@ -167,7 +158,7 @@ for (const approach of runnable) {
   console.log(`  transcript: ${clip(run.transcript) || "(none)"}`);
   console.log(`  pointing:   ${run.pointing.length} target(s)`);
   console.log(`  voice:      ${clip(run.voiceText)}`);
-  console.log(`  opus:       ${clip(run.opusText) || "(none)"}`);
+  console.log(`  solver:       ${clip(run.solverText) || "(none)"}`);
   console.log(`  marks (ms rel. release):`);
   const present = MARK_NAMES.filter((n) => run.marks[n] !== undefined).sort((a, b) => run.marks[a]! - run.marks[b]!);
   for (const n of present) {

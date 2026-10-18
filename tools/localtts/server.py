@@ -50,6 +50,38 @@ def resample_int16(pcm: bytes, rate: int) -> bytes:
     return np.clip(y, -32768, 32767).astype("<i2").tobytes()
 
 
+def short_espeak_dir(data):
+    """espeak-ng (in both Kokoro's espeakng_loader and Piper) can't use a data folder whose path is 160 bytes or longer:
+    it silently falls back to the path it was built with (an error about /Users/runner/...). The packaged app's env sits
+    under Application Support, which a long home folder can push past that, so then it gets a copy in the temp folder
+    (resolved paths: a symlink doesn't do)."""
+    data = str(data)
+    if len(data.encode()) < 150:
+        return data
+    import hashlib
+    import shutil
+    import tempfile
+
+    short = os.path.join(tempfile.gettempdir(), "espeak-" + hashlib.sha1(data.encode()).hexdigest()[:10])
+    if not os.path.exists(os.path.join(short, "phontab")):
+        part = short + ".part"
+        shutil.rmtree(part, ignore_errors=True)
+        shutil.copytree(data, part)
+        shutil.rmtree(short, ignore_errors=True)
+        os.replace(part, short)
+    return short
+
+
+def espeak_config():
+    """Kokoro's espeak settings: its own data folder, moved to a short path if need be."""
+    import espeakng_loader
+    from kokoro_onnx import EspeakConfig
+
+    data = espeakng_loader.get_data_path()
+    short = short_espeak_dir(data)
+    return None if short == data else EspeakConfig(data_path=short)
+
+
 class KokoroEngine:
     # Kokoro has no Romanian voice: Romanian text is phonemized by espeak-ng ("ro") and read by the
     # Italian voice (closest phonology); English uses af_heart (Kokoro's top-rated voice).
@@ -59,7 +91,7 @@ class KokoroEngine:
         from kokoro_onnx import Kokoro
 
         d = os.path.join(models, "kokoro")
-        self.k = Kokoro(os.path.join(d, "kokoro-v1.0.onnx"), os.path.join(d, "voices-v1.0.bin"))
+        self.k = Kokoro(os.path.join(d, "kokoro-v1.0.onnx"), os.path.join(d, "voices-v1.0.bin"), espeak_config=espeak_config())
         if os.environ.get("KOKORO_VOICE_EN"):
             self.VOICES = {**self.VOICES, "en": (os.environ["KOKORO_VOICE_EN"], "en-us")}
 
@@ -92,8 +124,10 @@ class PiperEngine:
         from collections import OrderedDict
 
         from piper import PiperVoice
+        from piper.phonemize_espeak import ESPEAK_DATA_DIR
 
         self.PiperVoice = PiperVoice
+        self.espeak_dir = short_espeak_dir(ESPEAK_DATA_DIR)
         self.dir = os.path.join(models, "piper")
         self.cache = OrderedDict()
         self.max = int(os.environ.get("PIPER_CACHE", "4"))
@@ -109,7 +143,7 @@ class PiperEngine:
         if name in self.cache:
             self.cache.move_to_end(name)
             return self.cache[name]
-        voice = self.PiperVoice.load(os.path.join(self.dir, f"{name}.onnx"))
+        voice = self.PiperVoice.load(os.path.join(self.dir, f"{name}.onnx"), espeak_data_dir=self.espeak_dir)
         self.cache[name] = voice
         while len(self.cache) > self.max:
             oldest = next(k for k in self.cache if k not in (self.default_en, self.RO))

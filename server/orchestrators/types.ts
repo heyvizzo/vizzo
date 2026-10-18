@@ -1,12 +1,11 @@
 import type { RunConfig } from "../../shared/config.ts";
 import type { CursorSample, PageEvents, PointingTarget, ServerMsg, Usage } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
-import type { GenerateFillers, OpenRealtime, OpenScribe, OpenTts, RouteWithHaiku, SolveWithOpus } from "../adapters/types.ts";
+import type { GenerateFillers, OpenHarnessThread, OpenScribe, OpenTts, RouteTurn, SolveInThread, SolveTask } from "../adapters/types.ts";
 
 /**
  * Per-browser-connection cache (T7 addition). Lives as long as the Session's WebSocket; every entry's
- * `dispose` runs when the connection closes (or when the entry is replaced/deleted). Used to keep one
- * pre-warmed OpenAI Realtime session per connection and reuse it across turns (ARCHITECTURE §7).
+ * `dispose` runs when the connection closes (or when the entry is replaced/deleted).
  */
 export interface ConnectionCache {
   get<T>(key: string): T | undefined;
@@ -42,12 +41,21 @@ export interface TurnContext {
   cursorSamples: () => CursorSample[];
   /** Client time of the first captured audio sample, once known. */
   tAudioStart: () => number | undefined;
+  /** The page the turn was recorded on, when the client sent one (queued feedback); else browserUrl() applies. */
+  pageUrl?: () => string | null;
+  /** A typed comment (turn.start `text`): the turn's words, with no audio to transcribe. */
+  typedText?: string;
   /** Clicks and highlighted text the client reported for this turn (turn.context). */
   pageEvents?: () => PageEvents;
   /** T7 addition: state that outlives the turn (one per browser connection). */
   connection: ConnectionCache;
   /** Connection-level output for background jobs (chat mode). Without it, long tasks run inline. */
   channel?: ConnectionChannel;
+  /**
+   * True when always-listen ended this turn (the silence hang), not a held Shift or button.
+   * Read at release: a clip with no words must not be sent to the models.
+   */
+  autoEndpoint?: () => boolean;
 }
 
 /** Handlers for one turn. Created on turn.start. */
@@ -63,16 +71,9 @@ export interface TurnResult {
   transcript: string;
   pointing: PointingTarget[];
   voiceText: string;
-  opusText: string;
+  solverText: string;
   usage: Usage;
   error?: string;
-  /**
-   * T7 addition. Realtime/hybrid label the model's first response "ack" on the wire because it is
-   * only known after the audio has started whether a tool call follows. When no ask_opus call
-   * happened, that audio WAS the answer (PRD §7: TTA = TTFA for easy questions), so the Session
-   * renames the `ack.ttsFirstByte` / `ack.played` marks to `answer.*` in the RunRecord.
-   */
-  ackIsAnswer?: boolean;
 }
 
 export type Orchestrator = (ctx: TurnContext) => TurnHandlers;
@@ -80,16 +81,16 @@ export type Orchestrator = (ctx: TurnContext) => TurnHandlers;
 /** Adapters an orchestrator uses. Injected so tests and `smoke:e2e --fake` can swap in fakes. */
 export interface OrchestratorDeps {
   openScribe: OpenScribe;
-  openRealtime: OpenRealtime;
   openTts: OpenTts;
-  routeWithHaiku: RouteWithHaiku;
-  solveWithOpus: SolveWithOpus;
+  routeTurn: RouteTurn;
+  solveTask: SolveTask;
+  /** Element threads: persistent harness sessions + a request in one. Optional: without them, no threads mode. */
+  openThread?: OpenHarnessThread;
+  solveInThread?: SolveInThread;
   /** Progress lines for the wait on short tasks (chat mode). Optional: no fillers without it. */
   generateFillers?: GenerateFillers;
   /** ElevenLabs voice id (default: process.env.ELEVENLABS_VOICE_ID). */
   voiceId?: string;
   /** Overall per-turn timeout from turn.start (default 60 s). */
   turnTimeoutMs?: number;
-  /** Hybrid: after the voice reply finishes, how long to still wait for a late Scribe final (default 2 s). */
-  hybridLateWaitMs?: number;
 }

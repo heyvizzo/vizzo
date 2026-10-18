@@ -1,30 +1,53 @@
-// Approach B (pipeline): Scribe → pointing → Haiku router → ElevenLabs TTS, with Opus for hard tasks.
+// The pipeline: STT (Scribe) → pointing → router → TTS, with the solver for hard tasks.
 // ARCHITECTURE §7, PRD §4.
 //
 // turn.start (prewarm): open Scribe and the first TTS socket. Audio → Scribe. release → commit → final
-// → resolvePointing → routeWithHaiku; its spoken deltas stream into the first TTS socket, which is
+// → resolvePointing → routeTurn; its spoken deltas stream into the first TTS socket, which is
 // flushed as soon as the ack is complete (onSpokenEnd) or when the router returns. If delegated: open
-// the "answer" TTS socket when Opus is requested, push Opus's SPOKEN line into it and flush.
+// the "answer" TTS socket when the solver is requested, push the solver's SPOKEN line into it and flush.
 //
 // Labels: forced mode → the router's speech is always the "ack". Auto mode → `kind` on the first
-// spoken delta decides: "ack" (it called ask_opus) or "answer" (it answered directly). The first TTS
+// spoken delta decides: "ack" (it called ask_solver) or "answer" (it answered directly). The first TTS
 // socket is opened before the label is known, so its *.ttsFirstByte mark is renamed to the final label.
-import type { RouteIntent, Segment } from "../../shared/protocol.ts";
+//
+// Element threads (RunConfig.threads, docs/PLAN-threads.md): after pointing, the turn's anchor and the thread briefs
+// go to the router; its target sends the turn to a new thread (a short new question still answers inline, recorded
+// in the thread), an existing one (follow-up queued / correction restarts, after the ack), a tell (the thread's
+// latest result is this turn's answer) or the central conversation (as without threads).
+//
+// Typed comments (ctx.typedText, shared/comment.ts): the text stands in for Scribe's final, on a synthetic timeline.
+// With config.silent (set for them) nothing is spoken: the TTS sockets are stand-ins and there are no fillers, so the
+// reply is only text (voice.text), and the thread runs it starts announce their results as text too.
+import type { Segment } from "../../shared/protocol.ts";
+import { hasSpokenWords } from "../../shared/speech.ts";
+import { typedWords } from "../../shared/comment.ts";
 import { tracer } from "./trace.ts";
-import type { TtsStream } from "../adapters/types.ts";
+import type { RouteDecision, TtsStream } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
+import { useVoiceCues } from "../adapters/voiceCues.ts";
+import { sttUsage } from "../cost.ts";
 import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
 import { isLocalTts } from "../../shared/config.ts";
 import { startJob } from "./jobs.ts";
+import { browserUrl } from "../browserPage.ts";
+import { threadStore } from "../threads/store.ts";
+import { correctRun, submitRun, type RunSpec } from "../threads/runner.ts";
+import { startedLine } from "../threads/policy.ts";
+import { planThread, prepareThreads, threadsEnabled, type ThreadPlan } from "../threads/turn.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
 
 class Tagged extends Error {
   constructor(readonly source: string, cause: unknown) { super(errMessage(cause)); }
 }
 const tag = <T>(source: string, p: Promise<T>): Promise<T> => p.catch((e) => { throw e instanceof Tagged ? e : new Tagged(source, e); });
+
+/** config.silent: a TTS "socket" that says nothing (the text still goes out as voice.text). */
+const silentTts = async (): Promise<TtsStream> => ({
+  pushText() {}, flush() {}, onAudio() {}, done: async () => {}, close() {}, chars: 0,
+});
 
 /** One TTS socket = one segment. Text/flush before the socket opens are queued. */
 class SegmentTts {
@@ -39,10 +62,11 @@ class SegmentTts {
 
   constructor(private base: TurnBase, deps: OrchestratorDeps, voiceId: string, hint: Segment) {
     const cfg = base.ctx.config;
-    this.ready = tag("tts", base.track(deps.openTts({
+    this.ready = tag("tts", base.track((cfg.silent ? silentTts : deps.openTts)({
       mark: relabelTtsMark(base.mark, () => this.label ?? hint), voiceId, model: cfg.ttsModel, segment: hint === "answer" ? "answer" : "ack",
       language: () => base.language,
       ...(cfg.ttsVoice ? { voice: cfg.ttsVoice } : {}),
+      style: cfg.ttsStyle,
     }))).then((s) => {
       this.stream = s;
       s.onAudio((pcm) => (this.writer ? this.writer.push(pcm) : this.preAudio.push(pcm)));
@@ -96,17 +120,17 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
     const warm = cfg.prewarm;
     const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
     const ttsStreams: SegmentTts[] = [];
-    let haikuUsage: unknown = undefined;
-    let opusUsage: unknown = undefined;
+    let routerUsage: unknown = undefined;
+    let solverUsage: unknown = undefined;
     let fillerUsage: unknown = undefined;
 
     const base = new TurnBase(ctx, {
       timeoutMs: deps.turnTimeoutMs,
       collectUsage: () => ({
-        ...(haikuUsage !== undefined || opusUsage !== undefined
+        ...(routerUsage !== undefined || solverUsage !== undefined
           ? { anthropic: {
-            ...(haikuUsage !== undefined ? { haiku: haikuUsage } : {}),
-            ...(opusUsage !== undefined ? { opus: opusUsage } : {}),
+            ...(routerUsage !== undefined ? { router: routerUsage } : {}),
+            ...(solverUsage !== undefined ? { solver: solverUsage } : {}),
             ...(fillerUsage ? { fillers: fillerUsage } : {}),
           } }
           : {}),
@@ -115,9 +139,11 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           ? { localTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
           : cfg.ttsModel === "openai_tts_1"
             ? { openaiTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
-            : { elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }),
+            : cfg.ttsModel === "fish_drama_3"
+              ? { fishTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
+              : { elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }),
         elevenSegments: ttsStreams.filter((t) => t.chars > 0).map((t) => ({ label: t.label ?? "tts", chars: t.chars })),
-        scribeSeconds: scribe.seconds,
+        ...sttUsage(cfg.sttModel, scribe.seconds),
       }),
     });
     const scribe = new LazyScribe(base, deps);
@@ -131,18 +157,26 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
 
     // Pre-warm: Scribe + the first TTS socket (at most one pre-warmed v4 dialogue socket, API-NOTES).
     let firstTts: SegmentTts | null = null;
+    const typed = ctx.typedText;
     if (warm) {
-      scribe.open().catch(() => {}); // failure surfaces from final() on release
+      if (typed === undefined) scribe.open().catch(() => {}); // failure surfaces from final() on release
       firstTts = openTts("ack");
     }
 
     async function run(): Promise<void> {
-      if (!voiceId && cfg.ttsModel.startsWith("eleven_")) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
-      const fin = await tag("scribe", scribe.final());
+      if (!cfg.silent && !voiceId && cfg.ttsModel.startsWith("eleven_")) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
+      const fin = typed !== undefined ? { text: typed.trim(), words: typedWords(typed), language: undefined } : await tag("scribe", scribe.final());
       if (base.isFinished) return;
+      // Always-listen: a bump or a room noise that produced no words never reaches the router.
+      if (ctx.autoEndpoint?.() && !hasSpokenWords(fin.text, fin.words)) {
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], skipped: "no-words" };
+        base.finish();
+        return;
+      }
       base.sttFinal(fin.text, fin.words, fin.language);
       const pointing = base.resolvePointing(fin.words);
       const pageContext = base.pageContext() || undefined;
+      const solverContext = base.pageContext(undefined, { elements: "full" }) || undefined;
 
       // The router's intent decides the label: question/task → its speech is the "ack"; clarify/answer → "answer".
       let label: Segment | null = null;
@@ -158,19 +192,36 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       };
       const trace = tracer((m) => { if (!base.isFinished) ctx.send(m); }, ctx.turnId);
       const canBackground = cfg.memory && cfg.backgroundLongTasks && !!ctx.channel;
+      // Element threads: the element this turn is about and what the router is told about the threads.
+      const tt = threadsEnabled(cfg, deps, ctx)
+        ? prepareThreads({ words: fin.words, pointing, rests: base.rests, samples: ctx.cursorSamples(), pageUrl: ctx.pageUrl?.() ?? browserUrl() ?? "" })
+        : null;
+      const th: { plan: ThreadPlan | null } = { plan: null };
       let background = false;
       let decided = false;
-      const decide = (intent: RouteIntent, estimateS: number | null): void => {
+      const decide = (d: RouteDecision, final = false): void => {
         if (decided || base.isFinished) return;
+        if (tt && !final && d.target === undefined && d.tell === undefined) return; // wait for the target
         decided = true;
-        background = canBackground && (intent === "question" || intent === "task") && estimateS !== null && estimateS > cfg.longTaskSeconds;
-        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], intent, estimateS, background };
-        ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background });
+        const { intent, estimateS } = d;
+        const delegated = intent === "question" || intent === "task";
+        const long = estimateS !== null && estimateS > cfg.longTaskSeconds;
+        th.plan = tt ? planThread(d, tt) : null;
+        const plan = th.plan;
+        // A thread's work runs on its runner after the ack, except a short NEW question (answered inline).
+        background = plan
+          ? delegated && plan.relation !== "tell" && (plan.relation !== "new" || long)
+          : canBackground && delegated && long;
+        const threadId = plan ? { threadId: plan.threadId } : {};
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], intent, estimateS, background, ...threadId, ...(plan ? { relation: plan.relation } : {}) };
+        ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background, ...threadId });
       };
-      const route = await tag("haiku", deps.routeWithHaiku({
+      const route = await tag("router", deps.routeTurn({
         mark: base.mark, transcript: base.markedTranscript(), pointing, mode: cfg.routerMode, history, pageContext, language: base.language,
-        longTaskSeconds: cfg.backgroundLongTasks ? cfg.longTaskSeconds : undefined, backend: cfg.claudeBackend,
-        onDecision: (d) => decide(d.intent, d.estimateS),
+        voiceCues: useVoiceCues(cfg.ttsModel, base.language),
+        longTaskSeconds: cfg.backgroundLongTasks || tt ? cfg.longTaskSeconds : undefined, llm: cfg.llm.fast,
+        ...(tt ? { threads: tt.briefs, ...(tt.anchorLabel ? { anchorLabel: tt.anchorLabel } : {}) } : {}),
+        onDecision: (d) => decide(d),
         ...trace(),
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;
@@ -181,9 +232,9 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         },
         onSpokenEnd: () => spoken?.flush(),
       }));
-      haikuUsage = route.usage;
+      routerUsage = route.usage;
       if (base.isFinished) return;
-      decide(route.decision.intent, route.decision.estimateS);
+      decide(route.decision, true);
       const first = spoken as SegmentTts | null;
       first?.flush();
       if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // pre-warmed but nothing was said
@@ -192,50 +243,105 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
 
       let answerDone: Promise<void> = Promise.resolve();
       const delegate = route.delegate;
-      if (delegate && background) {
-        // Long task: the ack said "I'll get back to you"; Opus runs as a job that outlives this turn.
+      const plan = th.plan;
+      const store = threadStore();
+      const sep = () => (base.voiceText && !/\s$/.test(base.voiceText) ? " " : "");
+      let threadSpec: RunSpec | null = null;
+      if (plan && plan.relation !== "tell") {
+        // Record the turn in its thread: the user's words, then what was said right away.
+        const kind = plan.relation === "new" ? "request" : plan.relation;
+        const msg = store.addMessage(plan.threadId, { turnId: ctx.turnId, role: "user", kind, text: fin.text || delegate?.question || "" });
+        if (plan.relation !== "new") store.bump(plan.threadId);
+        if (base.voiceText.trim()) {
+          store.addMessage(plan.threadId, { turnId: ctx.turnId, role: "assistant", kind: delegate ? "ack" : "result", text: base.voiceText.trim() }, (t) => {
+            if (!delegate) t.awaitingReply = route.decision.intent === "clarify";
+          });
+        }
+        if (delegate) {
+          threadSpec = {
+            kind, question: delegate.question, turnId: ctx.turnId, config: cfg, intent: delegate.intent, pointing,
+            pageContext: solverContext, language: base.language, messageId: msg?.id,
+          };
+        }
+      }
+
+      if (plan?.relation === "tell") {
+        // "Tell me about the red button": its latest result is this turn's answer (the router said nothing).
+        const last = store.info(plan.threadId)?.messages.findLast((m) => m.kind === "result");
+        if (last) {
+          const t = openTts("answer");
+          t.setLabel("answer");
+          base.voice(sep() + last.text, true);
+          t.pushText(last.text);
+          t.flush();
+          if (last.detail) base.solver(last.detail);
+          answerDone = t.done();
+          answerDone.catch(() => {});
+        }
+        store.focus(plan.threadId); // told: read, idle, focused
+      } else if (plan && threadSpec && background) {
+        // The ack said "I'll let you know": the run goes on the thread's runner and outlives this turn.
+        const spec = threadSpec;
+        const info = store.info(plan.threadId);
+        if (plan.relation === "new" && info) {
+          store.conversation.push({ turnId: `${plan.threadId}:start`, approach: cfg.approach, user: "(Task update)", assistant: startedLine(info.title, spec.question), detail: "" });
+        }
+        const p = plan.relation === "correction" ? correctRun(plan.threadId, spec, deps) : submitRun(plan.threadId, spec, deps);
+        p.catch((e) => console.warn("[threads] run failed", e));
+      } else if (delegate && background) {
+        // Long task: the ack said "I'll get back to you"; the solver runs as a job that outlives this turn.
         const job = startJob(ctx.connection, ctx.channel!, deps, {
           turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question,
-          estimateS: delegate.estimateS, pointing, history: history ?? [], pageContext, language: base.language,
+          estimateS: delegate.estimateS, pointing, history: history ?? [], pageContext: solverContext, language: base.language,
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
       } else if (delegate) {
-        // Warm: open the answer socket now, so it's ready by the time Opus's spoken line is. Its segment
+        // Warm: open the answer socket now, so it's ready by the time the solver's spoken line is. Its segment
         // is only created when the line arrives, so filler segments queue before it.
         let answerTts: SegmentTts | null = warm ? openTts("answer") : null;
         let spokenLine = false;
-        const sep = () => (base.voiceText && !/\s$/.test(base.voiceText) ? " " : "");
-        const fillers = cfg.fillers && deps.generateFillers
+        const fillers = cfg.fillers && !cfg.silent && deps.generateFillers
           ? new FillerScheduler(
             base,
-            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, language: base.language, backend: cfg.claudeBackend, ...trace() })
+            deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, language: base.language, voiceCues: useVoiceCues(cfg.ttsModel, base.language), llm: cfg.llm.fast, ...trace() })
               .then((r) => { fillerUsage = r.usage; return r.lines; }),
             async (line) => {
               const t = openTts("filler");
               t.setLabel("filler");
-              base.voice(sep() + line);
+              base.voice(sep() + line, true);
               t.pushText(line);
               t.flush();
               await t.done();
             },
           )
           : null;
-        const opus = await tag("opus", deps.solveWithOpus({
-          mark: base.mark, question: delegate.question, pointing, fast: cfg.opusFast, history, intent: delegate.intent, pageContext, language: base.language, backend: cfg.claudeBackend,
-          onDelta: (d) => base.opus(d),
-          ...trace(),
-          onSpokenLine: (line) => {
-            if (base.isFinished || spokenLine) return;
-            spokenLine = true;
-            fillers?.stop();
-            answerTts ??= openTts("answer");
-            answerTts.setLabel("answer");
-            base.voice(sep() + line);
-            answerTts.pushText(line);
-            answerTts.flush();
-          },
-        }));
-        opusUsage = opus.usage;
+        const onSpokenLine = (line: string): void => {
+          if (base.isFinished || spokenLine) return;
+          spokenLine = true;
+          fillers?.stop();
+          answerTts ??= openTts("answer");
+          answerTts.setLabel("answer");
+          base.voice(sep() + line, true);
+          answerTts.pushText(line);
+          answerTts.flush();
+        };
+        const onDelta = (d: string): void => base.solver(d);
+        if (plan && threadSpec) {
+          // A short new question on an element: answered in this turn, in the thread's own harness session.
+          const r = await tag("solver", submitRun(plan.threadId, {
+            ...threadSpec, inline: { mark: base.mark, trace, onSpokenLine, onDelta, active: () => !base.isFinished },
+          }, deps));
+          if (r) solverUsage = r.usage;
+        } else {
+          const solved = await tag("solver", deps.solveTask({
+            mark: base.mark, question: delegate.question, pointing, fast: cfg.solverFast, history, intent: delegate.intent, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
+            voiceCues: useVoiceCues(cfg.ttsModel, base.language),
+            onDelta,
+            ...trace(),
+            onSpokenLine,
+          }));
+          solverUsage = solved.usage;
+        }
         fillers?.stop();
         if (fillers) {
           base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], fillers: fillers.spoken.length };
@@ -258,7 +364,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         if (!base.isFinished) scribe.push(pcm);
       },
       onRelease() {
-        scribe.commit();
+        if (typed === undefined) scribe.commit();
         run().catch((e) => base.fail(e instanceof Tagged ? e.source : "orchestrator", e));
       },
       cancel: () => base.cancel(),

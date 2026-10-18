@@ -1,47 +1,34 @@
-# Realtime Voice Latency Lab: docs
+# Realtime Voice: docs
 
-A local web app that measures three voice architectures for a "talk to your app while pointing at it" tool, plus a lab for turning cursor position + word timestamps into the element the user meant.
+A desktop app (Electron) for talking to your web app while pointing at it: the project's page in a browser pane, and a voice chat sidebar that works out which element you meant (cursor + word timestamps) and hands hard questions and code changes to a stronger model.
 
 | Doc | What's in it |
 |---|---|
-| [PRD.md](PRD.md) | Why, goals, non-goals, the three approaches, requirements, success metrics |
+| [PRD.md](PRD.md) | Why, goals, non-goals, how it works, requirements, success metrics |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Stack, folder layout, **contracts** (WS protocol, adapter interfaces), timing model, pointing algorithms |
 | [API-NOTES.md](API-NOTES.md) | Vendor API facts and prices: ✅ confirmed vs ⚠️ to verify |
-| [TASKS.md](TASKS.md) | Work packages T0–T11, dependency graph, acceptance criteria |
-| REPORT.md | *(written by T11)* benchmark results and recommendation |
+| [PLAN-threads.md](PLAN-threads.md) | Element threads: decisions, server, page, milestones |
+| [BENCH-tts.md](BENCH-tts.md), [BENCH-claude-backends.md](BENCH-claude-backends.md) | Benchmark results |
+| [TASKS.md](TASKS.md) | The original build plan (T0–T11), kept as history |
 
 ## Running it
 
 ```sh
 npm install
-cp .env.example .env        # add ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
-npm run dev                 # server :8787 + Vite :5173 → http://localhost:5173
+npm run dev                 # the Electron app (browser pane + voice sidebar). Choose a project folder in the toolbar,
+                            # and add the API keys in Settings → API keys (there is no .env file).
 npm run dev:fake            # same, but every vendor is faked (tones + canned text): try the UI with no keys
+npm run setup:local-tts     # optional: Kokoro + Piper voices (macOS TTS needs nothing)
+npm run setup:local-stt     # optional: Parakeet, Moonshine, WhisperKit for Speech → On-device (Apple needs nothing)
 ```
 
-Pages: `/` latency lab, `/chat.html` chat (each turn is classified question / task / clarify / answer with a time estimate: short tasks get spoken progress lines while Opus works, long ones run as background jobs that are announced when done; press Space while it talks to interrupt, Esc to stop; clicks and highlighted text on the demo page are sent along; multi-turn conversation with the real vendors, switch A/B/C per turn, point at the demo page; history is kept per connection and shared across approaches, "New conversation" resets it; chat turns are saved to `results/chat-*.jsonl`, outside the benchmark set), `/cursor.html` cursor lab, `/audio-test.html` mic → server echo → playback.
+The chat is the sidebar: each turn is classified question / task / clarify / answer with a time estimate. Short tasks get spoken progress lines while the solver works; long ones run as background jobs that are announced when done. Hold Shift or the button to talk, or turn on Always listen. Press Shift while it talks to interrupt, Esc to stop. Point at the page in the browser pane. History is kept per connection; "New conversation" resets it. Chat turns are saved to `results/chat-*.jsonl`.
 
-Checks: `npm run typecheck`, `npm test`, `npm run smoke:{scribe,realtime,tts,claude,e2e}` (each SKIPs without its keys), `npm run smoke:e2e -- --fake` (whole server path, fake vendors), `npm run smoke:chat -- a.wav b.wav c.wav` (real multi-turn chat, approach B → A → C).
-
-Fixtures: record U1–U5 in the cursor lab (Save files), drop them in `fixtures/utterances/`, and they show up in the latency lab's fixture picker.
-
-## Running a multi-agent build
-
-1. **Keys:** `cp .env.example .env` (after T0) and fill in `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`. Without keys, everything still builds and the smoke tests SKIP.
-2. **Wave 1:** one agent does **T0 scaffold**, and one does **T1 API verification** in parallel (T1 only touches `docs/API-NOTES.md` and `scripts/probe-*`). Merge both before wave 2, since the adapters depend on T1's confirmed shapes.
-3. **Wave 2 (parallel, one worktree each):** T2 audio I/O, T3 Scribe, T4 Realtime, T5 TTS, T6 Claude, T9 cursor lab.
-4. **Wave 3:** T7 orchestrators, then T8 lab UI. T10 fixtures once T2 and T9 are merged (T10 needs you at the mic: recording is manual).
-5. **Wave 4:** T11 benchmark + REPORT.
-
-Suggested kickoff prompt for each agent:
-
-> You are implementing task **Tn** from `docs/TASKS.md` in this repo. Read `docs/PRD.md`, `docs/ARCHITECTURE.md` and `docs/API-NOTES.md` first. Build only your task and stick to the contracts in ARCHITECTURE.md. If you must change a contract, update ARCHITECTURE.md and `shared/` in the same commit and say so. Done means: typecheck and tests pass, your smoke script runs (or SKIPs without keys), and your final report lists what you verified against real APIs and what you couldn't.
-
-The orchestrator (lead agent) reviews each task against its **Accept** line before merging, and resolves contract conflicts in ARCHITECTURE.md.
+Checks: `npm run typecheck`, `npm test`, `npm run smoke:{scribe,tts,claude,e2e}` (each SKIPs without its keys), `npm run smoke:e2e -- --fake` (whole server path, fake vendors), `npm run smoke:chat -- a.wav b.wav c.wav` (real multi-turn chat).
 
 ## Key decisions (short)
-- Push-to-talk everywhere. Replay of recorded fixtures is what the benchmark numbers come from.
+- Push-to-talk first (Always listen is an option). Benchmark numbers come from replaying recorded WAVs headless.
 - Every vendor call goes through one local Node server WebSocket. Keys never reach the browser.
 - t = 0 is key release. "Played" means the first audio sample actually rendered, not bytes received.
-- Pointing needs word timestamps, so it comes from Scribe. That's why approach C (realtime voice + Scribe in parallel) exists.
+- Pointing needs word timestamps, so it comes from Scribe. That's one reason the pipeline (Scribe → router → TTS) is the only approach left: OpenAI Realtime (A) and Realtime + Scribe (C) were removed on 2026-10-17.
 - Phase 2 (not this repo yet): an OS-wide macOS menu-bar app (Accessibility API + ScreenCaptureKit) using the same pointing algorithms.

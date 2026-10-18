@@ -1,6 +1,6 @@
-// Progress lines while a short task waits on Opus (chat mode, RunConfig.fillers). Once everything said so
+// Progress lines while a short task waits on the solver (chat mode, RunConfig.fillers). Once everything said so
 // far has finished playing and a short pause has passed, the next line is spoken, until the answer is
-// ready (stop()) or the lines run out. Lines come from deps.generateFillers, called in parallel with Opus.
+// ready (stop()) or the lines run out. Lines come from deps.generateFillers, called in parallel with the solver.
 import type { TurnBase } from "./turnBase.ts";
 import { sleep } from "./turnBase.ts";
 
@@ -15,8 +15,7 @@ export class FillerScheduler {
   readonly done: Promise<void>;
 
   /**
-   * @param speak  says one line and resolves once its audio has been sent (B: TTS socket closed;
-   *               A/C: the filler response finished)
+   * @param speak  says one line and resolves once its audio has been sent (its TTS socket closed)
    */
   constructor(
     private base: TurnBase,

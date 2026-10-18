@@ -3,26 +3,25 @@
 //   macos  — AVSpeechSynthesizer (tools/mactts/main.swift, compiled once)
 //   kokoro — Kokoro-82M ONNX      (tools/localtts/server.py --engine kokoro)
 //   piper  — Piper, en_US lessac + ro_RO mihai (tools/localtts/server.py --engine piper)
-// `npm run dev` starts all available engines (startLocalTts) so the first sentence doesn't pay a model
-// load; Kokoro/Piper need `npm run setup:local-tts` once. Text goes a sentence at a time (Kokoro also
+// The server starts only the selected engine (server/speechEngines.ts), so the first sentence doesn't pay a model
+// load, and kills it when another is picked; Kokoro/Piper need `npm run setup:local-tts` once. Text goes a sentence at a time (Kokoro also
 // splits long sentences at clauses: it synthesizes a whole piece before returning any audio); the voice
 // follows the turn's language, resolved per piece.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import type { OpenTts, TtsStream } from "./types.ts";
 import { splitClauses, takeSentences } from "./sentences.ts";
+import { APP_ROOT, SPEECH_ROOT } from "../paths.ts";
+import { EngineHost } from "./engineHost.ts";
 
 export type LocalEngine = "macos" | "kokoro" | "piper";
 export const LOCAL_ENGINES: readonly LocalEngine[] = ["macos", "kokoro", "piper"];
 
-const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const VENV_PY = `${ROOT}.venv-tts/bin/python`;
-const MODELS = `${ROOT}.models`;
+const ROOT = APP_ROOT;
+const VENV_PY = `${SPEECH_ROOT}.venv-tts/bin/python`;
+const MODELS = `${SPEECH_ROOT}.models`;
 const SCRIPT = `${ROOT}tools/localtts/server.py`;
 
-let log: (msg: string) => void = (msg) => console.info(msg);
-export function setLocalTtsLogger(fn: (msg: string) => void): void { log = fn; }
 
 interface EngineSpec {
   label: string;
@@ -32,10 +31,16 @@ interface EngineSpec {
   clauses?: boolean;
 }
 
-function pythonEngine(engine: "kokoro" | "piper", files: string[]): EngineSpec["launch"] {
+/** The model files each Python engine needs (under .models/; server/speechInstall.ts checks them too). */
+export const LOCAL_TTS_FILES: Record<"kokoro" | "piper", string[]> = {
+  kokoro: ["kokoro/kokoro-v1.0.onnx", "kokoro/voices-v1.0.bin"],
+  piper: ["piper/en_US-lessac-medium.onnx", "piper/ro_RO-mihai-medium.onnx"],
+};
+
+function pythonEngine(engine: "kokoro" | "piper"): EngineSpec["launch"] {
   return async () => {
-    const missing = [VENV_PY, ...files.map((f) => `${MODELS}/${f}`)].filter((f) => !existsSync(f));
-    if (missing.length) throw new Error(`not installed (run \`npm run setup:local-tts\`): missing ${missing.map((m) => m.replace(ROOT, "")).join(", ")}`);
+    const missing = [VENV_PY, ...LOCAL_TTS_FILES[engine].map((f) => `${MODELS}/${f}`)].filter((f) => !existsSync(f));
+    if (missing.length) throw new Error(`not installed (Settings → Text to speech → Install): missing ${missing.map((m) => m.replace(SPEECH_ROOT, "")).join(", ")}`);
     return { cmd: VENV_PY, args: ["-I", SCRIPT, "--engine", engine, "--models", MODELS] };
   };
 }
@@ -50,12 +55,12 @@ const ENGINES: Record<LocalEngine, EngineSpec> = {
   },
   kokoro: {
     label: "Kokoro (local)",
-    launch: pythonEngine("kokoro", ["kokoro/kokoro-v1.0.onnx", "kokoro/voices-v1.0.bin"]),
+    launch: pythonEngine("kokoro"),
     clauses: true,
   },
   piper: {
     label: "Piper (local)",
-    launch: pythonEngine("piper", ["piper/en_US-lessac-medium.onnx", "piper/ro_RO-mihai-medium.onnx"]),
+    launch: pythonEngine("piper"),
   },
 };
 
@@ -70,6 +75,7 @@ export class FramedHelper {
   private stderr = "";
   readonly ready: Promise<void>;
   dead = false;
+  get pid(): number | undefined { return this.proc.pid; }
 
   constructor(readonly name: string, cmd: string, args: string[]) {
     this.proc = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -128,53 +134,23 @@ export class FramedHelper {
   kill(): void { if (!this.dead) this.proc.kill("SIGTERM"); }
 }
 
-const helpers = new Map<LocalEngine, Promise<FramedHelper>>();
+const host = new EngineHost<LocalEngine, FramedHelper>(
+  "local-tts",
+  Object.fromEntries(LOCAL_ENGINES.map((e) => [e, ENGINES[e].label])) as Record<LocalEngine, string>,
+  async (engine) => {
+    const { cmd, args } = await ENGINES[engine].launch();
+    return new FramedHelper(engine, cmd, args);
+  },
+);
 
-/** Start an engine's helper (model loaded + voices warmed). `npm run dev` calls this for every engine. Idempotent. */
-export function startLocalTts(engine: LocalEngine): Promise<void> {
-  let h = helpers.get(engine);
-  if (!h) {
-    const spec = ENGINES[engine];
-    const t0 = performance.now();
-    h = spec.launch().then(async ({ cmd, args }) => {
-      const helper = new FramedHelper(engine, cmd, args);
-      process.once("exit", () => helper.kill());
-      await helper.ready;
-      log(`[local-tts] ${spec.label} ready in ${Math.round(performance.now() - t0)} ms (model loaded, voices warmed)`);
-      return helper;
-    });
-    helpers.set(engine, h);
-    h.catch((e) => {
-      log(`[local-tts] ${spec.label} unavailable: ${e instanceof Error ? e.message : String(e)}`);
-      if (helpers.get(engine) === h) helpers.delete(engine);
-    });
-  }
-  return h.then(() => {});
-}
-
-async function getHelper(engine: LocalEngine): Promise<FramedHelper> {
-  if (!helpers.has(engine)) startLocalTts(engine).catch(() => {});
-  const h = await helpers.get(engine)!;
-  if (h.dead) { helpers.delete(engine); return getHelper(engine); }
-  return h;
-}
-
-export function stopLocalTts(engine?: LocalEngine): void {
-  for (const e of engine ? [engine] : LOCAL_ENGINES) {
-    helpers.get(e)?.then((h) => h.kill(), () => {});
-    helpers.delete(e);
-  }
-}
-
-/** Which engines are running (for /api/health). */
-export async function localTtsStatus(): Promise<Record<string, boolean>> {
-  const out: Record<string, boolean> = {};
-  for (const e of LOCAL_ENGINES) {
-    const h = helpers.get(e);
-    out[e] = h ? await h.then((x) => !x.dead, () => false) : false;
-  }
-  return out;
-}
+export function setLocalTtsLogger(fn: (msg: string) => void): void { host.log = fn; }
+/** Start an engine's helper (model loaded + voices warmed). Idempotent. */
+export const startLocalTts = (engine: LocalEngine): Promise<void> => host.start(engine);
+/** Kill an engine's helper (all of them without an argument). */
+export const stopLocalTts = (engine?: LocalEngine): void => host.stop(engine);
+/** The engines that are loading or running (and failed starts). */
+export const localTtsStates = () => host.states();
+const getHelper = (engine: LocalEngine): Promise<FramedHelper> => host.get(engine);
 
 /** An on-device engine behind the same interface as ElevenLabs. */
 export function openLocalTts(engine: LocalEngine): OpenTts {

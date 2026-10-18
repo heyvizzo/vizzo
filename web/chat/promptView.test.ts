@@ -15,7 +15,7 @@ const p: LlmPrompt = {
 
 describe("promptView", () => {
   it("summarizes the call", () => {
-    expect(promptSummary(p)).toBe("Haiku router · anthropic/claude-haiku-5.5 · 3 messages · 4.3k chars");
+    expect(promptSummary(p)).toBe("Router · anthropic/claude-haiku-5.5 · 3 messages · 4.3k chars");
     expect(fmtChars(950)).toBe("950 chars");
     expect(fmtChars(41_234)).toBe("41k chars");
   });
@@ -28,15 +28,15 @@ describe("promptView", () => {
 });
 
 describe("response view", () => {
-  it("summarizes Anthropic usage (cache read/write) and OpenAI Realtime usage (cached, audio)", async () => {
+  it("summarizes usage (cache read/write; cached and audio token details)", async () => {
     const { responseSummary, usageSummary, responseBadge } = await import("./promptView.ts");
     expect(usageSummary({ input_tokens: 182, output_tokens: 816, cache_read_input_tokens: 9215, cache_creation_input_tokens: 0 })).toBe("in 182 (cache read 9,215) · out 816");
     expect(usageSummary({ input_tokens: 1003, output_tokens: 202, input_token_details: { cached_tokens: 960, audio_tokens: 38 }, output_token_details: { audio_tokens: 120 } }))
       .toBe("in 1,003 (cache read 960, audio 38) · out 202 (audio 120)");
     expect(usageSummary(null)).toBe("");
-    const r = { target: "opus" as const, stopReason: "end_turn", usage: { input_tokens: 182, output_tokens: 816 }, durationMs: 7748 };
+    const r = { target: "solver" as const, stopReason: "end_turn", usage: { input_tokens: 182, output_tokens: 816 }, durationMs: 7748 };
     expect(responseSummary(r)).toBe("↳ response · stop: end_turn · in 182 · out 816 · 7.7 s");
     expect(responseSummary({ target: "router", error: "529 overloaded", durationMs: 300 })).toBe("↳ error · 529 overloaded · 0.3 s");
-    expect(responseBadge({ target: "realtime", label: "answer", stopReason: "completed", durationMs: 2100 })).toBe("✓ answer completed 2.1 s");
+    expect(responseBadge({ target: "solver", label: "answer", stopReason: "completed", durationMs: 2100 })).toBe("✓ answer completed 2.1 s");
   });
 });

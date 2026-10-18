@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sidebar controls</title>
+  <style>
+    :root {
+      --bar: #f4f4f5;
+      --field: #ffffff;
+      --line: #d4d4d8;
+      --text: #18181b;
+      --muted: #71717a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) { --bar: #27272a; --field: #18181b; --line: #3f3f46; --text: #f4f4f5; --muted: #a1a1aa; }
+    }
+    :root[data-theme="dark"] { --bar: #27272a; --field: #18181b; --line: #3f3f46; --text: #f4f4f5; --muted: #a1a1aa; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .bar {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px 0 12px; /* clears the divider's grab area on the left */
+      background: var(--bar);
+      border-bottom: 1px solid var(--line);
+      -webkit-app-region: drag;
+    }
+    button {
+      -webkit-app-region: no-drag;
+      max-width: 100%;
+      min-width: 0;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button:hover { background: var(--line); }
+    svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    #settings, #sidebar { flex: none; width: 30px; padding: 0; justify-content: center; }
+    /* Settings takes the free space, so the sidebar button stays at the far right. */
+    #settings { margin-left: auto; }
+    /* While the sidebar is hidden, the settings button belongs to it and is out of view. */
+    .bar.collapsed #sidebar { margin-left: auto; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <nav class="bar">
+    <button id="settings" title="Settings (⌘,)" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+    <button id="sidebar" title="Hide chat sidebar" aria-label="Hide chat sidebar">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+    </button>
+  </nav>
+  <script>
+    const settings = document.getElementById("settings");
+    const sidebar = document.getElementById("sidebar");
+    settings.onclick = () => shell.openSettings();
+    shell.bindShiftPtt(); // Shift is push-to-talk here too
+    sidebar.onclick = () => shell.toggleSidebar();
+    shell.onSidebarHidden((hidden) => {
+      settings.hidden = hidden;
+      document.querySelector(".bar").classList.toggle("collapsed", hidden);
+      sidebar.title = hidden ? "Show chat sidebar" : "Hide chat sidebar";
+      sidebar.setAttribute("aria-label", sidebar.title);
+    });
+  </script>
+</body>
+</html>

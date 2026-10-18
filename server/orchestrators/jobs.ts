@@ -1,14 +1,13 @@
-// Background jobs (chat mode, RunConfig.backgroundLongTasks): a long task's Opus run continues after its
+// Background jobs (chat mode, RunConfig.backgroundLongTasks): a long task's the solver run continues after its
 // turn ends. When it finishes, the client gets a `job` update, the result joins the conversation, and it's
-// spoken as a notice once no turn is active, in the voice of the approach that started it (A/C: the
-// connection's Realtime session; B, or if that session isn't available: ElevenLabs).
+// spoken as a notice once no turn is active, with the turn's TTS engine.
 import { randomUUID } from "node:crypto";
-import { isLocalTts, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
+import { isLocalTts, llmOf, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
-import { opusCost, PRICES, realtimeResponseCost } from "../cost.ts";
+import { llmCostItem, PRICES } from "../cost.ts";
 import { getConversation, type ChatTurn } from "../conversation.ts";
-import { idleRealtime } from "./shared.ts";
 import { tracer } from "./trace.ts";
+import { useVoiceCues } from "../adapters/voiceCues.ts";
 import type { ConnectionCache, ConnectionChannel, OrchestratorDeps } from "./types.ts";
 
 const KEY = "jobs";
@@ -64,9 +63,10 @@ export function startJob(
   let spoken = "";
   let text = "";
 
-  deps.solveWithOpus({
-    mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.opusFast,
-    history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language, backend: spec.config.claudeBackend,
+  deps.solveTask({
+    mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.solverFast,
+    history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language, llm: llmOf(spec.config).smart,
+    voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
     ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId)(),
     onSpokenLine: (l) => { spoken = l.trim(); },
     onDelta: (d) => { text += d; },
@@ -74,14 +74,11 @@ export function startJob(
     (r) => {
       if (reg.cancelled) return;
       text = r.text || text;
-      const opusUsd = opusCost(r.usage, false);
-      const subscription = spec.config.claudeBackend === "cli";
+      const item = llmCostItem(spec.config, "smart", r.usage, "Background solver");
       Object.assign(job, {
         state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0),
-        costUsd: subscription ? 0 : opusUsd,
-        costItems: [subscription
-          ? { label: "Opus (background task · claude -p · subscription)", usd: 0, savedUsd: opusUsd, savedVia: "subscription" as const }
-          : { label: "Opus (background task)", usd: opusUsd }],
+        costUsd: item.usd,
+        costItems: [item],
       });
       channel.send({ type: "job", job: { ...job } });
       getConversation(conn).push({
@@ -89,7 +86,7 @@ export function startJob(
         user: `(Background task finished: ${spec.question})`, assistant: job.spoken!, detail: text,
       });
       reg.notices = reg.notices
-        .then(() => announce(conn, channel, deps, spec.config, job, reg))
+        .then(() => announce(channel, deps, spec.config, job, reg))
         .then((item) => {
           // Speaking the result costs too: add it once the notice has played.
           if (!item || reg.cancelled) return;
@@ -110,13 +107,13 @@ export function startJob(
 
 /** Speak a finished job's result once the connection is idle; retried if a turn starts before any audio. */
 async function announce(
-  conn: ConnectionCache, channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo, reg: JobRegistry,
+  channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo, reg: JobRegistry,
 ): Promise<CostItem | null> {
   let cost: CostItem | null = null;
   for (let attempt = 0; attempt < 5; attempt++) {
     await channel.whenIdle();
     if (reg.cancelled) return cost;
-    const { outcome, item } = await speakOnce(conn, channel, deps, config, job);
+    const { outcome, item } = await speakOnce(channel, deps, config, job);
     if (item) cost = cost ? { ...item, usd: cost.usd + item.usd } : item;
     if (outcome !== "preempted") return cost;
   }
@@ -126,7 +123,7 @@ async function announce(
 type Outcome = "spoken" | "interrupted" | "preempted";
 
 async function speakOnce(
-  conn: ConnectionCache, channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo,
+  channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo,
 ): Promise<{ outcome: Outcome; item: CostItem | null }> {
   const text = job.spoken!;
   let aborted = false;
@@ -145,30 +142,9 @@ async function speakOnce(
     if (started) channel.send({ type: "notice", jobId: job.jobId, state: "end" });
   };
 
-  const rt = config.approach !== "pipeline" ? idleRealtime(conn) : null;
-  let noticeUsage: unknown = null;
-  const onResponseDone = (r: { label: string; response: unknown }) => {
-    if (r.label === "notice") noticeUsage = (r.response as { usage?: unknown }).usage ?? null;
-  };
-  if (rt && rt.attach({ onAudio: emit, onText: () => {}, onToolCall: () => {}, onError: () => {}, onResponseDone })) {
-    abort = () => rt.session.cancelResponse();
-    channel.setNoticeAbort(() => { aborted = true; abort!(); });
-    try {
-      await rt.session.speak(text, "notice");
-      if (!aborted) rt.seenTurns.add(job.jobId); // the session told the user itself: no recap later
-    } catch (e) {
-      if (!aborted) console.warn("[jobs] realtime notice failed", e);
-    } finally {
-      rt.attach(null);
-      finish();
-    }
-    const usd = noticeUsage ? realtimeResponseCost(noticeUsage, config.realtimeModel) : 0;
-    return { outcome: outcome(), item: usd ? { label: `OpenAI Realtime (spoken result, ${config.realtimeModel})`, usd } : null };
-  }
-
   const voiceId = deps.voiceId ?? process.env.ELEVENLABS_VOICE_ID ?? "";
   if (!voiceId && config.ttsModel.startsWith("eleven_")) return { outcome: "spoken", item: null };
-  const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer", language: job.language, ...(config.ttsVoice ? { voice: config.ttsVoice } : {}) });
+  const tts = await deps.openTts({ mark: noMark, voiceId, model: config.ttsModel, segment: "answer", language: job.language, style: config.ttsStyle, ...(config.ttsVoice ? { voice: config.ttsVoice } : {}) });
   abort = () => tts.close();
   tts.onAudio(emit);
   channel.setNoticeAbort(() => { aborted = true; abort!(); });
@@ -180,13 +156,16 @@ async function speakOnce(
     finish();
   }
   const chars = tts.chars;
-  if (!chars) return { outcome: outcome(), item: null };
-  return {
-    outcome: outcome(),
-    item: isLocalTts(config.ttsModel)
-      ? { label: `${TTS_LABELS[config.ttsModel]} (spoken result, on-device)`, usd: 0, savedUsd: chars * PRICES.elevenPerChar, savedVia: "on-device" as const, detail: `${chars} chars` }
-      : config.ttsModel === "openai_tts_1"
-        ? { label: "OpenAI TTS (spoken result, tts-1)", usd: chars * PRICES.openaiTtsPerChar, detail: `${chars} chars` }
-        : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` },
-  };
+  return { outcome: outcome(), item: chars ? spokenCostItem(config, chars) : null };
+}
+
+/** What speaking a result outside a turn cost (the TTS path; on-device engines: 0, with what was saved). */
+export function spokenCostItem(config: RunConfig, chars: number): CostItem {
+  return isLocalTts(config.ttsModel)
+    ? { label: `${TTS_LABELS[config.ttsModel]} (spoken result, on-device)`, usd: 0, savedUsd: chars * PRICES.elevenPerChar, savedVia: "on-device" as const, detail: `${chars} chars` }
+    : config.ttsModel === "openai_tts_1"
+      ? { label: "OpenAI TTS (spoken result, tts-1)", usd: chars * PRICES.openaiTtsPerChar, detail: `${chars} chars` }
+      : config.ttsModel === "fish_drama_3"
+        ? { label: "Fish Audio TTS (spoken result, drama-3)", usd: chars * PRICES.fishTtsPerChar, detail: `${chars} chars` }
+        : { label: `ElevenLabs TTS (spoken result, ${config.ttsModel})`, usd: chars * PRICES.elevenPerChar, detail: `${chars} chars` };
 }

@@ -10,10 +10,10 @@ export const MARK_NAMES = [
   "llm.toolCall", // S
   "ack.ttsFirstByte", // S
   "ack.played", // C
-  "opus.request", // S
-  "opus.firstToken", // S
-  "opus.spokenReady", // S
-  "opus.done", // S
+  "solver.request", // S
+  "solver.firstToken", // S
+  "solver.spokenReady", // S
+  "solver.done", // S
   "answer.ttsFirstByte", // S
   "answer.played", // C
   "turn.end", // S
@@ -34,14 +34,14 @@ export interface Metrics {
   stt: number | null;
   llmFirst: number | null;
   toolCall: number | null;
-  opusFirst: number | null;
-  opusSpoken: number | null;
-  opusTotal: number | null;
+  solverFirst: number | null;
+  solverSpoken: number | null;
+  solverTotal: number | null;
   ttsFirst: number | null;
 }
 
 export const METRIC_NAMES = [
-  "ttfa", "tta", "stt", "llmFirst", "toolCall", "opusFirst", "opusSpoken", "opusTotal", "ttsFirst",
+  "ttfa", "tta", "stt", "llmFirst", "toolCall", "solverFirst", "solverSpoken", "solverTotal", "ttsFirst",
 ] as const satisfies readonly (keyof Metrics)[];
 
 /** Marks are absolute client-clock times (performance.now() ms). */
@@ -51,9 +51,9 @@ export function deriveMetrics(marks: Partial<Record<MarkName, number>>): Metrics
   const ackPlayed = rel("ack.played");
   const answerPlayed = rel("answer.played");
   const played = [ackPlayed, answerPlayed].filter((v): v is number => v !== null);
-  const opusReq = marks["opus.request"];
-  const opusDone = marks["opus.done"];
-  const ttsBase = marks["opus.spokenReady"] ?? marks["llm.firstToken"];
+  const solverReq = marks["solver.request"];
+  const solverDone = marks["solver.done"];
+  const ttsBase = marks["solver.spokenReady"] ?? marks["llm.firstToken"];
   const ansTts = marks["answer.ttsFirstByte"];
   return {
     ttfa: played.length ? Math.min(...played) : null,
@@ -61,9 +61,9 @@ export function deriveMetrics(marks: Partial<Record<MarkName, number>>): Metrics
     stt: rel("stt.final"),
     llmFirst: rel("llm.firstToken"),
     toolCall: rel("llm.toolCall"),
-    opusFirst: rel("opus.firstToken"),
-    opusSpoken: rel("opus.spokenReady"),
-    opusTotal: opusReq !== undefined && opusDone !== undefined ? opusDone - opusReq : null,
+    solverFirst: rel("solver.firstToken"),
+    solverSpoken: rel("solver.spokenReady"),
+    solverTotal: solverReq !== undefined && solverDone !== undefined ? solverDone - solverReq : null,
     ttsFirst: ansTts !== undefined && ttsBase !== undefined ? ansTts - ttsBase : null,
   };
 }

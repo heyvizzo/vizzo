@@ -21,7 +21,7 @@ describe("subscription savings", () => {
   it("headline shows billed cost and what claude -p saved", async () => {
     const { costHeadline } = await import("./costView.ts");
     const { priceText } = await import("./promptView.ts");
-    const c = { items: [{ label: "Opus (claude -p · subscription)", usd: 0, savedUsd: 0.0161 }, { label: "ElevenLabs TTS", usd: 0.013 }], total: 0.013, jobs: [] };
+    const c = { items: [{ label: "Solver (claude -p · subscription)", usd: 0, savedUsd: 0.0161 }, { label: "ElevenLabs TTS", usd: 0.013 }], total: 0.013, jobs: [] };
     expect(costHeadline(c)).toBe("cost $0.013 · $0.016 saved (subscription)");
     expect(priceText({ costUsd: 0, savedUsd: 0.04 })).toBe("$0.040 saved");
     expect(priceText({ costUsd: 0.0123 })).toBe("$0.012");
@@ -29,16 +29,28 @@ describe("subscription savings", () => {
 });
 
 describe("savings by source", () => {
-  it("splits claude -p and on-device TTS savings in the headline", async () => {
+  it("splits subscription and on-device TTS savings in the headline", async () => {
     const { costHeadline, savingsOf, savingsText } = await import("./costView.ts");
     const items = [
-      { label: "Opus (claude -p · subscription)", usd: 0, savedUsd: 0.019, savedVia: "subscription" as const },
+      { label: "Solver (claude -p · subscription)", usd: 0, savedUsd: 0.019, savedVia: "subscription" as const },
       { label: "macOS TTS (on-device)", usd: 0, savedUsd: 0.0052, savedVia: "on-device" as const },
       { label: "Scribe STT", usd: 0.0004 },
     ];
-    expect(costHeadline({ items, total: 0.0004, jobs: [] })).toBe("cost $0.0004 · $0.024 saved (claude -p $0.019 · on-device TTS $0.0052)");
+    expect(costHeadline({ items, total: 0.0004, jobs: [] })).toBe("cost $0.0004 · $0.024 saved (subscription $0.019 · on-device TTS $0.0052)");
     expect(savingsText(savingsOf([items[1]!]))).toBe("$0.0052 saved (on-device TTS $0.0052)");
     expect(savingsText(savingsOf([items[0]!]))).toBe("$0.019 saved (subscription)");
     expect(savingsText(savingsOf([items[2]!]))).toBe("");
+  });
+});
+
+describe("thread cost breakdown", () => {
+  it("groups items by label and totals what was billed", async () => {
+    const { costBreakdown } = await import("./costView.ts");
+    const items = [
+      { label: "Solver (claude -p · subscription)", usd: 0, savedUsd: 0.019, savedVia: "subscription" as const },
+      { label: "ElevenLabs TTS", usd: 0.004 },
+      { label: "ElevenLabs TTS", usd: 0.002 },
+    ];
+    expect(costBreakdown(items, 0.006)).toBe("Solver (claude -p · subscription): $0 ($0.019 saved)\nElevenLabs TTS ×2: $0.0060\nTotal billed: $0.0060");
   });
 });

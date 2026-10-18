@@ -4,10 +4,9 @@ import type { LlmPrompt, LlmResponse, PromptMessage } from "../../shared/protoco
 import { fmtUsd } from "./costView.ts";
 
 const TARGET_LABEL: Record<LlmPrompt["target"], string> = {
-  router: "Haiku router",
-  fillers: "Haiku progress lines",
-  opus: "Opus",
-  realtime: "OpenAI Realtime",
+  router: "Router",
+  fillers: "Progress lines",
+  solver: "Solver",
 };
 
 export const targetLabel = (t: LlmPrompt["target"]): string => TARGET_LABEL[t] ?? t;
@@ -26,7 +25,7 @@ export function promptAsText(p: LlmPrompt): string {
   return out.join("\n");
 }
 
-/** One line of summary for the call, e.g. "Opus · anthropic/claude-opus-5.5 · 3 messages · 41k chars". */
+/** One line of summary for the call, e.g. "Solver · anthropic/claude-opus-5.5 · 3 messages · 41k chars". */
 export function promptSummary(p: LlmPrompt): string {
   const chars = p.system.reduce((n, s) => n + s.text.length, 0) + p.messages.reduce((n, m) => n + m.text.length, 0);
   const msgs = `${p.messages.length} message${p.messages.length === 1 ? "" : "s"}`;
@@ -58,6 +57,7 @@ export function renderPrompt(p: LlmPrompt): HTMLDetailsElement {
   if (p.settings && Object.keys(p.settings).length) meta.append(el("span", undefined, JSON.stringify(p.settings)));
   const copy = el("button", "pcopy", "Copy");
   copy.type = "button";
+  copy.title = "Copy this prompt as plain text";
   copy.onclick = () => {
     void navigator.clipboard?.writeText(promptAsText(p)).then(() => { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); }, () => {});
   };
@@ -87,7 +87,7 @@ export function renderPrompt(p: LlmPrompt): HTMLDetailsElement {
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const fmtN = (n: number) => n.toLocaleString("en-US");
 
-/** "in 1,069 (cached 1,069) · out 187" for Anthropic or OpenAI Realtime usage; "" if unknown. */
+/** "in 1,069 (cached 1,069) · out 187" from a call's usage; "" if unknown. */
 export function usageSummary(usage: unknown): string {
   if (!usage || typeof usage !== "object") return "";
   const u = usage as Record<string, unknown>;
@@ -109,7 +109,7 @@ export function usageSummary(usage: unknown): string {
   return parts.join(" · ");
 }
 
-/** "$0.016" for a billed call, "$0.016 saved" for one routed through the claude -p subscription. */
+/** "$0.016" for a billed call, "$0.016 saved" for one that ran on a CLI's subscription. */
 export function priceText(r: Pick<LlmResponse, "costUsd" | "savedUsd">): string {
   if (r.savedUsd !== undefined) return `${fmtUsd(r.savedUsd)} saved`;
   return r.costUsd !== undefined ? fmtUsd(r.costUsd) : "";
@@ -138,13 +138,13 @@ export function responseBadge(r: LlmResponse): string {
   return `✓${r.label ? ` ${r.label}` : ""}${r.stopReason ? ` ${r.stopReason}` : ""}${time}${price ? ` · ${price}` : ""}`;
 }
 
-/** Attach a response to a rendered call (Realtime calls get several: ack, filler, answer…). */
+/** Attach a response to a rendered call. */
 export function addResponse(call: HTMLDetailsElement, r: LlmResponse): void {
   let box = call.querySelector<HTMLElement>(":scope > .presps");
   if (!box) { box = el("div", "presps"); call.append(box); }
   box.append(renderResponse(r));
   const n = [...box.querySelectorAll<HTMLElement>(":scope > details > summary")].length;
-  // A call's cost is the sum of its responses (Realtime has several: ack, fillers, answer).
+  // A call's cost is the sum of its responses.
   const total = (Number(call.dataset.costUsd) || 0) + (r.costUsd ?? 0);
   const saved = (Number(call.dataset.savedUsd) || 0) + (r.savedUsd ?? 0);
   call.dataset.costUsd = String(total);

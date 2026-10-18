@@ -2,9 +2,11 @@
 // (2) committed_transcript vs committed_transcript_with_timestamps, (3) whether word
 // timestamps reset per commit (two commits, same audio). Run: npx tsx scripts/probe-scribe.ts
 // Optional: PROBE_WAV=path/to/speech.wav (PCM16 mono 24 kHz) — a tone yields no words.
-import "dotenv/config";
+import { loadDesktopEnv } from "../electron/settings.ts";
 import { existsSync, readFileSync } from "node:fs";
 import WebSocket from "ws";
+
+loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
 
 const KEY = process.env.ELEVENLABS_API_KEY;
 if (!KEY) {

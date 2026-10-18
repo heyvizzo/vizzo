@@ -1,4 +1,5 @@
 // Pure incremental parsers used by the Claude adapter (claude.ts). Unit tested in claudeParse.test.ts.
+import type { RouteTarget } from "./types.ts";
 
 // ── Streaming top-level JSON fields ────────────────────────────────────────
 // Reads a JSON object that arrives in arbitrary fragments (input_json_delta.partial_json) and
@@ -205,10 +206,18 @@ export class JsonStringFieldExtractor {
 // fields into: one decision (as soon as `intent` is known, plus `estimate_seconds` for
 // question/task), then the `say` text with its kind, then the end of `say`. `say` text that streams
 // before the decision is buffered and released right after it, so the decision always comes first.
+// Threads mode (element threads) adds {target, relation, tell} after `estimate_seconds`: the decision then
+// waits for `tell` (or the start of `say`, if the model skipped fields) and carries the resolved target.
 
 export type RouteIntentName = "question" | "task" | "clarify" | "answer";
 export type SpokenKind = "ack" | "answer";
-export interface RouteDecisionLite { intent: RouteIntentName; estimateS: number | null }
+export interface RouteDecisionLite {
+  intent: RouteIntentName; estimateS: number | null;
+  /** Threads mode only. */
+  target?: RouteTarget;
+  /** Threads mode: speak this thread's stored result. */
+  tell?: string;
+}
 
 export interface RouteStreamEvents {
   onDecision(d: RouteDecisionLite): void;
@@ -226,7 +235,37 @@ export function parseEstimate(v: unknown): number | null {
   return Math.max(1, Math.round(n));
 }
 
-export interface RouteFields { intent?: unknown; estimate_seconds?: unknown; say?: unknown; question?: unknown }
+export interface RouteFields { intent?: unknown; estimate_seconds?: unknown; target?: unknown; relation?: unknown; tell?: unknown; say?: unknown; question?: unknown }
+
+/** The router's raw thread fields, as written. */
+export interface ThreadFields { target?: unknown; relation?: unknown; tell?: unknown }
+export interface ThreadRouteContext {
+  /** Ids of the threads the router was given. */
+  threadIds: readonly string[];
+  /** The user points at an element this turn (an anchor exists): a new thread is possible. */
+  pointed: boolean;
+  /** Delegate mode: `answer` is only allowed with `tell`. */
+  forced: boolean;
+}
+export interface ThreadRoute { intent: RouteIntentName; target: RouteTarget; tell?: string }
+
+/**
+ * The thread fields made safe. Unknown or missing target: "new" when the user points at an element, else
+ * "central" ("new" without an element is "central" too). A thread id's relation defaults to followup.
+ * `tell` needs a known id and intent answer (dropped otherwise); it targets its thread. In delegate mode an
+ * answer without tell becomes clarify (still a whole reply).
+ */
+export function resolveThreadRoute(intent: RouteIntentName, raw: ThreadFields, ctx: ThreadRouteContext): ThreadRoute {
+  const known = (v: unknown): v is string => typeof v === "string" && ctx.threadIds.includes(v);
+  const tell = intent === "answer" && known(raw.tell) ? raw.tell : undefined;
+  let target: RouteTarget;
+  if (tell) target = { kind: "thread", threadId: tell, relation: "followup" };
+  else if (known(raw.target)) target = { kind: "thread", threadId: raw.target, relation: raw.relation === "correction" ? "correction" : "followup" };
+  else if (raw.target === "central") target = { kind: "central" };
+  else target = ctx.pointed ? { kind: "new" } : { kind: "central" };
+  if (ctx.forced && intent === "answer" && !tell) intent = "clarify";
+  return { intent, target, ...(tell ? { tell } : {}) };
+}
 
 export class RouteInputStream {
   private readonly parser: JsonTopLevelStream;
@@ -240,22 +279,28 @@ export class RouteInputStream {
   private saySeen = false;
   private sayClosed = false;
   private sayEnded = false;
+  private readonly raw: ThreadFields = {};
+  private tellSeen = false;
   private _decision: RouteDecisionLite | null = null;
 
   /**
    * @param allowed intents accepted for this request (others count as missing)
    * @param fallbackIntent assumed at the end when no usable intent arrived and there is no question
    *   (with a question, "question" is assumed)
+   * @param threads threads mode: resolves the thread fields (and may adjust the intent) at the decision
    */
   constructor(
     private readonly ev: RouteStreamEvents,
     private readonly allowed: readonly RouteIntentName[],
     private readonly fallbackIntent: RouteIntentName,
+    private readonly threads?: (intent: RouteIntentName, raw: ThreadFields) => ThreadRoute,
   ) {
     this.parser = new JsonTopLevelStream({
       onKey: (k) => {
         this.sayActive = k === "say" && !this.sayClosed;
         if (this.sayActive) this.saySeen = true;
+        // Threads mode: fields still missing when `say` starts aren't coming first; decide now.
+        if (k === "say" && this.threads && !this._decision && this.intent) this.decide(this.intent);
       },
       onStringDelta: (k, chunk) => {
         if (k === "say" && this.sayActive) this.sayDelta(chunk);
@@ -282,6 +327,7 @@ export class RouteInputStream {
     if (!this._decision) {
       if (!this.intent && this.isAllowed(final?.intent)) this.intent = final!.intent as RouteIntentName;
       if (!this.estimateSeen && final && "estimate_seconds" in final) this.estimate = parseEstimate(final.estimate_seconds);
+      for (const k of ["target", "relation", "tell"] as const) if (!(k in this.raw) && final && k in final) this.raw[k] = final[k];
       const q = typeof final?.question === "string" ? final.question : this.question;
       this.decide(this.intent ?? (q.trim() ? "question" : this.fallbackIntent));
     }
@@ -301,12 +347,17 @@ export class RouteInputStream {
     if (k === "intent") {
       if (this.intent || !this.isAllowed(v)) return;
       this.intent = v as RouteIntentName;
-      if (!this._decision && (kindFor(this.intent) === "answer" || this.estimateSeen)) this.decide(this.intent);
+      if (!this._decision && this.ready()) this.decide(this.intent);
     } else if (k === "estimate_seconds") {
       if (this.estimateSeen) return;
       this.estimateSeen = true;
       this.estimate = parseEstimate(v);
-      if (!this._decision && this.intent) this.decide(this.intent);
+      if (!this._decision && this.ready()) this.decide(this.intent!);
+    } else if (this.threads && (k === "target" || k === "relation" || k === "tell")) {
+      if (k in this.raw) return;
+      this.raw[k] = v;
+      if (k === "tell") this.tellSeen = true;
+      if (!this._decision && this.ready()) this.decide(this.intent!);
     } else if (k === "say" && this.sayActive) {
       this.sayActive = false;
       this.sayClosed = true;
@@ -316,13 +367,26 @@ export class RouteInputStream {
     }
   }
 
+  /** Enough is known to decide: the intent, plus the estimate (question/task) or, in threads mode, `tell`. */
+  private ready(): boolean {
+    if (!this.intent) return false;
+    if (this.threads) return this.tellSeen;
+    return kindFor(this.intent) === "answer" || this.estimateSeen;
+  }
+
   private sayDelta(chunk: string): void {
     if (this._decision) this.emit(chunk);
     else this.sayBuf += chunk;
   }
 
   private decide(intent: RouteIntentName): void {
-    this._decision = { intent, estimateS: kindFor(intent) === "ack" ? this.estimate : null };
+    const t = this.threads?.(intent, this.raw);
+    const i = t?.intent ?? intent;
+    this._decision = { intent: i, estimateS: kindFor(i) === "ack" ? this.estimate : null };
+    if (t) {
+      this._decision.target = t.target;
+      if (t.tell) this._decision.tell = t.tell;
+    }
     this.ev.onDecision(this._decision);
     if (this.sayBuf) { const b = this.sayBuf; this.sayBuf = ""; this.emit(b); }
     if (this.sayClosed) this.endSay();
@@ -342,7 +406,7 @@ export class RouteInputStream {
 }
 
 // ── SPOKEN line parser ─────────────────────────────────────────────────────
-// Opus replies "SPOKEN: <1–3 sentences>\n\n<details>". The parser fires once, as soon as
+// The solver replies "SPOKEN: <1–3 sentences>\n\n<details>". The parser fires once, as soon as
 // the spoken line is complete. If the model leaves out the prefix, it falls back to the
 // first sentence(s) of the reply.
 
@@ -428,4 +492,37 @@ export class SpokenLineParser {
 
 function clean(s: string): string {
   return s.replace(/\*\*|__/g, "").replace(/`/g, "").trim();
+}
+
+// ── Narration gate (tool-using harnesses) ─────────────────────────────────────
+// Codex, Grok and the like narrate before their tool calls ("I'll check the CSS…"), so the reply doesn't
+// start with the SPOKEN: line. The gate holds text back until that line appears and passes it on from
+// there (markdown emphasis just before it included); if it never appears, everything is passed at end().
+
+export class NarrationGate {
+  private held = "";
+  private open = false;
+
+  constructor(private readonly onText: (d: string) => void) {}
+
+  feed(delta: string): void {
+    if (this.open) { this.onText(delta); return; }
+    this.held += delta;
+    const i = this.held.search(/spoken:/i);
+    if (i < 0) return;
+    let start = i;
+    while (start > 0 && /[*_#> \t]/.test(this.held[start - 1]!)) start--;
+    this.open = true;
+    const rest = this.held.slice(start);
+    this.held = "";
+    this.onText(rest);
+  }
+
+  end(): void {
+    if (this.open || !this.held) return;
+    this.open = true;
+    const all = this.held;
+    this.held = "";
+    this.onText(all);
+  }
 }

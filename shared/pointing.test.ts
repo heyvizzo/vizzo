@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { clickCoords } from "./clickCoords.ts";
 import type { ClickKind, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "./protocol.ts";
 import {
   ALGORITHMS, DWELL_TIE_EPS, annotateTranscript, atStart, computeRests, detectLanguage, foldWord, formatRests, pointingLanguage, clickVerb, relTime, sortClicks, dwell, dwellMode, formatPageContext, formatPointingContext, isPointingWord,
@@ -248,6 +249,14 @@ describe("formatPageContext", () => {
   const ev = (p: Partial<PageEvents>): PageEvents => ({ clicks: [], preselected: null, highlights: [], ...p });
   // "how much is this one" — "this" spans 10_600..10_900
   const words: Word[] = [w("how", 0.0, 0.2), w("much", 0.2, 0.4), w("is", 0.4, 0.6), w("this", 0.6, 0.9), w("one", 0.9, 1.1)];
+
+  it("a click with coords: the coords follow the line, a group uses its first click's", () => {
+    const coords = clickCoords({ x: 220, y: 234 }, { x: 0, y: 500 }, { width: 2000, height: 4000 }, { left: 100, top: 200, width: 400, height: 100 });
+    const withCoords = { ...click(T0 + 700, th, 2), coords: [coords, { ...coords, page: { ...coords.page, at: { px: { x: 9, y: 9 }, pct: { x: 0.5, y: 0.2 } } } }] };
+    expect(formatPageContext(ev({ clicks: [withCoords] }), words, T0)).toBe(
+      `Double-clicked: <th> "Price / month" in "Pricing table" [data-source=${DS}:67] from 0.7 to 0.9 s (while saying "this") — at 30%, 34% (120, 34 px) of its 400×100 box, 11%, 18.35% (220, 734 px) of the 2000×4000 page`,
+    );
+  });
 
   it("a single click: verb, element, time from audio start, the word being said", () => {
     expect(formatPageContext(ev({ clicks: [click(T0 + 700, th)] }), words, T0)).toBe(

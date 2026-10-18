@@ -132,6 +132,13 @@ export interface ElementInfo { elementPath: string | null; dataSource: string | 
 
 export const NO_ELEMENT: ElementInfo = { elementPath: null, dataSource: null, label: null, container: null };
 
+/** The element a cursor sample describes: the most specific meaningful element at/above `el` (none → `el`), null outside `root`. */
+export function pointedElement<T extends ElLike>(el: T | null, root?: ElLike | null): T | null {
+  if (!el) return null;
+  if (root && !isInside(el, root)) return null;
+  return (meaningfulTarget(el, root) as T | null) ?? el;
+}
+
 /**
  * What a cursor sample records about the element under the pointer (ARCHITECTURE §3 CursorSample).
  * Outside `root` → all null. Otherwise:
@@ -143,9 +150,8 @@ export const NO_ELEMENT: ElementInfo = { elementPath: null, dataSource: null, la
  *   differs from label; else null.
  */
 export function describeElement(el: ElLike | null, root?: ElLike | null): ElementInfo {
-  if (!el) return NO_ELEMENT;
-  if (root && !isInside(el, root)) return NO_ELEMENT;
-  const target = meaningfulTarget(el, root) ?? el;
+  const target = pointedElement(el, root);
+  if (!target) return NO_ELEMENT;
   const elementPath = cssPath(target, root);
   if (elementPath === null) return NO_ELEMENT;
   const label = ownLabel(target);

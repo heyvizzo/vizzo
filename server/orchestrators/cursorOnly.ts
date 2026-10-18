@@ -1,13 +1,14 @@
-// cursor-only approach (TASKS T9): Scribe STT + pointing resolution, no LLM, no TTS.
+// cursor-only approach (TASKS T9): STT (the configured Speech model) + pointing resolution, no LLM, no TTS.
 import { SAMPLE_RATE } from "../../shared/config.ts";
 import { computeRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
 import type { PointingTarget } from "../../shared/protocol.ts";
-import { openScribe } from "../adapters/scribe.ts";
+import { openStt } from "./deps.ts";
+import { sttUsage } from "../cost.ts";
 import type { OpenScribe, SttStream } from "../adapters/types.ts";
 import type { Orchestrator, TurnResult } from "./types.ts";
 
 /** `open` is injectable for tests. */
-export function createCursorOnlyOrchestrator(open: OpenScribe = openScribe): Orchestrator {
+export function createCursorOnlyOrchestrator(open: OpenScribe = openStt): Orchestrator {
   return (ctx) => {
     const { turnId, config } = ctx;
     let stt: SttStream | null = null;
@@ -24,7 +25,7 @@ export function createCursorOnlyOrchestrator(open: OpenScribe = openScribe): Orc
       let s: SttStream;
       try {
         const lang = config.language;
-        s = await Promise.race([open({ mark: ctx.mark, ...(lang && lang !== "auto" ? { language: lang } : {}) }), cancelledP]);
+        s = await Promise.race([open({ mark: ctx.mark, model: config.sttModel, ...(lang && lang !== "auto" ? { language: lang } : {}) }), cancelledP]);
       } catch (e) {
         if (!cancelled) ctx.send({ type: "error", turnId, source: "scribe", message: String(e) });
         throw e;
@@ -53,8 +54,8 @@ export function createCursorOnlyOrchestrator(open: OpenScribe = openScribe): Orc
         ctx.send({ type: "pointing.resolved", turnId, targets: pointing, rests });
         ctx.mark("turn.end");
         return {
-          transcript: text, pointing, voiceText: "", opusText: "",
-          usage: { scribeSeconds: audioBytes / 2 / SAMPLE_RATE }, error,
+          transcript: text, pointing, voiceText: "", solverText: "",
+          usage: sttUsage(config.sttModel, audioBytes / 2 / SAMPLE_RATE), error,
         };
       } finally {
         s.close();

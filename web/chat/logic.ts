@@ -1,6 +1,8 @@
-// Pure helpers for the chat page: decision badges, estimates, job labels, Opus detail extraction,
+// Pure helpers for the chat page: decision badges, estimates, job labels, the solver detail extraction,
 // and a rough "is audio still playing" estimate. No DOM here (unit-tested in logic.test.ts).
-import type { JobInfo, RouteIntent } from "../../shared/protocol.ts";
+import type { EngineState, JobInfo, RouteIntent } from "../../shared/protocol.ts";
+import { STT_LABELS, STT_PINNED_LANGUAGES, type SpeechLanguage, type SttModel } from "../../shared/config.ts";
+import { normalizePageUrl, type ThreadInfo } from "../../shared/threads.ts";
 
 /** Seconds → "~8 s", "~1.5 min", "~2 min", "~1 h". null/invalid → "". */
 export function fmtEstimate(s: number | null | undefined): string {
@@ -40,11 +42,11 @@ export function decisionBadges(d: DecisionLike): string[] {
   return out;
 }
 
-/** Opus streams `SPOKEN: …` + blank line + details. Returns the details part (the spoken line is said aloud). */
-export function detailOf(opusText: string): string {
-  if (!/^\s*SPOKEN:/i.test(opusText)) return opusText;
-  const i = opusText.search(/\n\s*\n/);
-  return i < 0 ? "" : opusText.slice(i).trim();
+/** The solver streams `SPOKEN: …` + blank line + details. Returns the details part (the spoken line is said aloud). */
+export function detailOf(solverText: string): string {
+  if (!/^\s*SPOKEN:/i.test(solverText)) return solverText;
+  const i = solverText.search(/\n\s*\n/);
+  return i < 0 ? "" : solverText.slice(i).trim();
 }
 
 /** Drop a leading `SPOKEN:` prefix from a spoken line. */
@@ -57,8 +59,17 @@ export function jobHeadline(job: Pick<JobInfo, "state" | "intent" | "elapsedMs">
   const kind = job.intent === "question" ? "question" : "task";
   if (job.state === "running") return `Background ${kind} · running ${fmtElapsed(elapsedMs)}`;
   const took = job.elapsedMs ?? elapsedMs;
-  if (job.state === "done") return `Done in ${fmtElapsed(took)}`;
+  if (job.state === "done") return `Background ${kind} · ${fmtElapsed(took)}`;
   return `Failed after ${fmtElapsed(took)}`;
+}
+
+/** A job's question shortened for its marker: whitespace collapsed, cut at a word boundary, with "…". */
+export function markerLabel(question: string, max = 40): string {
+  const q = question.trim().replace(/\s+/g, " ");
+  if (q.length <= max) return q;
+  const cut = q.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 /** "1 task running", "3 tasks running", "" for none. */
@@ -86,4 +97,81 @@ export class PlaybackClock {
   remainingMs(now: number): number {
     return Math.max(0, this.until - now);
   }
+}
+
+// ── element threads ──
+
+/** The turn's reply bubble stays up until answered: a follow-up question, or a reply that ends with "?". */
+export function replyNeedsReply(intent: RouteIntent | undefined, text: string): boolean {
+  return intent === "clarify" || /\?\s*["'”’)]*\s*$/.test(text);
+}
+
+/** The threads on the page at `url` (null: none). */
+export function threadsOnPage(threads: Iterable<ThreadInfo>, url: string | null): ThreadInfo[] {
+  if (!url) return [];
+  const page = normalizePageUrl(url);
+  return [...threads].filter((t) => t.pageUrl === page);
+}
+
+export interface ThreadGroup { pageUrl: string; current: boolean; threads: ThreadInfo[] }
+
+/** When the thread last had something happen in it: its newest message, else its creation. Opening it doesn't count. */
+export function lastActivityAt(t: ThreadInfo): number {
+  return Math.max(t.createdAt, ...t.messages.map((m) => m.at));
+}
+
+/**
+ * Threads grouped by page: the current page first, then the most recently active; newest activity first within a page.
+ * Sorted by activity, not lastInteractionAt, so opening a thread (which bumps that, to focus it) doesn't reorder the list.
+ */
+export function groupThreads(threads: Iterable<ThreadInfo>, url: string | null): ThreadGroup[] {
+  const current = url ? normalizePageUrl(url) : null;
+  const groups = new Map<string, ThreadInfo[]>();
+  for (const t of threads) groups.set(t.pageUrl, [...(groups.get(t.pageUrl) ?? []), t]);
+  const latest = (list: ThreadInfo[]) => Math.max(...list.map(lastActivityAt));
+  return [...groups.entries()]
+    .map(([pageUrl, list]) => ({ pageUrl, current: pageUrl === current, threads: list.sort((a, b) => lastActivityAt(b) - lastActivityAt(a)) }))
+    .sort((a, b) => Number(b.current) - Number(a.current) || latest(b.threads) - latest(a.threads));
+}
+
+/** "84 MB", "1.4 GB" (resident memory). */
+export function fmtBytes(n: number): string {
+  const mb = n / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+}
+
+/**
+ * What the Settings page says under Voice / Speech about the selected model's on-device engine (`engine`: its id;
+ * null: a cloud model, nothing to load). `pending`: the switch was just sent and the server hasn't listed it yet.
+ */
+export function engineStatus(engine: string | null, kind: "tts" | "stt", engines: readonly EngineState[], pending = false):
+  { state: "loading" | "ready" | "error" | "idle"; text: string } | null {
+  if (!engine) return null;
+  const e = engines.find((x) => x.kind === kind && x.engine === engine);
+  if (!e) return pending ? { state: "loading", text: "Loading…" } : { state: "idle", text: "Not loaded: it loads on the first turn." };
+  const ram = e.ramBytes ? ` · ${fmtBytes(e.ramBytes)} RAM` : "";
+  if (e.state === "loading") return { state: "loading", text: `Loading ${e.label}…${ram}` };
+  if (e.state === "error") return { state: "error", text: `Couldn't load ${e.label}: ${e.error ?? "unknown error"}` };
+  return { state: "ready", text: `${e.label} loaded${e.loadMs !== undefined ? ` in ${(e.loadMs / 1000).toFixed(1)} s` : ""}${ram}` };
+}
+
+/** "localhost:5173/pricing.html?plan=pro" (no scheme, no trailing slash on the root); file URLs by their name. */
+export function pageLabel(pageUrl: string): string {
+  try {
+    const u = new URL(pageUrl);
+    if (u.protocol === "file:") return decodeURIComponent(u.pathname.split("/").pop() || u.pathname);
+    const path = u.pathname === "/" ? "" : u.pathname;
+    return `${u.host}${path}${u.search}`;
+  } catch {
+    return pageUrl;
+  }
+}
+
+/** Why the chosen speech model won't follow the chosen language, or undefined when it does (or the language is auto). */
+export function sttLanguageWarning(model: SttModel, language: SpeechLanguage): string | undefined {
+  if (language === "auto" || STT_PINNED_LANGUAGES[model].includes(language)) return undefined;
+  const name = language === "ro" ? "Romanian" : "English";
+  const ok = (Object.keys(STT_PINNED_LANGUAGES) as SttModel[]).filter((m) => STT_PINNED_LANGUAGES[m].includes(language)).map((m) => STT_LABELS[m]);
+  const why = STT_PINNED_LANGUAGES[model].length ? `doesn't transcribe ${name} reliably` : "ignores the Language setting and may transcribe in another language";
+  return `${STT_LABELS[model]} ${why}. ${name} works with ${ok.join(", ")}.`;
 }

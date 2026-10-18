@@ -1,12 +1,14 @@
 // T3 smoke: stream fixtures/smoke/hello.wav to Scribe v2 Realtime at real-time pace in 20 ms
 // chunks, commit, and print words + release→final latency + every mark.
 // Run: npm run smoke:scribe   (optional SMOKE_WAV=path/to/24k-mono-pcm16.wav)
-import "dotenv/config";
+import { loadDesktopEnv } from "../electron/settings.ts";
 import { readFileSync } from "node:fs";
 import type { MarkName } from "../shared/marks.ts";
 import { openScribe } from "../server/adapters/scribe.ts";
 import { serverNow } from "../server/clock.ts";
 import { parseWav } from "../server/wav.ts";
+
+loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
 
 if (!process.env.ELEVENLABS_API_KEY) {
   console.log("SKIP: ELEVENLABS_API_KEY not set");

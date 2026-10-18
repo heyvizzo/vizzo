@@ -12,6 +12,8 @@ export interface CaptureHandle {
 export interface CaptureOpts {
   /** Called for every 20 ms PCM16 24 kHz frame. */
   onFrame: (pcm: Int16Array<ArrayBuffer>) => void;
+  /** Start this far before now (up to 1 s), from audio the worklet kept while idle. tAudioStart moves back with it. */
+  preRollMs?: number;
 }
 
 interface Graph {
@@ -41,6 +43,11 @@ function getGraph(): Promise<Graph> {
     throw e;
   });
   return graphPromise;
+}
+
+/** Build the capture graph now, so the worklet is already keeping audio for the first turn's pre-roll. */
+export async function warmCapture(): Promise<void> {
+  await getGraph();
 }
 
 /**
@@ -79,7 +86,7 @@ export async function startCapture(opts: CaptureOpts): Promise<CaptureHandle> {
   };
   node.port.addEventListener("message", onMessage);
   node.port.start();
-  node.port.postMessage({ type: "start", id });
+  node.port.postMessage({ type: "start", id, preRollMs: opts.preRollMs ?? 0 });
 
   const stop = () => {
     if (stopped) return;

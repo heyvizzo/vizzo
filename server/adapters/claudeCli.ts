@@ -1,23 +1,15 @@
-// Claude through pre-spawned `claude -p` agents (Claude Code CLI, headless). Each role (router, progress
-// lines, Opus) keeps warm processes started with its system prompt, model and effort, waiting for input
-// on stdin (--input-format stream-json); a request takes one, sends one user message, streams the
-// partial-message events back, and the process exits. A replacement is spawned right away, so the CLI's
-// boot time (~0.5–1 s) is paid ahead of time. One request per process = a fresh context every time.
-// `startClaudeAgents()` (called by `npm run dev` / server start) spawns the pools; `stopClaudeAgents()`
-// kills them (also on process exit).
+// The stream-json reader for `claude -p` (Claude Code, headless) and Grok's CLI, which prints the same events
+// (--output-format streaming-messages-json). A `claude -p` agent starts with its system prompt, model and
+// effort and waits for one user message on stdin (--input-format stream-json), so it can be spawned ahead
+// of time (warmPool.ts keeps them warm); a request sends the message, streams the partial-message events
+// back until the `result` event, and the process exits. One request per process = a fresh context, except for
+// element-thread agents (`keep`): the process stays open and the next request is the next user message.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export type CliRole = "router" | "fillers" | "opus";
-
-export interface CliRoleSpec {
-  model: string;
-  effort: "low" | "medium" | "high";
-  /** Full system prompt (fixed for the process). */
-  system: () => string;
-}
+export type CliRole = "router" | "fillers" | "solver";
 
 /** What one request returned. */
 export interface CliResult {
@@ -38,21 +30,21 @@ export interface CliResult {
 export interface CliHandlers {
   /** Text deltas of the assistant's reply (thinking deltas are skipped). */
   onText?: (delta: string) => void;
+  /** Every event as received. */
+  onEvent?: (ev: Record<string, unknown>) => void;
 }
 
-const BASE_ARGS = [
+/** `claude -p` flags every agent gets: stream-json both ways; no hooks/plugins/CLAUDE.md/project settings
+ * (--safe-mode), no MCP, nothing saved. */
+export const CLAUDE_BASE_ARGS = [
   "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-  // No tools, no hooks/plugins/CLAUDE.md, no MCP, nothing saved: a plain model call with our system prompt.
-  "--tools", "", "--safe-mode", "--strict-mcp-config", "--no-session-persistence",
+  "--safe-mode", "--strict-mcp-config", "--no-session-persistence",
 ];
 
-/** Where agents run: an empty directory, so no project settings or CLAUDE.md are picked up. */
-const CWD = join(tmpdir(), "realtime-voice-claude-agents");
+/** Where agents run by default: an empty directory, so no project settings or CLAUDE.md are picked up. */
+export const EMPTY_CWD = join(tmpdir(), "realtime-voice-agents");
 
-let log: (msg: string) => void = (msg) => console.info(msg);
-export function setCliLogger(fn: (msg: string) => void): void { log = fn; }
-
-class CliAgent {
+export class CliAgent {
   readonly proc: ChildProcessWithoutNullStreams;
   readonly spawnedAt = performance.now();
   private buf = "";
@@ -61,11 +53,10 @@ class CliAgent {
   exited = false;
   readonly exit: Promise<number | null>;
 
-  constructor(readonly role: CliRole, spec: CliRoleSpec, readonly bin: string) {
-    mkdirSync(CWD, { recursive: true });
-    this.proc = spawn(bin, [...BASE_ARGS, "--model", spec.model, "--effort", spec.effort, "--system-prompt", spec.system()], {
-      cwd: CWD, stdio: ["pipe", "pipe", "pipe"], env: process.env,
-    });
+  /** `role`: a label for errors ("router", "grok solver"…). */
+  constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD) {
+    mkdirSync(cwd, { recursive: true });
+    this.proc = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: process.env });
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (d: string) => this.onData(d));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
@@ -86,21 +77,27 @@ class CliAgent {
     }
   }
 
-  /** Send one user message and stream the reply until the `result` event. The process exits afterwards. */
-  request(user: string, handlers: CliHandlers, timeoutMs: number, warm: boolean): Promise<CliResult> {
+  /**
+   * Send one user message (`null`: the prompt was in the arguments) and stream the reply until the `result`
+   * event. The process exits afterwards, unless `keep`: then it waits for the next message (a timeout still kills it).
+   */
+  request(user: string | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
     return new Promise<CliResult>((resolve, reject) => {
       let text = "";
       let stopReason: string | null = null;
       let assistant: unknown = null;
-      const done = (fn: () => void) => {
+      const done = (fn: () => void, end = !keep) => {
         clearTimeout(timer);
-        this.listeners.clear();
-        try { this.proc.stdin.end(); } catch { /* already closed */ }
-        setTimeout(() => { if (!this.exited) this.proc.kill("SIGTERM"); }, 2000).unref();
+        this.listeners.delete(listener);
+        if (end) {
+          try { this.proc.stdin.end(); } catch { /* already closed */ }
+          setTimeout(() => { if (!this.exited) this.proc.kill("SIGTERM"); }, keep ? 0 : 2000).unref();
+        }
         fn();
       };
-      const timer = setTimeout(() => done(() => reject(new Error(`claude -p (${this.role}) timed out after ${timeoutMs} ms`))), timeoutMs);
-      this.listeners.add((ev) => {
+      const timer = setTimeout(() => done(() => reject(new Error(`${this.bin} (${this.role}) timed out after ${timeoutMs} ms`)), true), timeoutMs);
+      const listener = (ev: Record<string, unknown>): void => {
+        handlers.onEvent?.(ev);
         if (ev.type === "stream_event") {
           const e = ev.event as { type?: string; delta?: { type?: string; text?: string; stop_reason?: string } } | undefined;
           if (e?.type === "content_block_delta" && e.delta?.type === "text_delta" && e.delta.text) {
@@ -114,7 +111,7 @@ class CliAgent {
         } else if (ev.type === "result") {
           const r = ev as { subtype?: string; is_error?: boolean; result?: string; usage?: unknown; total_cost_usd?: number; duration_ms?: number; duration_api_ms?: number; modelUsage?: Record<string, unknown> };
           if (r.is_error || (r.subtype && r.subtype !== "success")) {
-            done(() => reject(new Error(`claude -p (${this.role}) failed: ${r.subtype ?? "error"}: ${String(r.result ?? "").slice(0, 300)}`)));
+            done(() => reject(new Error(`${this.bin} (${this.role}) failed: ${r.subtype ?? "error"}: ${String(r.result ?? "").slice(0, 300)}`)));
             return;
           }
           const model = (assistant as { model?: string } | null)?.model ?? Object.keys(r.modelUsage ?? {})[0];
@@ -124,11 +121,13 @@ class CliAgent {
             raw: { result: ev, assistant }, warm,
           }));
         }
-      });
+      };
+      this.listeners.add(listener);
       this.exit.then((code) => {
-        if (this.listeners.size) done(() => reject(new Error(`claude -p (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`)));
+        if (this.listeners.has(listener)) done(() => reject(new Error(`${this.bin} (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`)));
       });
-      this.proc.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: user } }) + "\n");
+      if (user === null) this.proc.stdin.end();
+      else this.proc.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: user } }) + "\n");
     });
   }
 
@@ -137,98 +136,10 @@ class CliAgent {
   }
 }
 
-class CliPool {
-  private idle: CliAgent[] = [];
-  private stopped = false;
-  constructor(readonly role: CliRole, private spec: CliRoleSpec, private size: number, private bin: string) {}
-
-  fill(): void {
-    if (this.stopped) return;
-    this.idle = this.idle.filter((a) => !a.exited);
-    while (this.idle.length < this.size) {
-      const a = new CliAgent(this.role, this.spec, this.bin);
-      a.exit.then(() => { this.idle = this.idle.filter((x) => x !== a); });
-      this.idle.push(a);
-    }
-  }
-
-  /** A waiting agent (or a cold one if none), and a replacement starts in the background. */
-  take(): { agent: CliAgent; warm: boolean } {
-    const ready = this.idle.find((a) => !a.exited);
-    if (ready) this.idle = this.idle.filter((a) => a !== ready);
-    const agent = ready ?? new CliAgent(this.role, this.spec, this.bin);
-    // Replace it right away so the next request finds a booted process.
-    queueMicrotask(() => this.fill());
-    return { agent, warm: !!ready && performance.now() - ready.spawnedAt > 800 };
-  }
-
-  get idleCount(): number { return this.idle.filter((a) => !a.exited).length; }
-
-  stop(): void {
-    this.stopped = true;
-    for (const a of this.idle) a.kill();
-    this.idle = [];
-  }
+/**
+ * Run a CLI that prints `claude -p`'s stream-json events with the prompt in `args` (Grok's -p), spawned for
+ * this one request.
+ */
+export function runStreamJson(label: string, bin: string, args: string[], cwd: string | undefined, handlers: CliHandlers, timeoutMs: number): Promise<CliResult> {
+  return new CliAgent(label, bin, args, cwd).request(null, handlers, timeoutMs, false);
 }
-
-const pools = new Map<CliRole, CliPool>();
-let specsFn: (() => Record<CliRole, CliRoleSpec>) | null = null;
-let exitHooked = false;
-
-/** Default pool sizes; override with CLAUDE_AGENTS="router:2,fillers:1,opus:2". */
-export function poolSizes(env = process.env.CLAUDE_AGENTS): Record<CliRole, number> {
-  const sizes: Record<CliRole, number> = { router: 1, fillers: 1, opus: 1 };
-  for (const part of (env ?? "").split(",")) {
-    const [k, v] = part.split(":").map((s) => s.trim());
-    if ((k === "router" || k === "fillers" || k === "opus") && v !== undefined && /^\d+$/.test(v)) sizes[k] = Number(v);
-  }
-  return sizes;
-}
-
-/** Register the role specs (prompts/models). Called by the Claude adapter at load. */
-export function registerCliSpecs(fn: () => Record<CliRole, CliRoleSpec>): void { specsFn = fn; }
-
-/** Spawn the agent pools (idempotent). `npm run dev` does this at server start. */
-export function startClaudeAgents(opts: { bin?: string; sizes?: Partial<Record<CliRole, number>> } = {}): void {
-  if (!specsFn) throw new Error("claude -p specs not registered");
-  const specs = specsFn();
-  const sizes = { ...poolSizes(), ...opts.sizes };
-  for (const role of ["router", "fillers", "opus"] as const) {
-    if (pools.has(role)) continue;
-    const pool = new CliPool(role, specs[role], sizes[role], opts.bin ?? process.env.CLAUDE_BIN ?? "claude");
-    pools.set(role, pool);
-    pool.fill();
-  }
-  if (!exitHooked) {
-    exitHooked = true;
-    process.once("exit", stopClaudeAgents);
-    for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => { stopClaudeAgents(); process.exit(0); });
-  }
-  log(`[claude-cli] agents warming: ${(["router", "fillers", "opus"] as const).map((r) => `${r}×${sizes[r]} (${specs[r].model}, effort ${specs[r].effort})`).join(", ")}`);
-}
-
-export function stopClaudeAgents(): void {
-  for (const p of pools.values()) p.stop();
-  pools.clear();
-}
-
-export function agentStatus(): Record<string, number> {
-  return Object.fromEntries([...pools].map(([r, p]) => [r, p.idleCount]));
-}
-
-const TIMEOUTS: Record<CliRole, number> = { router: 30_000, fillers: 20_000, opus: 180_000 };
-
-/** One request on a fresh agent of `role` (starts the pools if they aren't running yet). */
-export async function cliRequest(role: CliRole, user: string, handlers: CliHandlers = {}): Promise<CliResult> {
-  if (!pools.has(role)) startClaudeAgents();
-  const { agent, warm } = pools.get(role)!.take();
-  return agent.request(user, handlers, TIMEOUTS[role], warm);
-}
-
-/** The spec a role runs with (for the prompt inspector). */
-export function cliSpec(role: CliRole): CliRoleSpec {
-  if (!specsFn) throw new Error("claude -p specs not registered");
-  return specsFn()[role];
-}
-
-export const CLI_ARGS_SUMMARY = "claude -p --input-format stream-json --output-format stream-json --include-partial-messages --tools \"\" --safe-mode --strict-mcp-config --no-session-persistence";

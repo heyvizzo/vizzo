@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Choose a project folder</title>
+  <style>
+    :root { --bg: #f4f4f5; --text: #18181b; --muted: #71717a; --accent: #2563eb; }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) { --bg: #18181b; --text: #f4f4f5; --muted: #a1a1aa; --accent: #60a5fa; }
+    }
+    :root[data-theme="dark"] { --bg: #18181b; --text: #f4f4f5; --muted: #a1a1aa; --accent: #60a5fa; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { height: 100%; display: grid; place-items: center; padding: 16px; box-sizing: border-box; }
+    .box { max-width: 340px; text-align: center; }
+    h1 { font-size: 17px; margin: 0 0 8px; }
+    p { color: var(--muted); margin: 0 0 16px; }
+    button { font: inherit; padding: 8px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; }
+    .error { color: #ef4444; min-height: 1.5em; margin: 12px 0 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="box">
+      <h1>Choose a project folder</h1>
+      <p>The voice server and its claude -p agents work in this folder. The chat starts once one is chosen.</p>
+      <button id="choose" title="Pick the folder the voice server and its agents work in">Choose folder…</button>
+      <p class="error" id="error"></p>
+    </div>
+  </main>
+  <script>
+    const choose = document.getElementById("choose");
+    choose.onclick = async () => {
+      choose.disabled = true;
+      try {
+        // Picking a folder makes the main process start the server and load the chat here.
+        await shell.pickProject();
+      } catch (err) {
+        document.getElementById("error").textContent = String(err);
+      } finally {
+        choose.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>

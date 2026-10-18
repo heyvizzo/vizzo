@@ -3,8 +3,10 @@
 //   C. Text-to-Dialogue stream-input + v4 Turbo  D. TTS multi-stream-input (2 contexts) + flash
 // Logs each server message shape once (audio truncated), first-audio latency and close code.
 // Run: npx tsx scripts/probe-eleven-tts.ts
-import "dotenv/config";
+import { loadDesktopEnv } from "../electron/settings.ts";
 import WebSocket from "ws";
+
+loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
 
 const KEY = process.env.ELEVENLABS_API_KEY;
 if (!KEY) {

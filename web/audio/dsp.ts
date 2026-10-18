@@ -4,7 +4,7 @@
 export const RATE = 24_000;
 /** 20 ms at 24 kHz. */
 export const FRAME_SAMPLES = 480;
-/** First "non-silent" sample: |x| above about −60 dBFS (≈ 33 in PCM16). Shared by player + audio-test. */
+/** First "non-silent" sample: |x| above about −60 dBFS (≈ 33 in PCM16). Shared by the player. */
 export const SILENCE_THRESHOLD = 1 / 1000;
 
 // ── PCM conversion ──────────────────────────────────────────────────────────
@@ -33,6 +33,18 @@ export function bytesToPcm16(buf: ArrayBuffer): Int16Array<ArrayBuffer> {
 }
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+/** Root-mean-square of a float block (mic meter, tests). Empty → 0. */
+export function rmsOf(samples: ArrayLike<number>): number {
+  const n = samples.length;
+  if (n === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    const v = samples[i] ?? 0;
+    s += v * v;
+  }
+  return Math.sqrt(s / n);
+}
 
 /** Average all channels into one. */
 export function downmix(channels: readonly Float32Array[], out?: Float32Array): Float32Array {

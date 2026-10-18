@@ -1,28 +1,32 @@
+/* Generic helpers (were in the cursor lab's stylesheet) */
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row .spacer { flex: 1; }
+.row select { font-size: 12px; padding: 3px 5px; }
+.err { color: var(--err); white-space: pre-wrap; }
+button.armed { background: var(--warn); color: #000; }
+
 main.chat {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 460px;
-  gap: 12px;
-  height: calc(100vh - 45px);
-  padding: 12px;
-}
-@media (max-width: 900px) {
-  nav.top { flex-wrap: wrap; row-gap: 4px; }
-  main.chat { grid-template-columns: minmax(0, 1fr); grid-template-rows: 45vh minmax(0, 1fr); height: auto; min-height: calc(100vh - 45px); }
+  display: flex;
+  height: 100vh;
+  min-height: 0;
+  padding: 10px;
 }
 
-.chat-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.chat-side { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; min-width: 0; }
 
-.chat-head { display: flex; flex-direction: column; gap: 10px; }
+.chat-head { display: none; flex-direction: column; gap: 10px; }
+/* Shown only while it has something to show: running tasks, the cost or the RAM (unless turned off in Settings). */
+.chat-head:has(#jobs-pill:not([hidden])),
+main:not(.hide-cost) .chat-head:has(#session-cost:not([hidden])),
+main:not(.hide-ram) .chat-head:has(#session-mem:not([hidden])) { display: flex; }
 .seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; background: transparent; padding: 8px 6px; color: var(--muted); }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button[aria-pressed="true"] { background: #2a3550; color: var(--text); font-weight: 600; }
 .seg button:disabled { cursor: not-allowed; opacity: 0.6; }
 .opts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
-.opts select { font-size: 12px; padding: 4px 6px; }
 .opts [hidden] { display: none; }
 .opts .spacer { flex: 1; }
-.approach-note { font-size: 12px; color: var(--muted); margin: 0; }
 .head-row { display: flex; gap: 8px; align-items: center; min-height: 30px; }
 .head-row .spacer { flex: 1; }
 .jobs-pill { font-size: 12px; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid #3b4a6b; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
@@ -32,7 +36,15 @@ main.chat {
 @media (prefers-reduced-motion: reduce) { .jobs-pill::before { animation: none; } }
 
 .messages { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+/* New conversation: pinned to the top of the conversation, only once it has something to forget (what it clears). */
+.conv-reset { position: sticky; top: 0; z-index: 2; align-self: flex-end; flex: none; margin-bottom: -6px; padding: 3px 10px; font-size: 12px; color: var(--muted); background: var(--panel); }
+.conv-reset:hover { color: var(--text); }
+.messages:not(:has(> .turn:not(.queued), > .job, > .job-marker, > .note)) > .conv-reset { display: none; }
 .empty { margin: auto; text-align: center; color: var(--muted); max-width: 320px; line-height: 1.5; }
+div.empty { text-align: left; }
+.empty h3 { margin: 0 0 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.empty p { margin: 0; }
+.empty p + h3 { margin-top: 14px; }
 
 .turn { display: flex; flex-direction: column; gap: 6px; }
 .bubble { padding: 8px 12px; border-radius: 12px; line-height: 1.45; max-width: 92%; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -67,7 +79,19 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 .job-sub { font-size: 11px; color: var(--muted); }
 .job-spoken { line-height: 1.45; overflow-wrap: anywhere; }
 .job-err { color: var(--err); font-size: 12px; }
+.job[hidden] { display: none; }
 .job [hidden] { display: none; }
+/* A task's marker in the conversation: click to expand its thread (the .job panel right after it). */
+.job-marker { align-self: flex-start; margin-left: 18px; max-width: calc(100% - 18px); display: inline-flex; align-items: center; gap: 8px; padding: 3px 10px 3px 8px; border: 1px solid #3b4a6b; border-radius: 999px; background: #151a24; color: var(--accent); font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
+.job-marker::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.job-marker[data-state="running"]::before { animation: pulse 1.4s ease-in-out infinite; }
+.job-marker[aria-expanded="true"] { background: #1c2331; }
+.job-marker[data-state="done"] { border-color: #1f4d33; color: var(--ok); }
+.job-marker[data-state="failed"] { border-color: #5b2424; color: var(--err); }
+.job-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.job-marker-q { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-marker-status { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .job-marker[data-state="running"]::before { animation: none; } }
 .job details.detail { max-width: 100%; }
 
 .meta { align-self: flex-start; font: 11px ui-monospace, monospace; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
@@ -75,6 +99,23 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 
 .talk { display: flex; flex-direction: column; gap: 8px; }
 .talk .row { display: flex; gap: 8px; align-items: center; }
+.listen-row { position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; }
+.always { display: flex; align-items: center; gap: 8px; width: fit-content; font-size: 13px; color: var(--text); cursor: pointer; user-select: none; }
+.always input { width: 15px; height: 15px; margin: 0; padding: 0; accent-color: var(--accent); border: 0; background: transparent; border-radius: 4px; }
+.hang { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 12px; color: var(--muted); }
+.hang[hidden] { display: none; }
+.hang input { width: 4.5em; padding: 3px 6px; font-size: 12px; }
+.meter { display: block; width: 100%; height: 92px; border: 1px solid var(--line); border-radius: 8px; background: #10141c; cursor: ns-resize; touch-action: none; }
+.meter[hidden] { display: none; }
+.meter.live { border-color: var(--err); }
+.meter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.info { display: inline-flex; margin-left: -8px; }
+.info[hidden] { display: none; }
+.info-icon { width: 15px; height: 15px; padding: 0; border: 1px solid var(--muted); border-radius: 50%; background: transparent; color: var(--muted); font: italic 600 10px/13px Georgia, serif; text-align: center; cursor: help; }
+.info-icon:hover, .info-icon:focus-visible { color: var(--text); border-color: var(--text); }
+/* Placed against the row, not the icon, so it stays inside the narrow sidebar. */
+.info-tip { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 4px 14px rgb(0 0 0 / 0.18); font-size: 11px; line-height: 1.4; color: var(--text); opacity: 0; visibility: hidden; transition: opacity 0.12s, visibility 0.12s; pointer-events: none; }
+.info:hover .info-tip, .info:focus-within .info-tip { opacity: 1; visibility: visible; }
 .ptt-big { flex: 1; padding: 14px; font-size: 15px; font-weight: 600; border-radius: 10px; user-select: none; touch-action: none; }
 .ptt-big.live { background: #7f1d1d; border-color: var(--err); }
 .stop { padding: 14px 16px; font-weight: 600; border-radius: 10px; border-color: #7f1d1d; color: #fca5a5; }
@@ -131,3 +172,70 @@ table.ctable .cusd.saved { color: var(--ok); }
 
 .session-cost { font: 11px ui-monospace, monospace; color: #e5c07b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .session-cost[hidden] { display: none; }
+.session-mem { font: 11px ui-monospace, monospace; color: var(--muted); white-space: nowrap; cursor: help; }
+.session-mem[hidden] { display: none; }
+/* Sidebar RAM / Cost checkboxes unticked */
+.hide-ram :is(.session-mem, .thread-mem, .thread-mem-all),
+.hide-cost :is(.session-cost, .costbox, .thread-page-cost, .cost-text) { display: none !important; }
+
+/* Project folder (Electron only): name as a button, full path after it */
+.project { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; min-width: 0; }
+.project[hidden] { display: none; }
+.project-label { flex: none; color: var(--muted); }
+#project-pick { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 12px; }
+#project-pick svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-path { flex: 1; min-width: 0; font: 11px ui-monospace, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+
+/* Element threads: the list by page (click → the page opens its panel) and thread lines in the conversation */
+.threads { padding: 8px 12px; }
+.threads[hidden] { display: none; }
+.threads > details > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.thread-groups { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; max-height: 28vh; overflow: auto; }
+.thread-group { display: flex; flex-direction: column; gap: 2px; }
+.thread-page { font: 11px ui-monospace, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-here { color: var(--accent); }
+.thread-page-row { display: flex; align-items: center; gap: 6px; }
+.thread-page-row .thread-page { flex: 1; min-width: 0; }
+.thread-mem { flex: none; font: 11px ui-monospace, monospace; color: var(--muted); font-variant-numeric: tabular-nums; }
+.thread-mem:empty { display: none; }
+.thread-page-cost { flex: none; font: 11px ui-monospace, monospace; color: var(--muted); font-variant-numeric: tabular-nums; cursor: help; }
+.thread-all { display: flex; justify-content: flex-end; margin-top: 6px; }
+.thread-bulk { flex: none; padding: 1px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.thread-bulk:hover { border-color: var(--line); color: var(--err); }
+.thread-bulk.armed { border-color: var(--err); color: var(--err); }
+.thread-bulk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.thread-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; font-size: 12.5px; }
+.thread-row { display: flex; align-items: center; gap: 2px; }
+.thread-row .thread-item { flex: 1; min-width: 0; }
+.thread-del { flex: none; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.thread-del:hover { background: #1c2331; color: var(--err); }
+.thread-del:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.thread-item:hover { background: #1c2331; border-color: var(--line); }
+.thread-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.thread-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #6366f1; }
+.thread-item[data-state="running"] .thread-dot { background: transparent; border: 2px solid #6366f1; border-top-color: transparent; width: 10px; height: 10px; box-sizing: border-box; animation: spin 0.9s linear infinite; }
+.thread-item[data-state="idle"] .thread-dot, .thread-item[data-state="pending"] .thread-dot { background: var(--ok); }
+.thread-item[data-state="failed"] .thread-dot { background: var(--err); }
+.thread-item[data-state="queued"] .thread-dot { background: #a78bfa; opacity: .55; }
+.thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.thread-state { flex: none; font-size: 11px; color: var(--muted); }
+.thread-cost { font-variant-numeric: tabular-nums; cursor: help; }
+.thread-item[data-state="failed"] .thread-state { color: var(--err); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .thread-item[data-state="running"] .thread-dot { animation: none; border-style: dashed; border-top-color: #6366f1; }
+}
+.turn.say .bubble.bot.reply { border-color: #5c4a1c; }
+.bubble.bot button.who.link { display: block; padding: 0; margin-bottom: 2px; border: 0; background: transparent; font-size: 11px; color: var(--accent); cursor: pointer; text-align: left; white-space: normal; }
+.bubble.bot button.who.link:hover { text-decoration: underline; }
+
+/* Queued feedback (Instant off): recorded, not sent yet. */
+.turn.queued .bubble.user { background: transparent; border: 1px dashed #3b4a6b; color: var(--muted); }
+.turn.queued .meta { align-self: flex-end; }
+.queued-remove { padding: 0; border: 0; background: transparent; font-size: 11px; color: var(--muted); cursor: pointer; }
+.queued-remove:hover { color: var(--accent); text-decoration: underline; }
+/* A comment typed or dictated in comment mode (web/cursor/commentOverlay.ts): its own bubble, marked as typed. */
+.turn.comment .bubble.user { border-left: 3px solid #6366f1; }
+.turn.comment:not(.queued) .bubble.user::before { content: "Comment"; display: block; font: 600 10px/14px ui-sans-serif, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; color: #a5b4fc; font-style: normal; }

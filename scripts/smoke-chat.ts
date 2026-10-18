@@ -1,23 +1,23 @@
-// Headless multi-turn chat over the real /ws with real vendors (RunConfig.memory = true), switching
-// approach every turn: checks that the conversation carries over. Usage:
-//   npm run smoke:chat -- a.wav b.wav c.wav     (turn i uses approach pipeline, realtime, hybrid, …)
+// Headless multi-turn chat over the real /ws with real vendors (RunConfig.memory = true): checks that the
+// conversation carries over. Usage:
+//   npm run smoke:chat -- a.wav b.wav c.wav
 // Audio is reported "played" on the first received byte of each segment (headless approximation).
-import "dotenv/config";
+import { loadDesktopEnv } from "../electron/settings.ts";
 import { readFileSync } from "node:fs";
 import WebSocket from "ws";
-import { DEFAULT_CONFIG, type Approach } from "../shared/config.ts";
+import { DEFAULT_CONFIG } from "../shared/config.ts";
 import type { ServerMsg } from "../shared/protocol.ts";
-import { hasClaudeCredentials } from "../server/adapters/claude.ts";
 import { startServer } from "../server/index.ts";
 import { parseWav } from "../server/wav.ts";
 
+loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
+
 const files = process.argv.slice(2).filter((a) => a.endsWith(".wav"));
 if (!files.length) { console.error("usage: npm run smoke:chat -- turn1.wav turn2.wav …"); process.exit(1); }
-if (!process.env.OPENAI_API_KEY || !process.env.ELEVENLABS_API_KEY || !process.env.ELEVENLABS_VOICE_ID || !hasClaudeCredentials()) {
-  console.log("SKIP smoke:chat: needs OPENAI, ELEVENLABS (+VOICE_ID) and OPENROUTER/ANTHROPIC keys");
+if (!process.env.ELEVENLABS_API_KEY || !process.env.ELEVENLABS_VOICE_ID) {
+  console.log("SKIP smoke:chat: needs ELEVENLABS (+VOICE_ID) and OPENROUTER/ANTHROPIC keys");
   process.exit(0);
 }
-const ORDER: Approach[] = ["pipeline", "realtime", "hybrid"];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const server = await startServer(0, { quiet: true, persist: false });
@@ -43,7 +43,6 @@ listeners.add((m) => {
 });
 
 for (const [i, file] of files.entries()) {
-  const approach = ORDER[i % ORDER.length]!;
   const wav = parseWav(readFileSync(file));
   const turnId = `chat-${i}`;
   let voice = "", transcript = "", decision = "";
@@ -66,7 +65,7 @@ for (const [i, file] of files.entries()) {
     listeners.add(l);
   });
   const t0 = performance.now();
-  ws.send(JSON.stringify({ type: "turn.start", turnId, config: { ...DEFAULT_CONFIG, approach, memory: true, routerMode: "auto", fillers: true, backgroundLongTasks: true }, tPress: t0 }));
+  ws.send(JSON.stringify({ type: "turn.start", turnId, config: { ...DEFAULT_CONFIG, approach: "pipeline", memory: true, routerMode: "auto", fillers: true, backgroundLongTasks: true }, tPress: t0 }));
   ws.send(JSON.stringify({ type: "turn.audioStart", turnId, tAudioStart: t0 }));
   const frame = 960;
   for (let off = 0, k = 0; off < wav.data.length; off += frame, k++) {
@@ -76,7 +75,7 @@ for (const [i, file] of files.entries()) {
   }
   ws.send(JSON.stringify({ type: "turn.release", turnId, tRelease: performance.now() }));
   const { run } = await done;
-  console.log(`\n── turn ${i + 1} · ${approach}`);
+  console.log(`\n── turn ${i + 1}`);
   console.log(`  you:  ${transcript || run.transcript || "(no transcript)"}`);
   console.log(`  decision: ${decision || "(none)"} · segments: ${segs.join(" → ") || "(none)"}`);
   console.log(`  bot:  ${voice.trim()}`);

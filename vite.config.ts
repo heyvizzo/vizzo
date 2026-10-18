@@ -7,8 +7,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Regex key: a plain "/ws" prefix would also proxy the web/ws.ts module itself and break every page in dev.
-      "^/ws$": { target: "ws://localhost:8787", ws: true },
-      "/api": { target: "http://localhost:8787" },
+      // PORT: the voice server's port (the Electron app picks a free one); 8787 by default.
+      "^/ws$": { target: `ws://127.0.0.1:${process.env.PORT ?? 8787}`, ws: true },
+      "/api": { target: `http://127.0.0.1:${process.env.PORT ?? 8787}` },
     },
   },
   build: {
@@ -16,10 +17,8 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        index: resolve(import.meta.dirname, "web/index.html"),
-        cursor: resolve(import.meta.dirname, "web/cursor.html"),
         chat: resolve(import.meta.dirname, "web/chat.html"),
-        audioTest: resolve(import.meta.dirname, "web/audio-test.html"),
+        settings: resolve(import.meta.dirname, "web/settings.html"),
       },
     },
   },

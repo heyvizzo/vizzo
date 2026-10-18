@@ -1,9 +1,19 @@
 .DS_Store
 node_modules/
 dist/
+dist-electron/
 .env
 results/
 out/
 .claude/
 .venv-tts/
+.venv-stt/
 .models/
+
+# npm run dist
+release/
+dist-native/
+
+# Python bytecode (tools/localtts)
+__pycache__/
+*.pyc

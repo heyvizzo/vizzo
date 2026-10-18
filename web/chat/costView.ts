@@ -21,7 +21,7 @@ export interface TurnCost {
 
 export interface Savings { subscription: number; onDevice: number; total: number }
 
-/** What wasn't billed, by source (items without savedVia predate it: they were all claude -p). */
+/** What wasn't billed, by source (items without savedVia predate it: they were all claude -p, a subscription). */
 export function savingsOf(items: CostItem[]): Savings {
   let subscription = 0, onDevice = 0;
   for (const i of items) {
@@ -41,16 +41,16 @@ export function totalSaved(c: TurnCost): number {
   return turnSavings(c).total;
 }
 
-/** "$0.024 saved (claude -p $0.019 · on-device TTS $0.005)", or "" when nothing was saved. */
+/** "$0.024 saved (subscription $0.019 · on-device TTS $0.005)", or "" when nothing was saved. */
 export function savingsText(s: Savings): string {
   if (s.total <= 0) return "";
-  const parts = [s.subscription > 0 ? `claude -p ${fmtUsd(s.subscription)}` : "", s.onDevice > 0 ? `on-device TTS ${fmtUsd(s.onDevice)}` : ""].filter(Boolean);
+  const parts = [s.subscription > 0 ? `subscription ${fmtUsd(s.subscription)}` : "", s.onDevice > 0 ? `on-device TTS ${fmtUsd(s.onDevice)}` : ""].filter(Boolean);
   return `${fmtUsd(s.total)} saved${parts.length > 1 || s.onDevice > 0 ? ` (${parts.join(" · ")})` : " (subscription)"}`;
 }
 
 /**
  * One line: "cost $0.031", "cost $0.045 · turn $0.031 + background task $0.014 (running…)", plus
- * "· $0.017 saved" when Claude calls went through the claude -p subscription (not billed).
+ * "· $0.017 saved" when model calls went through a CLI's subscription (Claude Code, Codex, Grok: not billed).
  */
 export function costHeadline(c: TurnCost): string {
   const jobsTotal = c.jobs.reduce((n, j) => n + j.total, 0);
@@ -100,7 +100,7 @@ export function renderTurnCost(box: HTMLElement, c: TurnCost): void {
   total.append(el("td", undefined, "total billed"), el("td"), el("td", "cusd", fmtUsd(c.total + jobsTotal)));
   table.append(total);
   const sv = turnSavings(c);
-  for (const [label, usd] of [["saved via claude -p (subscription)", sv.subscription], ["saved via on-device TTS (vs ElevenLabs)", sv.onDevice]] as const) {
+  for (const [label, usd] of [["saved via subscriptions (Claude Code, Codex, Grok)", sv.subscription], ["saved via on-device TTS (vs ElevenLabs)", sv.onDevice]] as const) {
     if (usd <= 0) continue;
     const tr = el("tr", "ctotal");
     tr.append(el("td", undefined, label), el("td"), el("td", "cusd saved", fmtUsd(usd)));
@@ -108,4 +108,22 @@ export function renderTurnCost(box: HTMLElement, c: TurnCost): void {
   }
   d.append(table);
   box.append(d);
+}
+
+/**
+ * A thread's billed cost broken down for a hover title: one line per item label (repeats summed, "×3"), then the
+ * total billed. Saved amounts aren't counted; a subscription/on-device item shows "$0 ($0.016 saved)".
+ */
+export function costBreakdown(items: CostItem[], total: number): string {
+  const byLabel = new Map<string, { usd: number; saved: number; n: number }>();
+  for (const i of items) {
+    const g = byLabel.get(i.label) ?? { usd: 0, saved: 0, n: 0 };
+    g.usd += i.usd;
+    g.saved += i.savedUsd ?? 0;
+    g.n += 1;
+    byLabel.set(i.label, g);
+  }
+  const lines = [...byLabel].map(([label, g]) =>
+    `${label}${g.n > 1 ? ` ×${g.n}` : ""}: ${fmtUsd(g.usd)}${g.saved > 0 ? ` (${fmtUsd(g.saved)} saved)` : ""}`);
+  return [...lines, `Total billed: ${fmtUsd(total)}`].join("\n");
 }

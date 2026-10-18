@@ -1,29 +1,26 @@
 // One browser connection = one Session (ARCHITECTURE §1, §3).
 import { randomUUID } from "node:crypto";
 import type { WebSocket, RawData } from "ws";
-import { parseClientMsg, type ClientMsg, type CursorSample, type PageEvents, type RunRecord, type Segment, type ServerMsg } from "../shared/protocol.ts";
+import { parseClientMsg, type ClientMsg, type CostItem, type CursorSample, type PageEvents, type RunRecord, type Segment, type ServerMsg } from "../shared/protocol.ts";
 import { deriveMetrics, type MarkName } from "../shared/marks.ts";
-import type { RunConfig } from "../shared/config.ts";
+import { llmOf, type RunConfig } from "../shared/config.ts";
 import { serverToClient } from "../shared/clock.ts";
 import { serverNow, type Mark } from "./clock.ts";
 import type { Orchestrator, TurnHandlers, TurnResult } from "./orchestrators/types.ts";
-import { realtimeOrchestrator } from "./orchestrators/realtime.ts";
 import { pipelineOrchestrator } from "./orchestrators/pipeline.ts";
-import { hybridOrchestrator } from "./orchestrators/hybrid.ts";
 import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
 import { computeCost, costItems } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
-import { getConversation, resetConversation } from "./conversation.ts";
-import { dropRealtime } from "./orchestrators/shared.ts";
+import { getConversation } from "./conversation.ts";
 import { cancelJobs } from "./orchestrators/jobs.ts";
 import type { ConnectionChannel } from "./orchestrators/types.ts";
 import { isMarkedSegment } from "../shared/marks.ts";
+import { Floor } from "./threads/floor.ts";
+import { threadStore, type ThreadSubscriber } from "./threads/store.ts";
 
 export const ORCHESTRATORS: Partial<Record<RunConfig["approach"], Orchestrator>> = {
-  realtime: realtimeOrchestrator,
   pipeline: pipelineOrchestrator,
-  hybrid: hybridOrchestrator,
   "cursor-only": cursorOnlyOrchestrator,
 };
 
@@ -41,11 +38,15 @@ interface Turn {
   samples: CursorSample[];
   tAudioStart?: number;
   released: boolean;
+  /** Always-listen ended the turn. Set on turn.release, read by the orchestrator. */
+  auto: boolean;
   segmentsSent: Set<Segment>;
   page: PageEvents;
   segmentsPlayed: Set<Segment>;
   onPlayed?: () => void;
   handlers?: TurnHandlers;
+  /** Element threads: the thread this turn was routed to (from its decision); its cost is credited there too. */
+  threadId?: string;
 }
 
 export interface SessionOpts {
@@ -57,7 +58,7 @@ export class Session {
   private turn: Turn | null = null;
   private clock = { rttMs: 0, offsetMs: 0 };
   private echo = false;
-  /** Per-connection state that outlives turns (e.g. the reused Realtime session). */
+  /** Per-connection state that outlives turns (e.g. background jobs). */
   private connection = new ConnectionState();
 
   private orchestrators: Partial<Record<RunConfig["approach"], Orchestrator>>;
@@ -65,25 +66,46 @@ export class Session {
   private idleWaiters: (() => void)[] = [];
   private noticeAbort: (() => void) | null = null;
 
+  /**
+   * Element threads: the speaking floor for lines outside a turn (thread results, reminders). It waits for the
+   * turn and for a background job's notice; a job's notice waits for it in turn (channel.whenIdle / isIdle).
+   */
+  private floor: Floor = new Floor(
+    { send: (m) => this.send(m), sendAudio: (pcm) => this.sendAudio(pcm) },
+    { graceMs: IDLE_GRACE_MS, focused: () => threadStore().focused(), busy: () => this.noticeAbort !== null, onIdle: () => this.wakeIdle() },
+  );
+  private threadSub: ThreadSubscriber = { send: (m) => this.send(m), floor: this.floor };
+  private unsubscribe: () => void;
+
   /** Connection-level output for background jobs (orchestrators/jobs.ts). */
   private channel: ConnectionChannel = {
     send: (m) => this.send(m),
     sendAudio: (pcm) => this.sendAudio(pcm),
-    isIdle: () => this.turn === null,
+    isIdle: () => this.turn === null && !this.floor.speaking,
     whenIdle: () => new Promise<void>((resolve) => {
+      const busy = () => this.turn !== null || this.floor.speaking;
       const check = () => {
-        if (this.turn) return void this.idleWaiters.push(check);
+        if (busy()) return void this.idleWaiters.push(check);
         // Stay quiet for a moment after a turn, and re-check in case a new one started meanwhile.
-        setTimeout(() => (this.turn ? this.idleWaiters.push(check) : resolve()), IDLE_GRACE_MS);
+        setTimeout(() => (busy() ? this.idleWaiters.push(check) : resolve()), IDLE_GRACE_MS);
       };
       check();
     }),
-    setNoticeAbort: (abort) => { this.noticeAbort = abort; },
+    setNoticeAbort: (abort) => {
+      this.noticeAbort = abort;
+      if (!abort) this.floor.kick(); // the job's notice is over: thread lines may speak
+    },
   };
 
-  private clearTurn(): void {
-    this.turn = null;
+  private wakeIdle(): void {
     for (const w of this.idleWaiters.splice(0)) w();
+  }
+
+  private clearTurn(): void {
+    const had = this.turn !== null;
+    this.turn = null;
+    if (had) this.floor.turnEnded();
+    this.wakeIdle();
   }
 
   private stopNotice(): void {
@@ -100,8 +122,12 @@ export class Session {
     this.orchestrators = opts.orchestrators ?? ORCHESTRATORS;
     this.persist = opts.persist ?? true;
     ws.on("message", (data, isBinary) => (isBinary ? this.onBinary(data) : this.onText(data.toString())));
+    // Element threads: the snapshot now, every change after (threads outlive this connection).
+    this.unsubscribe = threadStore().subscribe(this.threadSub);
     ws.on("close", () => {
       this.turn?.handlers?.cancel();
+      this.unsubscribe();
+      this.floor.close();
       this.connection.disposeAll();
     });
   }
@@ -145,7 +171,10 @@ export class Session {
         return;
       case "turn.start":
         this.stopNotice(); // the user talks over a background notice: stop it
-        return this.startTurn(msg.turnId, msg.config, msg.tPress, msg.fixtureId);
+        this.floor.turnStarted(); // …or over a thread's line
+        threadStore().touch(this.threadSub); // this connection speaks thread results from now on
+        return this.startTurn(msg.turnId, msg.config, msg.tPress, msg.fixtureId, typeof msg.pageUrl === "string" ? msg.pageUrl : undefined,
+          typeof msg.text === "string" && msg.text.trim() ? msg.text : undefined);
       case "cursor.samples":
         if (this.turn?.turnId === msg.turnId) this.turn.samples.push(...msg.samples);
         return;
@@ -164,6 +193,7 @@ export class Session {
       case "turn.release":
         if (this.turn?.turnId !== msg.turnId || this.turn.released) return;
         this.turn.released = true;
+        this.turn.auto = msg.auto === true;
         this.turn.marks.release = msg.tRelease;
         this.turn.handlers?.onRelease();
         return;
@@ -196,22 +226,30 @@ export class Session {
       }
       case "speech.stop":
         this.stopNotice();
+        this.floor.stop();
         return;
       case "conversation.reset":
         this.turn?.handlers?.cancel();
         this.clearTurn();
         this.stopNotice();
         cancelJobs(this.connection);
-        resetConversation(this.connection);
-        dropRealtime(this.connection);
+        threadStore().reset(); // every thread (runs stopped) and the central conversation
+        return;
+      case "thread.delete":
+        threadStore().remove(msg.threadId);
+        return;
+      case "thread.focus":
+        threadStore().focus(msg.threadId);
         return;
     }
   }
 
-  private startTurn(turnId: string, config: RunConfig, tPress: number, fixtureId?: string): void {
+  private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string): void {
     this.turn?.handlers?.cancel();
+    // Older clients send `claudeBackend` instead of `llm`.
+    const config: RunConfig = { ...sent, llm: llmOf(sent) };
     const turn: Turn = {
-      turnId, config, fixtureId, marks: { press: tPress }, markMeta: {}, samples: [], released: false,
+      turnId, config, fixtureId, marks: { press: tPress }, markMeta: {}, samples: [], released: false, auto: false,
       segmentsSent: new Set(), segmentsPlayed: new Set(), page: { clicks: [], preselected: null, highlights: [] },
     };
     this.turn = turn;
@@ -229,6 +267,7 @@ export class Session {
     const orchestrator = this.orchestrators[config.approach];
     if (!orchestrator) {
       this.send({ type: "error", turnId, source: "session", message: `no orchestrator for ${config.approach}` });
+      this.clearTurn();
       return;
     }
     try {
@@ -237,14 +276,18 @@ export class Session {
         send: (m) => {
           if (this.turn !== turn) return;
           if (m.type === "audio.segment" && m.state === "start") turn.segmentsSent.add(m.segment);
+          if (m.type === "decision" && m.threadId) turn.threadId = m.threadId;
           this.send(m);
         },
         sendAudio: (pcm) => this.turn === turn && this.sendAudio(pcm),
         cursorSamples: () => turn.samples,
         tAudioStart: () => turn.tAudioStart,
+        ...(pageUrl ? { pageUrl: () => pageUrl } : {}),
+        ...(typedText ? { typedText } : {}),
         pageEvents: () => turn.page,
         connection: this.connection,
         channel: this.channel,
+        autoEndpoint: () => turn.auto,
       });
     } catch (e) {
       this.send({ type: "error", turnId, source: "orchestrator", message: String(e) });
@@ -252,7 +295,7 @@ export class Session {
       return;
     }
     turn.handlers.done
-      .catch((e): TurnResult => ({ transcript: "", pointing: [], voiceText: "", opusText: "", usage: {}, error: String(e) }))
+      .catch((e): TurnResult => ({ transcript: "", pointing: [], voiceText: "", solverText: "", usage: {}, error: String(e) }))
       .then((result) => this.finishTurn(turn, result));
   }
 
@@ -262,7 +305,7 @@ export class Session {
     if (turn.config.memory && (result.transcript || result.voiceText)) {
       getConversation(this.connection).push({
         turnId: turn.turnId, approach: turn.config.approach,
-        user: result.transcript, assistant: result.voiceText.trim(), detail: result.opusText,
+        user: result.transcript, assistant: result.voiceText.trim(), detail: result.solverText,
       });
     }
     // Wait for the client to report every segment we sent as played.
@@ -273,29 +316,25 @@ export class Session {
       setTimeout(resolve, PLAYED_GRACE_MS);
     });
     if (this.turn !== turn) return;
-    if (result.ackIsAnswer) relabelAckAsAnswer(turn);
     const usage = result.usage;
     const run: RunRecord = {
       runId: randomUUID(), turnId: turn.turnId, approach: turn.config.approach, config: turn.config,
       fixtureId: turn.fixtureId, marks: turn.marks, metrics: deriveMetrics(turn.marks),
-      transcript: result.transcript, pointing: result.pointing, voiceText: result.voiceText, opusText: result.opusText,
+      transcript: result.transcript, pointing: result.pointing, voiceText: result.voiceText, solverText: result.solverText,
       usage, costUsd: computeCost(turn.config, usage), costItems: costItems(turn.config, usage),
       clock: this.clock, markMeta: turn.markMeta, error: result.error,
     };
     this.send({ type: "turn.done", turnId: turn.turnId, run });
+    if (turn.threadId && run.costItems?.length) creditThread(turn.threadId, turn.turnId, run.costItems);
     this.clearTurn();
     if (this.persist) appendRun(run).catch((e) => console.error("[results] append failed", e));
   }
 }
 
-/** Realtime/hybrid turn with no ask_opus call: the "ack" audio was the answer (see TurnResult.ackIsAnswer). */
-function relabelAckAsAnswer(turn: Turn): void {
-  const pairs = [["ack.ttsFirstByte", "answer.ttsFirstByte"], ["ack.played", "answer.played"]] as const;
-  for (const [from, to] of pairs) {
-    if (turn.marks[from] === undefined || turn.marks[to] !== undefined) continue;
-    turn.marks[to] = turn.marks[from];
-    turn.markMeta[to] = { ...turn.markMeta[from], relabeledFrom: from };
-    delete turn.marks[from];
-    delete turn.markMeta[from];
-  }
+/** A thread's cost includes the turns routed to it (the router, voice, speech), not only its runs outside a turn. */
+function creditThread(threadId: string, turnId: string, items: CostItem[]): void {
+  threadStore().update(threadId, (t) => {
+    t.costItems = [...(t.costItems ?? []), ...items.map((i) => ({ ...i, turnId }))];
+    t.costUsd = (t.costUsd ?? 0) + items.reduce((n, i) => n + i.usd, 0);
+  });
 }

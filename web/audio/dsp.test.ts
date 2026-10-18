@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Framer, Resampler, bytesToPcm16, downmix, firstNonSilent, floatToPcm16, pcm16ToFloat, resample, toFrames } from "./dsp.ts";
+import { Framer, Resampler, bytesToPcm16, downmix, firstNonSilent, floatToPcm16, pcm16ToFloat, resample, rmsOf, toFrames } from "./dsp.ts";
 
 const sine = (freq: number, rate: number, n: number, amp = 0.5, phase = 0) =>
   Float32Array.from({ length: n }, (_, i) => amp * Math.sin((2 * Math.PI * freq * i) / rate + phase));
@@ -34,6 +34,13 @@ describe("PCM conversion", () => {
     new DataView(buf).setInt16(0, -2, true);
     new DataView(buf).setInt16(2, 300, true);
     expect(Array.from(bytesToPcm16(buf))).toEqual([-2, 300]);
+  });
+
+  it("rmsOf is 0 for silence", () => {
+    expect(rmsOf([])).toBe(0);
+    expect(rmsOf([0, 0, 0])).toBe(0);
+    expect(rmsOf([3, 4])).toBeCloseTo(Math.sqrt(12.5));
+    expect(rmsOf([-1, 1])).toBeCloseTo(1);
   });
 
   it("downmix averages channels", () => {

@@ -1,7 +1,7 @@
 // T5 smoke: stream a sentence word by word (~30 ms apart) into each TTS model, flush, save
 // out/tts-<model>.wav (24 kHz PCM16 mono), print text-in → first-byte latency and marks.
 // Run: npm run smoke:tts   (TTS_TRANSPORT=http for the HTTP fallback, TTS_DEBUG=1 for chunk logs)
-import "dotenv/config";
+import { loadDesktopEnv } from "../electron/settings.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { serverNow } from "../server/clock.ts";
 import { openTts } from "../server/adapters/elevenTts.ts";
@@ -9,10 +9,12 @@ import type { TtsModel } from "../shared/config.ts";
 import { SAMPLE_RATE } from "../shared/config.ts";
 import { writeWavPcm16 } from "../server/wav.ts";
 
+loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
+
 const KEY = process.env.ELEVENLABS_API_KEY;
 const VOICE = process.env.ELEVENLABS_VOICE_ID;
 if (!KEY || !VOICE) {
-  console.log("SKIP smoke:tts: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID must be set in .env");
+  console.log("SKIP smoke:tts: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID must be set in Settings");
   process.exit(0);
 }
 

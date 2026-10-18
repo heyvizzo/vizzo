@@ -1,24 +1,14 @@
-import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunRecord } from "../shared/protocol.ts";
+import { APP_ROOT } from "./paths.ts";
 
-const DIR = join(import.meta.dirname, "..", "results");
+// RESULTS_DIR: the packaged app writes them to Application Support (its bundle is read-only).
+const DIR = process.env.RESULTS_DIR ?? join(APP_ROOT, "results");
 
-/** Chat-mode turns go to `chat-YYYY-MM-DD.jsonl`, kept out of the benchmark set that loadRuns() returns. */
+/** Chat-mode turns go to `chat-YYYY-MM-DD.jsonl`, benchmark runs (smoke:e2e) to `YYYY-MM-DD.jsonl`. */
 export async function appendRun(run: RunRecord): Promise<void> {
   await mkdir(DIR, { recursive: true });
   const day = new Date().toISOString().slice(0, 10);
   await appendFile(join(DIR, `${run.config.memory ? "chat-" : ""}${day}.jsonl`), JSON.stringify(run) + "\n");
-}
-
-export async function loadRuns(): Promise<RunRecord[]> {
-  let files: string[];
-  try { files = (await readdir(DIR)).filter((f) => f.endsWith(".jsonl") && !f.startsWith("chat-")).sort(); } catch { return []; }
-  const runs: RunRecord[] = [];
-  for (const f of files) {
-    for (const line of (await readFile(join(DIR, f), "utf8")).split("\n")) {
-      if (line.trim()) try { runs.push(JSON.parse(line)); } catch { /* skip bad line */ }
-    }
-  }
-  return runs;
 }

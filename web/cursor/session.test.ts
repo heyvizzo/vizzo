@@ -5,11 +5,6 @@ import {
   toRelativeSamples,
   type LabSession,
 } from "./session.ts";
-import { scoreSessions, targetMatches } from "./scoring.ts";
-import { scopeCss } from "./css.ts";
-import { buildTimelineModel } from "./timeline.ts";
-import { resolvePointing } from "../../shared/pointing.ts";
-
 const card = (i: number) => ({ elementPath: `#demo-root > article:nth-of-type(${i})`, dataSource: `demo.html:${i}`, label: `Card ${i}` });
 const smp = (t: number, x: number): CursorSample => ({ t, x, y: 10, scrollX: 0, scrollY: 0, ...card(x < 100 ? 1 : x < 200 ? 2 : 3) });
 
@@ -136,71 +131,6 @@ describe("session files", () => {
   });
 });
 
-describe("scoring", () => {
-  it("targetMatches by data-source, else elementPath", () => {
-    expect(targetMatches(smp(0, 50), card(1))).toBe(true);
-    expect(targetMatches(smp(0, 150), card(1))).toBe(false);
-    expect(targetMatches(smp(0, 50), { ...card(1), dataSource: null })).toBe(true);
-    expect(targetMatches(null, card(1))).toBe(false);
-    expect(targetMatches(smp(0, 50), null)).toBe(false);
-  });
-
-  it("scores each algorithm over labeled words only", () => {
-    const a = session();
-    a.labels[0]!.target = card(1);
-    a.labels[1]!.target = card(3);
-    const b = { ...session(), id: "U05", labels: labelsFor(words) }; // unlabeled
-    b.labels[0]!.target = card(2); // deliberately wrong label
-    const sc = scoreSessions([a, b], { preMs: 300, postMs: 200 });
-    expect(sc.overall.dwell).toEqual({ correct: 2, total: 3 });
-    expect(sc.perSession.U04!.dwell).toEqual({ correct: 2, total: 2 });
-    expect(sc.perSession.U05!.mode).toEqual({ correct: 0, total: 1 });
-    expect(sc.details.filter((d) => d.sessionId === "U04")).toHaveLength(2 * sc.algorithms.length);
-  });
-});
-
-describe("scopeCss", () => {
-  it("wraps in @scope and rewrites root selectors", () => {
-    const out = scopeCss(`/* c */ :root{--a:1} html body{margin:0} body.dark .card-body{color:red} @media (max-width: 600px){ body{padding:0} .x{y:z} }`, "#demo-root");
-    expect(out.startsWith("@scope (#demo-root) {")).toBe(true);
-    expect(out).toContain(":scope{--a:1}");
-    expect(out).toContain(":scope{margin:0}");
-    expect(out).toContain(":scope.dark .card-body{color:red}");
-    expect(out).toContain("@media (max-width: 600px){ :scope{padding:0} .x{y:z} }");
-    expect(out).not.toContain("/* c */");
-  });
-});
-
-describe("timeline model", () => {
-  it("builds speed in px/s, windows for pointing words, and pick markers", () => {
-    const opts = { preMs: 300, postMs: 200 };
-    const targets = resolvePointing(words, 0, samples, opts);
-    const m = buildTimelineModel(samples, words, targets, opts);
-    expect(m.speed.length).toBe(samples.length - 1);
-    expect(Math.max(...m.speed.map((p) => p.v))).toBeCloseTo((200 / 300) * 1000, -1);
-    expect(m.words.filter((w) => w.win).map((w) => w.win)).toEqual([[-50, 600], [500, 1200]]);
-    expect(m.picks).toHaveLength(targets.length);
-    expect(m.t0).toBe(-284); // first sample has no speed
-    expect(m.t1).toBeGreaterThanOrEqual(1200);
-  });
-
-  it("keeps every click time per event, highlight spans and the pre-existing marker", () => {
-    const m = buildTimelineModel(samples, words, [], { preMs: 300, postMs: 200 }, 0, {
-      clicks: [
-        { ...card(2), kind: "multi", count: 4, t: 1400, tEnd: 1800, times: [1400, 1500, 1600, 1700], x: 0, y: 0 },
-        { ...card(1), kind: "double", count: 2, t: 100, tEnd: 300, times: [100, 220], x: 0, y: 0 },
-      ],
-      preselected: { ...card(1), t: -500, text: "a" },
-      highlights: [{ ...card(3), text: "b", tStart: 200, t: 600 }],
-    });
-    expect(m.clicks.map((c) => [c.n, c.kind, c.times])).toEqual([[1, "double", [100, 220]], [2, "multi", [1400, 1500, 1600, 1700]]]);
-    expect(m.highlights).toEqual([{ n: 1, from: 200, to: 600 }]);
-    expect(m.preselected).toBe(-500);
-    expect(m.t0).toBe(-500);
-    expect(m.t1).toBe(1700);
-  });
-});
-
 describe("languages and cursor rests", () => {
   const ro: Word[] = [
     { text: "Mută", start: 0, end: 0.2 }, { text: "ăsta", start: 0.25, end: 0.4 }, { text: "acolo.", start: 0.8, end: 1.0 },
@@ -218,15 +148,5 @@ describe("languages and cursor rests", () => {
     expect("language" in toCursorFile(session())).toBe(false);
     const { sessions } = sessionsFromFiles([{ name: "U04.cursor.json", text: JSON.stringify(toCursorFile(s)) }]);
     expect(sessions[0]!.language).toBe("ro");
-  });
-
-  it("timeline: rest spans in ms from audio start, and pointing words per selected language", () => {
-    const opts = { preMs: 300, postMs: 200 };
-    const m = buildTimelineModel(samples, ro, [], opts, 0, {}, {
-      rests: [{ ref: 1, tStart: 700, tEnd: 1300, sample: samples[0]!, wordIndex: 2, whole: false }], languages: ["en"],
-    });
-    expect(m.rests).toEqual([{ ref: 1, from: 700, to: 1300, whole: false }]);
-    expect(m.words.filter((w) => w.pointing)).toEqual([]);
-    expect(buildTimelineModel(samples, ro, [], opts).words.filter((w) => w.pointing).map((w) => w.text)).toEqual(["ăsta", "acolo."]);
   });
 });

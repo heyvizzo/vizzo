@@ -1,43 +1,61 @@
-// Push-to-talk: hold Space (outside inputs) or hold the given button.
+// Push-to-talk: hold Shift (outside inputs) or hold the given button.
 
-export interface PttOpts { button?: HTMLElement; onPress: () => void; onRelease: () => void }
+export interface PttOpts {
+  button?: HTMLElement;
+  onPress: () => void;
+  onRelease: () => void;
+  /** Another source of presses, e.g. Shift held in the Electron app's browser pane (relayed over IPC). */
+  external?: (press: () => void, release: () => void) => void;
+}
 
-/** True if keyboard focus is in a text-entry control, where Space must type a space. */
-function isTypingTarget(el: EventTarget | null): boolean {
+/** Input types that are not text entry, so Shift stays free for push-to-talk. */
+const NOT_TEXT_INPUT = new Set(["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"]);
+
+/** True for text-like input types (including the default empty type). Checkboxes and sliders are false. */
+export function isTextInputType(type: string): boolean {
+  return !NOT_TEXT_INPUT.has(type);
+}
+
+/** True if keyboard focus is in a text-entry control, where Shift is for typing capitals. */
+export function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   if (el.isContentEditable) return true;
-  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return true;
+  if (el instanceof HTMLInputElement) return isTextInputType(el.type);
+  return false;
+}
+
+/** A lone Shift press (no Ctrl/Alt/Meta held), so shortcuts like Cmd+Shift+… don't start a turn. */
+export function isPttKey(e: { key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean }): boolean {
+  return e.key === "Shift" && !e.ctrlKey && !e.altKey && !e.metaKey;
 }
 
 /**
- * Space keydown/keyup (auto-repeat ignored, ignored while typing in input/textarea/select/contenteditable) and
+ * Shift keydown/keyup (auto-repeat ignored, ignored while typing in input/textarea/select/contenteditable) and
  * pointerdown/up/cancel/leave on the button. Press and release are paired: onPress fires once until the matching
  * release, whichever source started it; losing window focus also releases. Returns an unbind function.
  */
 export function bindPushToTalk(opts: PttOpts): () => void {
-  let source: "key" | "pointer" | null = null;
+  type Source = "key" | "pointer" | "external";
+  let source: Source | null = null;
 
-  const press = (s: "key" | "pointer") => {
+  const press = (s: Source) => {
     if (source) return;
     source = s;
     opts.onPress();
   };
-  const release = (s: "key" | "pointer" | "any") => {
+  const release = (s: Source | "any") => {
     if (!source || (s !== "any" && s !== source)) return;
     source = null;
     opts.onRelease();
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.code !== "Space" || isTypingTarget(e.target)) return;
-    e.preventDefault(); // no page scroll, no click on a focused button
-    if (e.repeat) return;
+    if (e.repeat || !isPttKey(e) || isTypingTarget(e.target)) return;
     press("key");
   };
   const onKeyUp = (e: KeyboardEvent) => {
-    if (e.code !== "Space") return;
-    if (source === "key") e.preventDefault();
-    release("key");
+    if (e.key === "Shift") release("key");
   };
   const onBlur = () => release("any");
   const onPointerDown = (e: PointerEvent) => {
@@ -57,6 +75,7 @@ export function bindPushToTalk(opts: PttOpts): () => void {
   b?.addEventListener("pointercancel", onPointerEnd);
   b?.addEventListener("pointerleave", onPointerEnd);
   b?.addEventListener("contextmenu", onContextMenu);
+  opts.external?.(() => press("external"), () => release("external"));
 
   return () => {
     window.removeEventListener("keydown", onKeyDown);

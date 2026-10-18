@@ -5,9 +5,10 @@ Read `PRD.md` first. This doc defines the **contracts** that parallel workers bu
 ## 1. Stack and layout
 
 - **Language:** TypeScript everywhere. Node ≥ 22 (dev machine has v26), npm.
-- **Web:** Vite + vanilla TS, no framework. Two pages: `/` (latency lab) and `/cursor` (cursor lab).
-- **Server:** Node + `ws`, run with `tsx`. `dotenv` loads `.env`.
-- **Vendor SDKs:** `@anthropic-ai/sdk` for Claude. OpenAI Realtime and ElevenLabs use raw WebSockets (`ws`), with no extra SDKs.
+- **App:** Electron (`electron/`): a browser pane on the left (the user's project page) and the voice chat as a sidebar on the right. The voice server runs in a utilityProcess on a free local port once a project folder is chosen.
+- **Web:** Vite + vanilla TS, no framework. One page, `chat.html` (the sidebar). The latency lab (`/`) and cursor lab (`/cursor`) pages were removed.
+- **Server:** Node + `ws`, run with `tsx`. API keys come from the Settings window (stored in the app's settings file and handed to the server; `npm run dev:server` and the scripts read the same file with `loadDesktopEnv`). There is no `.env`.
+- **Vendor SDKs:** `@anthropic-ai/sdk` for Claude. ElevenLabs uses raw WebSockets (`ws`), with no extra SDKs.
 - **Dev:** `npm run dev` runs the server (port 8787) and Vite (port 5173) together. Vite proxies `/ws` and `/api` to the server.
 
 ```
@@ -17,35 +18,29 @@ realtime-voice/
 │  ├─ protocol.ts             # browser↔server message types (§3)
 │  ├─ marks.ts                # timing mark names (§5)
 │  └─ config.ts               # RunConfig type + defaults
+├─ electron/                  # app shell: main process, preloads (sidebar + page), settings, permissions
 ├─ server/
 │  ├─ index.ts                # http + ws entry, session routing
 │  ├─ session.ts              # one browser connection = one Session
 │  ├─ clock.ts                # server-side mark stamping
-│  ├─ adapters/
-│  │  ├─ scribe.ts            # ElevenLabs Scribe v2 Realtime (STT)
-│  │  ├─ openaiRealtime.ts    # OpenAI Realtime WS
-│  │  ├─ elevenTts.ts         # ElevenLabs TTS streaming
-│  │  └─ claude.ts            # Haiku router + Opus solver
+│  ├─ adapters/               # STT (Scribe, OpenRouter), TTS (ElevenLabs, OpenAI, Fish, macOS, Kokoro/Piper), harnesses (router + solver)
 │  ├─ orchestrators/
-│  │  ├─ realtime.ts          # approach A
-│  │  ├─ pipeline.ts          # approach B
-│  │  └─ hybrid.ts            # approach C
+│  │  ├─ pipeline.ts          # the voice assistant (STT → router → TTS, solver for hard tasks)
+│  │  ├─ cursorOnly.ts        # STT + pointing only (dictating into a comment)
+│  │  ├─ jobs.ts, fillers.ts  # background jobs, progress lines
+│  ├─ threads/                # element threads: store, runner, speaking floor, notice policy
 │  ├─ prompts/                # system prompts as .md files
-│  ├─ fixtures-context/       # the "codebase" Opus answers questions about
+│  ├─ project.ts              # the project folder (PROJECT_DIR): page files for the browser, codebase for the solver
 │  └─ results.ts              # append runs to results/*.jsonl
 ├─ web/
-│  ├─ index.html, cursor.html
-│  ├─ audio/
-│  │  ├─ capture-worklet.ts   # mic → PCM16 frames
-│  │  ├─ player-worklet.ts    # PCM16 24k playback, reports first-sample-played
-│  │  └─ replay.ts            # WAV fixture → frames at real-time pace
+│  ├─ chat.html, chat/        # the sidebar: conversation, settings, costs, prompt debug view
+│  ├─ audio/                  # mic capture, playback, push-to-talk, always-listen VAD
 │  ├─ ws.ts                   # typed client for shared/protocol.ts
-│  ├─ lab/                    # latency lab UI: controls, waterfall, results table
-│  └─ cursor/                 # sampler, resolvers, timeline viz, labeling
-├─ scripts/smoke-*.ts         # one standalone smoke test per adapter
-├─ fixtures/utterances/       # Uxx.wav + Uxx.cursor.json + Uxx.labels.json (shapes in §6.1)
+│  └─ cursor/                 # in the page: pointer sampler, page context, thread markers, comment overlay
+├─ tools/                     # on-device speech helpers (mactts, macstt, localtts, localstt)
+├─ scripts/                   # smoke tests (smoke-*.ts), benchmarks (bench-*.ts), local TTS/STT setup
+├─ fixtures/smoke/            # WAVs replayed by the smoke and bench scripts
 ├─ results/                   # *.jsonl (gitignored)
-├─ .env.example               # ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 └─ package.json
 ```
 
@@ -54,14 +49,13 @@ realtime-voice/
 ```
 Browser                                   Server                                Vendors
 ───────                                   ──────                                ───────
-mic/replay → capture-worklet ─PCM16 24k──▶ Session ──▶ orchestrator(A|B|C)
+mic/replay → capture-worklet ─PCM16 24k──▶ Session ──▶ orchestrator (pipeline)
 pointer sampler ─cursor samples──────────▶   │           ├─ scribe.ts ─────────▶ ElevenLabs STT WS
-                                             │           ├─ openaiRealtime.ts ─▶ OpenAI Realtime WS
 player-worklet ◀────────PCM16 24k──────────  │           ├─ claude.ts ─────────▶ Anthropic Messages (stream)
 waterfall UI ◀──────────marks/events───────  │           └─ elevenTts.ts ──────▶ ElevenLabs TTS WS
 ```
 
-- **Audio up:** the browser always sends **PCM16 mono 24 kHz little-endian** as binary WS frames. OpenAI Realtime takes 24k PCM natively. Scribe accepts `audio_format=pcm_24000`, so we skip resampling.
+- **Audio up:** the browser always sends **PCM16 mono 24 kHz little-endian** as binary WS frames. Scribe accepts `audio_format=pcm_24000`, so we skip resampling.
 - **Audio down:** every TTS path delivers **PCM16 mono 24 kHz**: OpenAI output audio, and ElevenLabs with `output_format=pcm_24000`. One player handles both.
 
 ## 3. Browser ↔ server protocol (`shared/protocol.ts`)
@@ -92,7 +86,7 @@ type ServerMsg =
   | { type: "stt.final"; turnId: string; text: string; words: Word[] }
   | { type: "pointing.resolved"; turnId: string; targets: PointingTarget[] }
   | { type: "voice.text"; turnId: string; delta: string }        // what the voice layer says
-  | { type: "opus.text"; turnId: string; delta: string }         // full Opus answer, streamed
+  | { type: "solver.text"; turnId: string; delta: string }         // full solver answer, streamed
   | { type: "audio.segment"; turnId: string; segment: "ack" | "answer"; state: "start" | "end" }
   // binary frame: PCM16 24k audio for the active turn's current segment
   | { type: "turn.done"; turnId: string; run: RunRecord }
@@ -122,19 +116,19 @@ Only one turn is active at a time. Binary frames always belong to the active tur
 
 ### Browser audio API (`web/audio/*`)
 
-Built by T2, used by the cursor lab (T9) and the latency lab (T8). Signatures are fixed in the stub files: `startCapture({onFrame}) → {tAudioStart, stop}` (`capture.ts`), `createPlayer() → Player` with `startSegment/push/endSegment/onPlayed/reset` (`player.ts`), `startReplay({wav, cursor, onFrame, onCursor}) → {tAudioStart, done, stop}` (`replay.ts`), `bindPushToTalk({button, onPress, onRelease})` (`ptt.ts`), `createWavRecorder()` (`record.ts`). Frames are 20 ms PCM16 24 kHz `Int16Array`s.
+Used by the Chat sidebar: `startCapture({onFrame, preRollMs?}) → CaptureHandle` (`capture.ts`), `createPlayer() → Player` with `startSegment/push/endSegment/onPlayed/reset` (`player.ts`), `bindPushToTalk(...)` (`ptt.ts`), the always-listen VAD (`vad.ts`, level from `level.ts`). Frames are 20 ms PCM16 24 kHz `Int16Array`s.
 
-Implementation notes (T2, no signature changes): one shared `AudioContext` at the native rate plus one mic stream (`context.ts`, which also exports `warmUpAudio()`; call it from a user gesture before the first turn so the permission prompt and context start aren't counted in a turn). Pure helpers live in `dsp.ts` (windowed-sinc resampler, framing, PCM conversion), `wav.ts` (parse/encode) and `timing.ts` (context time ↔ `performance.now()`). `tAudioStart` is the estimated capture time of the first sample delivered after `startCapture`, so it can be a few ms *before* the key press (the mic pipeline buffers audio). Replay's `tAudioStart` is the replay start time, and frame k is sent at `tAudioStart + (k+1)·20 ms`, like a live mic. `onPlayed` fires for the first sample above about −60 dBFS in each `startSegment()`. Audio pushed before any `startSegment()` plays but is never reported.
+Implementation notes: one shared `AudioContext` at the native rate plus one mic stream (`context.ts`, which also exports `warmUpAudio()`; call it from a user gesture before the first turn so the permission prompt and context start aren't counted in a turn). Pure helpers live in `dsp.ts` (windowed-sinc resampler, framing, PCM conversion) and `timing.ts` (context time ↔ `performance.now()`). `tAudioStart` is the estimated capture time of the first sample delivered after `startCapture`, so it can be a few ms *before* the key press (the mic pipeline buffers audio). `onPlayed` fires for the first sample above about −60 dBFS in each `startSegment()`. Audio pushed before any `startSegment()` plays but is never reported.
 
 ## 4. Server adapter interfaces
 
-The interfaces are in `server/adapters/types.ts` (with the shared `ASK_OPUS_TOOL`). Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `SttStream` exposes `seconds` (audio seconds sent, feeds `usage.scribeSeconds`); `RealtimeSession` exposes `usage` (typed `RealtimeUsage`) plus T4's `beginTurn`, `setMark`, `onError`, `currentSegment`; `routeWithHaiku` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
+The interfaces are in `server/adapters/types.ts` . Additions over the sketch below: `openTts` takes `segment: "ack" | "answer"` (which `*.ttsFirstByte` mark to emit) and `TtsStream` exposes `chars`; `SttStream` exposes `seconds` (audio seconds sent, feeds `usage.scribeSeconds`); `routeTurn` also returns `usage`. Orchestrators implement `Orchestrator = (ctx: TurnContext) => TurnHandlers` from `server/orchestrators/types.ts`, and `server/session.ts` routes to them by `config.approach`. `server/cost.ts` computes `costUsd`.
 
 **T7 additions (additive):**
-- `routeWithHaiku`'s `onSpokenDelta(d, kind)` gets `kind: "ack" | "answer"` ("ack" = the `ack` field of an `ask_opus` call, "answer" = a direct text answer in auto mode), and an optional `onSpokenEnd("ack")` fires as soon as the ack field is complete (before `question` is written), so the pipeline flushes the ack TTS early.
-- `TurnContext.connection: ConnectionCache` (`get/set(key, value, dispose?)/delete`): per-browser-connection state, disposed when the WebSocket closes. Used for the reusable Realtime session.
+- `routeTurn`'s `onSpokenDelta(d, kind)` gets `kind: "ack" | "answer"` ("ack" = the `ack` field of an `ask_solver` call, "answer" = a direct text answer in auto mode), and an optional `onSpokenEnd("ack")` fires as soon as the ack field is complete (before `question` is written), so the pipeline flushes the ack TTS early.
+- `TurnContext.connection: ConnectionCache` (`get/set(key, value, dispose?)/delete`): per-browser-connection state, disposed when the WebSocket closes. Used for background jobs.
 - `TurnResult.ackIsAnswer?: boolean`: see §7 A. The Session then renames `ack.ttsFirstByte`/`ack.played` to `answer.*` in the RunRecord (`markMeta[...].relabeledFrom`).
-- Each orchestrator module exports a factory `createXOrchestrator(deps: OrchestratorDeps)` (deps = the five adapter functions + `voiceId?`, `turnTimeoutMs?`, `hybridLateWaitMs?`); the default export uses the real adapters (`server/orchestrators/deps.ts`). Fakes with the same marks live in `server/orchestrators/fakes.ts` (tests, `smoke:e2e --fake`).
+- Each orchestrator module exports a factory `createXOrchestrator(deps: OrchestratorDeps)` (deps = the adapter functions + `voiceId?`, `turnTimeoutMs?`); the default export uses the real adapters (`server/orchestrators/deps.ts`). Fakes with the same marks live in `server/orchestrators/fakes.ts` (tests, `smoke:e2e --fake`).
 - `new Session(ws, {orchestrators?, persist?})` and `startServer(port, {orchestrators?, persist?, quiet?})` exported from `server/index.ts` (port 0 = random); `tsx server/index.ts` still listens on `PORT`/8787.
 
 Orchestrators depend **only** on these interfaces, so each adapter can be built and smoke-tested on its own. Each adapter emits marks through the injected `mark()` function.
@@ -167,34 +161,13 @@ function openTts(opts: { mark: Mark; voiceId: string; model: "eleven_v4_turbo" |
 // End-of-segment is only signaled after close, so it's ONE socket PER SEGMENT: flush() = flush + close; done() resolves on final/close.
 // Pre-warmed v4 dialogue sockets hold capacity from a separate pool while open; pre-warm at most one (see API-NOTES).
 
-interface RealtimeSession {                    // server/adapters/openaiRealtime.ts — ONE session reused across turns (§7)
-  beginTurn(): void;                           // T4: sends input_audio_buffer.clear, resets per-turn mark state
-  setMark(mark: Mark): void;                   // T4: swap the per-turn mark function on the reused session
-  onError(cb: (err: Error) => void): void;     // T4: vendor `error` events + socket failures
-  readonly currentSegment: "ack" | "answer";   // T4: "answer" for the response created after sendToolResult
-  readonly usage: RealtimeUsage;               // T4: {responses: raw usage[], totals: {inputText, inputAudio, cachedText, cachedAudio, outputText, outputAudio, ...}}
-  pushAudio(pcm24k: Buffer): void;
-  commitAndRespond(extraContext?: string): void; // commit buffer, optionally add a context item, then response.create
-  onAudio(cb: (pcm24k: Buffer) => void): void;
-  onText(cb: (delta: string) => void): void;
-  onToolCall(cb: (call: { callId: string; name: string; args: unknown }) => void): void;
-  sendToolResult(callId: string, output: string): void;  // then response.create (deferred until the active response is done)
-  responseDone(): Promise<void>;               // current/next response.done; resolves at once if none outstanding; rejects on failed response.create / close
-  close(): void;
-}
-function openRealtime(opts: { mark: Mark; model: "gpt-realtime-2.1" | "gpt-realtime-2.1-mini"; instructions: string; tools: ToolDef[]; voice?: string }): Promise<RealtimeSession>;
-// T4: resolves after session.updated (session.created → session.update → session.updated), so PTT config is live
-// before any audio. Marks: llm.request (commitAndRespond), llm.firstToken (first audio/transcript delta of the turn),
-// llm.toolCall {name} (output_item.added function_call), ack.ttsFirstByte / answer.ttsFirstByte (first audio per segment).
-// Context items are role "user" input_text. Tests inject the socket via createOpenRealtime({ WebSocket }).
-
 // server/adapters/claude.ts
-function routeWithHaiku(opts: {
+function routeTurn(opts: {
   mark: Mark; transcript: string; pointing: PointingTarget[]; mode: "forced" | "auto";
   onSpokenDelta: (d: string) => void;          // text to speak right away (ack, or a direct answer in auto mode)
 }): Promise<{ delegate: null | { question: string } }>;
 
-function solveWithOpus(opts: {
+function solveTask(opts: {
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
   onSpokenLine: (line: string) => void;        // fires once the SPOKEN: line is complete
   onDelta: (d: string) => void;                // full answer stream
@@ -203,9 +176,25 @@ function solveWithOpus(opts: {
 
 ### Claude settings (read `API-NOTES.md` §Claude before writing claude.ts)
 - **Provider:** OpenRouter's Anthropic-compatible endpoint when `OPENROUTER_API_KEY` is set (model IDs `anthropic/claude-*-5.5`, no `fallbacks`, fast mode not honored). See API-NOTES "Live checks".
-- **Haiku router:** `model: "claude-haiku-5-5"`, `output_config: {effort: "low"}`, streaming. Don't send `temperature`/`top_p`/`top_k` (non-default values are a 400). Forced mode: `tool_choice: {type: "tool", name: "ask_opus"}` (Haiku 5.5 accepts it and skips thinking). Put the spoken acknowledgment **inside the tool input** (`ack` field) so it can stream out before the call finishes; use `eager_input_streaming: true` on the tool and validate the parsed input.
-- **Opus solver:** `model: "claude-opus-5-5"`, streaming, `output_config: {effort: "medium"}` (set it explicitly). Thinking can't be disabled, so don't send `thinking: disabled`. No forced `tool_choice`. Fast mode: `client.beta.messages.stream({... speed: "fast", betas: ["fast-mode-2026-02-01"]})`. Add refusal fallbacks (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`) and check `stop_reason` before reading content.
+- **Router** (Anthropic API, default `claude-haiku-5-5`): `output_config: {effort: "low"}`, streaming. Don't send `temperature`/`top_p`/`top_k` (non-default values are a 400). Forced mode: `tool_choice: {type: "tool", name: "ask_solver"}` (Haiku 5.5 accepts it and skips thinking). Put the spoken acknowledgment **inside the tool input** (`ack` field) so it can stream out before the call finishes; use `eager_input_streaming: true` on the tool and validate the parsed input.
+- **Solver** (Anthropic API, default `claude-opus-5-5`): streaming, `output_config: {effort: "medium"}` (set it explicitly). Thinking can't be disabled, so don't send `thinking: disabled`. No forced `tool_choice`. Fast mode: `client.beta.messages.stream({... speed: "fast", betas: ["fast-mode-2026-02-01"]})`. Add refusal fallbacks (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`) and check `stop_reason` before reading content.
 - Cache the system prompt and the fixture codebase context with `cache_control` so repeated benchmark runs hit the cache, and log `usage.cache_read_input_tokens`.
+
+### Model tiers: a harness, model, level and speed per tier (`RunConfig.llm`)
+Two tiers, each `{ provider, model, level?, speed? }` (model `""` = the harness's default): **fast** = the router and the progress lines, **smart** = the solver (hard questions and change requests). `provider` is a harness, or on the fast tier only a model API called directly (`adapters/llmApi.ts`: OpenRouter, Fireworks, Cerebras, OpenAI and Z.ai over OpenAI-style streamed Chat Completions, Anthropic through `@anthropic-ai/sdk`; keys from Settings). An API call is one HTTP request with the role's system prompt and the turns as real messages (a harness gets them flattened), no tools and nothing to warm; reasoning text is dropped, only the answer streams into the router's parser. Its level maps to each API's own field (`reasoning_effort`, OpenRouter `reasoning`, Z.ai `thinking`, Anthropic `thinking` + `output_config.effort`); "off" turns reasoning off and is where a fast tier starts when the model can. API models and levels come from the models.dev catalog. The solver stays on a harness (it needs file tools): `llmOf` drops an API on the smart tier. The project's source is never sent inline. The Chat page picks each tier (harness, model, level, speed); `GET /api/llm/providers` says which harnesses are installed, `GET /api/llm/models?provider=` lists each harness's models with the levels and speeds it offers (`server/llmProviders.ts`, read from the harness itself), free text is accepted too. **Scan harnesses** (`POST /api/llm/scan`) does both at once for every harness, skipping the 10-minute model cache; a harness that can't list its models is reported, not fatal.
+
+| harness | warm agent (`adapters/harnesses.ts`) | level | Fast |
+|---|---|---|---|
+| Claude Code | `claude -p` started with its prompt, waiting on stdin | `--effort` low…max | `--settings {"fastMode":true}`, Opus 5.5 only; needs usage credits on the account (else served standard: the prompt view flags it) |
+| Codex | a thread pre-created on one shared `codex app-server` (JSON-RPC); the request is a turn | `effort` per model (model cache) | `serviceTier: "priority"` where the model lists it |
+| opencode | a session pre-created on one shared `opencode serve`; the request is a message (HTTP + SSE) | the model's variants | – |
+| Pi / OhMyPi | `pi\|omp --mode rpc` started with its prompt, waiting for a `prompt` command | `--thinking` | omp `--service-tier priority`: OpenAI priority, or Opus fast mode on Anthropic (not via OpenRouter) |
+| Grok | none: `grok -p` reads its prompt before booting, and its ACP mode ignores our prompt and tool limits, so each request is cold | `--reasoning-effort` per model | – |
+
+- *Warm pools* (`adapters/warmPool.ts`): one pool per role and choice (router and progress lines on the fast tier, the solver on the smart one); taking an agent starts its replacement. `configureWarm(selection)` kills every other pool (and the shared Codex / opencode server once nothing uses it) and starts the chosen ones. The selection is saved (`server/llmSelection.ts`, `~/.config/realtime-voice/llm-selection.json`, `POST /api/llm/selection` from the Chat page) and warmed at server start, so only the first switch to a new choice pays the harness's start-up. `WARM_AGENTS=0` turns warming off.
+- *Yolo*: every harness runs without approval prompts (Claude Code `--dangerously-skip-permissions`, Codex `approvalPolicy: never` + `danger-full-access`, Grok `--always-approve`, opencode permissions all `allow` and its `question` tool off, omp `--approval-mode=yolo`; Pi has no prompts). The router and progress lines get no tools and an empty folder; the solver gets the project folder with file tools (Claude Code also denies `.env*`). Nothing confines file writes to the folder except the prompt.
+- *Output*: the router and progress lines write their JSON as text (streamed into the same parser); the solver answers SPOKEN:-first. Harnesses other than Claude Code narrate before their tools; that text is dropped up to the `SPOKEN:` line (`NarrationGate`).
+- *Prices*: Claude Code calls are priced from the Claude table and count as saved (subscription); Codex and Grok (grok.com login) too, from the models.dev catalog (`server/prices.ts`); opencode, Pi and OhMyPi report their own per-call cost (billed to their keys; OhMyPi on the ChatGPT login counts as subscription). Without a price the cost line says "price unknown". `npm run bench:harness` measures warm vs cold for a selection.
 
 ## 5. Timing model
 
@@ -220,28 +209,28 @@ function solveWithOpus(opts: {
 | `stt.firstPartial` | S | first Scribe partial |
 | `stt.final` | S | Scribe committed transcript with words received |
 | `pointing.resolved` | S | resolver finished |
-| `llm.request` | S | request sent to Haiku / `response.create` sent to Realtime |
+| `llm.request` | S | request sent to the router |
 | `llm.firstToken` | S | first text or audio delta from the voice LLM |
-| `llm.toolCall` | S | `ask_opus` call detected (name known; args may still be streaming) |
-| `ack.ttsFirstByte` | S | first audio byte of the acknowledgment from TTS or Realtime |
+| `llm.toolCall` | S | `ask_solver` call detected (name known; args may still be streaming) |
+| `ack.ttsFirstByte` | S | first audio byte of the acknowledgment from TTS |
 | `ack.played` | C | first ack sample actually played (player worklet) |
-| `opus.request` | S | Opus request sent |
-| `opus.firstToken` | S | first Opus text delta |
-| `opus.spokenReady` | S | `SPOKEN:` line complete |
-| `opus.done` | S | Opus stream finished |
+| `solver.request` | S | Solver request sent |
+| `solver.firstToken` | S | first solver text delta |
+| `solver.spokenReady` | S | `SPOKEN:` line complete |
+| `solver.done` | S | Solver stream finished |
 | `answer.ttsFirstByte` | S | first audio byte of the answer |
 | `answer.played` | C | first answer sample played |
 | `turn.end` | S | all audio sent, turn closed |
 
-**Derived metrics** (computed client-side and stored in `RunRecord.metrics`, in ms relative to `release`): `ttfa = min(ack.played, answer.played)`, `tta = answer.played`, `stt = stt.final`, `llmFirst = llm.firstToken`, `toolCall = llm.toolCall`, `opusFirst = opus.firstToken`, `opusSpoken = opus.spokenReady`, `opusTotal = opus.done − opus.request`, `ttsFirst = answer.ttsFirstByte − (opus.spokenReady | llm.firstToken)`.
+**Derived metrics** (computed client-side and stored in `RunRecord.metrics`, in ms relative to `release`): `ttfa = min(ack.played, answer.played)`, `tta = answer.played`, `stt = stt.final`, `llmFirst = llm.firstToken`, `toolCall = llm.toolCall`, `solverFirst = solver.firstToken`, `solverSpoken = solver.spokenReady`, `solverTotal = solver.done − solver.request`, `ttsFirst = answer.ttsFirstByte − (solver.spokenReady | llm.firstToken)`.
 
 **"Played" means played.** The player worklet reports the `AudioContext` time of the first non-silent sample it renders. Convert it to `performance.now()` with `ctx.getOutputTimestamp()`, which also accounts for output latency.
 
-`RunRecord` = `{ runId, turnId, approach, config, fixtureId?, marks: Record<MarkName, number>, metrics, transcript, pointing, voiceText, opusText, usage: {anthropic?, openai?, elevenChars?, scribeSeconds?}, costUsd, clock: {rttMs, offsetMs}, error? }`.
+`RunRecord` = `{ runId, turnId, approach, config, fixtureId?, marks: Record<MarkName, number>, metrics, transcript, pointing, voiceText, solverText, usage: {anthropic?, openai?, elevenChars?, scribeSeconds?}, costUsd, clock: {rttMs, offsetMs}, error? }`.
 
-Usage shapes written by the orchestrators (T7): `anthropic: {haiku?, opus?}` = the raw Anthropic `usage` objects (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `speed`); `openai` = `RealtimeUsage` for **this turn only** (diffed against the reused session's cumulative counters); `elevenChars` = characters sent to TTS; `scribeSeconds` = audio seconds sent to Scribe. `server/cost.ts` documents the price assumptions where API-NOTES lists none (cache writes 1.25× input, Haiku cache reads 0.1×, fast-mode cache reads 2×, one cached rate for Realtime text and audio).
+Usage shapes written by the orchestrators (T7): `anthropic: {router?, solver?, fillers?}` = the raw Anthropic `usage` objects (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `speed`); `elevenChars` = characters sent to TTS; `scribeSeconds` = audio seconds sent to Scribe. `server/cost.ts` documents the price assumptions where API-NOTES lists none (cache writes 1.25× input, Haiku cache reads 0.1×, fast-mode cache reads 2×).
 
-## 6. Pointing resolution (shared between both labs)
+## 6. Pointing resolution
 
 Implement it in `shared/pointing.ts`, as pure functions so they can be unit tested on saved fixtures.
 
@@ -261,7 +250,7 @@ Algorithms (all of them run, and each is shown in its own color):
 | `mode` | the element appearing in the most samples inside that window |
 | `dwellMode` | `dwell`, but break ties toward the `mode` element |
 
-Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders to tune them against labeled sessions.
+Window offsets are config values (`preMs`, `postMs`).
 
 **Precise rules (as implemented in `shared/pointing.ts`, T9):**
 - A word is a pointing word if, lowercased with every non-letter stripped (`"This,"` → `"this"`), it matches `POINTING_WORDS`.
@@ -273,94 +262,57 @@ Window offsets are config values (`preMs`, `postMs`). The cursor lab has sliders
 - `dwellMode`: candidates are window samples with speed ≤ `minSpeed + DWELL_TIE_EPS` (**0.05 px/ms = 50 px/s**, i.e. "also basically still"). Prefer candidates on the `mode` element, then closest to the word start.
 - `resolvePointing` returns one `PointingTarget` per (pointing word × algorithm), in word order then `atStart, dwell, mode, dwellMode`. `word` is the normalized word, `wordStart` is `word.start` (**seconds** from turn audio start).
 
-**Languages (English + Romanian).** `RunConfig.language` = auto | en | ro. Scribe omits `language_code` unless pinned; its realtime API returns `language_code: null` when auto-detecting, so the turn's language is pinned → Scribe's code → `detectLanguage(text)` (Romanian diacritics + common words) and is sent on `stt.final`. Pointing words come from `POINTING_LEXICON` (en + ro, diacritic-insensitive, hyphenated clitics; auto = both). Every model is told the reply language; A, which answers before its transcript exists, gets the conversation's last language as a hint; C always gets Scribe's transcript.
+**Languages (English + Romanian).** `RunConfig.language` = auto | en | ro. Scribe omits `language_code` unless pinned; its realtime API returns `language_code: null` when auto-detecting, so the turn's language is pinned → Scribe's code → `detectLanguage(text)` (Romanian diacritics + common words) and is sent on `stt.final`. Pointing words come from `POINTING_LEXICON` (en + ro, diacritic-insensitive, hyphenated clitics; auto = both). Every model is told the reply language.
 
 **Cursor rests (any language).** `computeRests` finds where the cursor stayed on one element ≥ 250 ms while the user spoke (dropped where a pointing word already covers it), numbered `@1, @2…`. They're marked in the transcript (`it [@1]`, except a cursor parked the whole time) and sent as `Cursor rested [@1] on …` lines — weaker hints the models use for "it", "the blue button", or words outside the lexicon.
 
 **Reference numbers.** `resolvePointing` gives each pointing word a `ref` (1, 2, … in speech order, shared by all algorithms) and its `wordIndex`. Every LLM sees `Transcript: "move this [1] over there [2]"` (`annotateTranscript`) and numbered lines `Pointing [1] "this" at 0.3 s → …` (`formatPointingLine`); click/highlight lines name the word as `"this" [1]`.
 
-**Server-side resolution:** in approaches B and C (and `cursor-only`), the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn and `config.preMs/postMs`. `formatPointingContext(targets, "dwellMode")` formats it for the LLM context, one line per pointing word (tag = last `elementPath` segment; `in "…"` = the container, omitted when null or equal to the label; missing parts are omitted; no pick → `(nothing)`):
-`Pointing: "this" → <button> "Get started" in "Hero section" [data-source=web/cursor/demo/demo.html:27]`
-`Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=web/cursor/demo/demo.html:36]`.
+**Server-side resolution:** in the pipeline (and `cursor-only`), the server runs the resolver as soon as `stt.final` arrives, using the cursor samples streamed during the turn and `config.preMs/postMs`. `formatPointingContext(targets, "dwellMode")` formats it for the LLM context, one line per pointing word (tag = last `elementPath` segment; `in "…"` = the container, omitted when null or equal to the label; missing parts are omitted; no pick → `(nothing)`):
+`Pointing: "this" → <button> "Get started" in "Hero section" [data-source=demo.html:27]`
+`Pointing: "this" → <h3> "Live queries" in "Card: Live queries" [data-source=demo.html:36]`.
 
 `formatPageContext(clicks, selection, words, tAudioStart)` adds the turn's clicks and highlighted text: one `Clicked:` line per click (sorted, consecutive clicks on the same element deduped, the latest 5), naming the word whose span `[tAudioStart + start·1000, tAudioStart + end·1000]` is nearest the click (omitted without words/tAudioStart or when no word is within 1 s), then one `Selected text:` line (text collapsed and cut to 200 chars; the element's label is left out when it only repeats the text):
-`Clicked: <th> "Price / month" in "Pricing table" [data-source=web/cursor/demo/demo.html:67] (while saying "that")`
-`Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=web/cursor/demo/demo.html:37]`.
+`Clicked: <th> "Price / month" in "Pricing table" [data-source=demo.html:67] (while saying "that")`
+`Selected text: "Charts refresh as rows land." in <p> in "Card: Live queries" [data-source=demo.html:37]`.
 
-**Demo page markup.** Components (cards, the pricing table, the form, sections) carry `data-label`, and so do the specific elements inside them that have their own `data-source` (card titles and texts, table headings, form labels/inputs, nav links, the CTA). Every `data-source` points at its own line (`server/fixtures-context/fixtures.test.ts`). Table body cells have no data-source of their own: a `<td>` reports its row's line, with the row ("Row: Team") as container.
+**Demo page markup.** Components (cards, the pricing table, the form, sections) carry `data-label`, and so do the specific elements inside them that have their own `data-source` (card titles and texts, table headings, form labels/inputs, nav links, the CTA). Table body cells have no data-source of their own: a `<td>` reports its row's line, with the row ("Row: Team") as container.
 
-**Cursor lab specifics.** The demo page (`web/cursor/demo/demo.html`) is injected into the lab's own document (no iframe) inside a scroll container `#demo-scroller > #demo-root`; its CSS is wrapped in `@scope (#demo-root)`. In the cursor lab, `CursorSample.scrollX/scrollY` are that container's `scrollLeft/scrollTop` (not `window.scrollX/Y`), and `elementPath`/`dataSource`/`label` are null when the pointer is outside the demo. `elementPath` is a `querySelector`-valid path: `tag#id` for the nearest CSS-safe id, else `tag:nth-of-type(n)` segments (e.g. `div#demo-root > main > article:nth-of-type(2) > h3`).
-The lab shows the detection live: an **Under the cursor** panel (tag, label, container, data-source, path of the latest sample) with a thin outline around the specific element and a faint dashed one around its container; per turn, the clicks (numbered dots + outlined elements on the page, ticks on the timeline) and the selection, listed under Picks with the word being said; and the **LLM context** block = `formatPointingContext(targets)` + `formatPageContext(...)`, recomputed as preMs/postMs move. `/cursor.html?demo=1` (or `?demo=title`) loads a canned session ("Make this title match that column") without mic or server. Note: lab scoring matches by data-source, and specific elements now have their own, so a label on a card title no longer matches a pick on the card's text.
-
-### 6.1 Fixture files (`fixtures/utterances/`)
-
-The cursor lab saves (and loads, by file name) three files per session; `Uxx` is the session id.
-
-- `Uxx.wav`: 16-bit mono 24 kHz PCM WAV of the turn's captured audio (`createWavRecorder`). Sample 0 is `tAudioStart`.
-- `Uxx.cursor.json`:
-  ```ts
-  { version: 1; kind: "cursor"; id: "U04"; createdAt: string /* ISO */; transcript: string;
-    words: Word[];               // as received in stt.final (seconds from tAudioStart)
-    samples: CursorSample[];     // t = ms RELATIVE to tAudioStart (negative = before audio start); 500 ms pre-roll before press, 300 ms after release
-    viewport?: { width: number; height: number };  // demo scroller size at record time
-    language?: string;           // spoken language Scribe detected (stt.final `language`, e.g. "en", "ro"); left out when unknown
-    // Page events (PageEvents, shared/protocol.ts). All optional (left out when empty); every time is ms RELATIVE to tAudioStart.
-    clicks?: PageClick[];                // click EVENTS: { ...ElementRef, kind: "single"|"double"|"triple"|"multi" (4+), count,
-                                         //   t (first press), tEnd (last release), times: number[] (every press, length = count), x, y }
-    preselected?: PageSelection | null;  // text already highlighted when the recording started: { ...ElementRef, t, text }
-    highlights?: PageHighlight[] }       // each highlight made during the recording, in order:
-                                         //   { ...ElementRef, text, tStart (gesture start), t (finish), via?: "drag"|"double-click"|… }
-  ```
-  Older files load too: a click without `kind`/`count`/`times` becomes a single click (`count 1, times [t], tEnd t`), and the old `selection` field (the turn's last highlighted text) becomes the one entry of `highlights` with `tStart = t`. A missing `via` is fine. Saving always writes the new fields (never `selection`).
-  Replaying a session re-times its page events onto the replay's `tAudioStart` and sends them as `turn.context` (`{ type, turnId, clicks, preselected, highlights }`) right before `turn.release`.
-  `samples` is exactly what `startReplay({cursor})` takes. Resolvers run on it with `tAudioStart = 0`. Cursor rests (`computeRests`) aren't saved: the lab derives them from `words` + `samples` (and the dwellMode picks) like the picks.
-- `Uxx.labels.json`:
-  ```ts
-  { version: 1; kind: "labels"; id: "U04";
-    labels: { wordIndex: number /* into words[] */; word: string /* normalized */; start: number; end: number /* s */;
-              target: { elementPath: string | null; dataSource: string | null; label: string | null } | null /* null = unlabeled */ }[] }
-  ```
-  One entry per pointing word. (HTTP, T8: `GET /api/fixtures` lists the file names in `fixtures/utterances/` and `GET /api/fixtures/<name>` serves one; only `^[A-Za-z0-9_-]+\.(wav|cursor\.json|labels\.json)$` names are accepted. `GET /api/results` returns every `RunRecord` in `results/*.jsonl`.) A pick is **correct** if `pick.dataSource === target.dataSource` (when the target has one; targets are the `[data-source]` elements, so a pick on a child of the card counts), otherwise if the `elementPath`s are equal. Accuracy = correct / labeled words, per algorithm.
+The cursor lab (which showed the picks live, saved sessions as `fixtures/utterances/Uxx.{wav,cursor.json,labels.json}` and scored resolver accuracy against labels) was removed along with its fixture endpoints; the resolver rules above are covered by `shared/pointing.test.ts`.
 
 ## 7. Orchestrator sketches
 
-**A (`realtime.ts`).** `turn.start` → `openRealtime` (pre-warm one session per connection and reuse it) → stream audio → `release` → `commitAndRespond()` → stream audio and text to the client. On `ask_opus`: ack audio is already flowing from the model → `solveWithOpus` → `sendToolResult(callId, spokenLine + "\n\n" + summary)` → the model speaks the answer segment. Pointing isn't available (no word timestamps), and that's the point of A.
+Approaches A (`realtime`, OpenAI Realtime speech-to-speech) and C (`hybrid`, Realtime + Scribe for pointing) were removed on 2026-10-17; only the pipeline is developed (git history has them).
 
-**B (`pipeline.ts`).** `turn.start` → `openScribe` (pre-warmed) + open TTS → stream audio to Scribe → `release` → `commit()` → `final()` → resolve pointing → `routeWithHaiku` (its spoken deltas go to TTS as the `ack` segment) → if delegated: `solveWithOpus`, sending `onSpokenLine` to a fresh TTS flush as the `answer` segment.
+**Pipeline (`pipeline.ts`).** `turn.start` → `openScribe` (pre-warmed) + open TTS → stream audio to Scribe → `release` → `commit()` → `final()` → resolve pointing → `routeTurn` (its spoken deltas go to TTS as the `ack` segment) → if delegated: `solveTask`, sending `onSpokenLine` to a fresh TTS flush as the `answer` segment.
 
-**C (`hybrid.ts`).** Same as A, except audio is **also** sent to Scribe. On `release`: commit both, wait for Scribe `final()` for up to `hybridWaitMs`, resolve pointing, then `commitAndRespond(pointingContext)`. If Scribe times out, respond without the context and record `meta.pointingMissed = true`.
-
-**cursor-only (`cursorOnly.ts`, T9).** For the cursor lab: `turn.start` → `openScribe` → stream audio → `release` → `commit()` → `final()` → `stt.final` → `resolvePointing` → mark `pointing.resolved`, send `pointing.resolved` → mark `turn.end`. No LLM, no TTS. Usage records `scribeSeconds`.
+**cursor-only (`cursorOnly.ts`).** For dictating into a comment (the sidebar inserts the final words at the caret; no reply, not remembered): `turn.start` → `openScribe` → stream audio → `release` → `commit()` → `final()` → `stt.final` → `resolvePointing` → mark `pointing.resolved`, send `pointing.resolved` → mark `turn.end`. No LLM, no TTS. Usage records `scribeSeconds`.
 
 **Pre-warming.** Open the vendor sockets on `turn.start` (or keep them alive per connection) so connection setup isn't counted in latency. Record cold-vs-warm as a config flag.
 
 ### As built (T7)
 
 - **Segments.** `audio.segment start` goes out right before a segment's first audio byte and `end` after its last; segments are serialized (later audio is held until the earlier segment ends); a segment that never gets audio sends nothing, so the Session never waits for an `audio.played` that can't come.
-- **A/C labelling.** The first Realtime response of a turn is `"ack"` on the wire, the post-tool response `"answer"` (the adapter's `currentSegment`). Whether a tool call follows is only known after audio has started, so if the turn ends **without** `ask_opus`, the orchestrator returns `ackIsAnswer: true` and the RunRecord's ack marks become answer marks (PRD §7: TTA = TTFA for easy questions). The live UI sees the wire label; the stored RunRecord is canonical.
-- **A/C tool result.** `sendToolResult(callId, spokenLine + "\n\n" + note)` the moment `onSpokenLine` fires (the note says the detailed answer is on screen); `opus.text` keeps streaming until Opus is done. Prompt: `server/prompts/realtime.md`.
-- **Realtime session reuse.** One session per connection in `ctx.connection` (shared by A and C), opened on the first warm turn's `turn.start`, reused with `beginTurn()` + `setMark()`, reopened when it errored/closed or the model changed. Any Realtime error drops it. (Superseded: the adapter now has `cancelResponse()`; interrupted sessions are kept.) The adapter had no `response.cancel`, so cancelling (or failing) a turn while a response is in flight closes and drops the session. Note: a reused session keeps its conversation history across turns.
-- **B labelling.** Forced mode: the router's speech is the `ack`. Auto mode: the first delta's `kind` decides (`ack` if it called `ask_opus`, `answer` if it answered directly). The pre-warmed first TTS socket is opened as "ack"; its `*.ttsFirstByte` mark is renamed to the final label. The ack socket is flushed on `onSpokenEnd` (or when the router returns). The answer socket opens when Opus is requested (warm) or when the spoken line is ready (cold). Rare auto-mode "text, then tool call" turns are flagged `turn.end.meta.labelConflict`.
-- **C pointing.** After release: commit Scribe, wait up to `hybridWaitMs` for its final (0 = don't wait), then `commitAndRespond(formatPointingContext(...) || undefined)`. `llm.request.meta` = `{pointingInjected, pointingMissed}`. A final that arrives after the response started is still resolved and recorded with `pointing.resolved.meta = {pointingMissed: true, late: true}`; one that never arrives (bounded by `hybridLateWaitMs`, 2 s after the reply) gets `{pointingMissed: true, arrived: false}`. A Scribe failure in C is non-fatal (`error {source:"scribe"}` + RunRecord.error, the voice reply still runs).
-- **Cold (`prewarm: false`).** Sockets open on release (Scribe, Realtime) or when first needed (TTS), so setup is inside the measured latency; `llm.request.meta.cold = true` (also on `turn.end`). Cold Realtime sessions are closed after the turn.
-- **Errors / cancel.** Any adapter failure → `error {source: scribe|openai|tts|haiku|opus|timeout}` and `done` resolves with `error` set. Overall turn timeout 60 s from `turn.start`. `cancel()` closes every socket opened for the turn (and the reusable Realtime session only if a response was in flight).
-- **Headless check.** `npm run smoke:e2e` (real keys; SKIPs per approach) and `npm run smoke:e2e -- --fake` (fake adapters over the real `/ws`) print one RunRecord per approach with marks relative to release.
+- **Labelling.** Forced mode: the router's speech is the `ack`. Auto mode: the first delta's `kind` decides (`ack` if it called `ask_solver`, `answer` if it answered directly). The pre-warmed first TTS socket is opened as "ack"; its `*.ttsFirstByte` mark is renamed to the final label. The ack socket is flushed on `onSpokenEnd` (or when the router returns). The answer socket opens when the solver is requested (warm) or when the spoken line is ready (cold). Rare auto-mode "text, then tool call" turns are flagged `turn.end.meta.labelConflict`.
+- **Cold (`prewarm: false`).** Sockets open on release (Scribe) or when first needed (TTS), so setup is inside the measured latency; `llm.request.meta.cold = true` (also on `turn.end`).
+- **Errors / cancel.** Any adapter failure → `error {source: scribe|tts|router|solver|timeout}` and `done` resolves with `error` set. Overall turn timeout 60 s from `turn.start`. `cancel()` closes every socket opened for the turn.
+- **Headless check.** `npm run smoke:e2e` (real keys; SKIPs without them) and `npm run smoke:e2e -- --fake` (fake adapters over the real `/ws`) print a RunRecord with marks relative to release.
 
-**Chat mode (`RunConfig.memory`, the `/chat.html` page).** The Session appends each finished turn (`{user, assistant, detail}`) to a per-connection conversation log (`server/conversation.ts`); `conversation.reset` clears it and drops the Realtime session. B sends the log to Haiku and Opus as prior messages. A/C: the reused Realtime session remembers turns it handled; turns it didn't hear (B turns, or turns before a reopen) are injected once as a text recap in the context item. In chat mode A also tees audio to Scribe (never waited on) so its turns have a transcript. Benchmark runs keep `memory: false`.
+**Chat mode (`RunConfig.memory`, the `/chat.html` page).** The Session appends each finished turn (`{user, assistant, detail}`) to a per-connection conversation log (`server/conversation.ts`); `conversation.reset` clears it. The pipeline sends the log to the router and the solver as prior messages. Benchmark runs keep `memory: false`.
 
 **Chat behaviours (RunConfig `fillers`, `backgroundLongTasks`, `longTaskSeconds`; set by `/chat.html`).**
-- *Decision.* B: the Haiku router's forced `route` tool outputs `intent` (question | task | clarify | answer) and `estimate_seconds` before `say`; `onDecision` fires as soon as they parse. A/C: the Realtime model's `ask_opus` args carry `intent` + `estimated_seconds`; no tool call → `clarify` if its reply ends with "?", else `answer`. The orchestrator sends `decision {intent, estimateS, background}`. Clarify = the voice layer asks one follow-up question instead of guessing; the conversation memory carries the answer into the next turn.
-- *Short tasks (estimate ≤ longTaskSeconds): fillers.* `generateFillers` (Haiku, in parallel with Opus) returns ≤ 3 progress lines. `orchestrators/fillers.ts` speaks the next line once everything said so far has played (`SegmentOutput.playEnd`, estimated from bytes sent) plus a 900 ms pause, until Opus's spoken line is ready. B: one TTS socket per line (segment `filler`); A/C: `RealtimeSession.speak(line, "filler")`, an out-of-band response said verbatim. The answer segment queues after any filler in progress.
-- *Long tasks: background jobs* (`orchestrators/jobs.ts`). The ack says it'll get back to the user; the turn ends; Opus runs on. A/C record the tool output with `respond: false`. On completion: `job {state: done, spoken, detail}`, the result joins the conversation log, and a notice is spoken once no turn is active (`ConnectionChannel.whenIdle`) in the starting approach's voice (A/C: the idle Realtime session's `speak(…, "notice")`; B or fallback: ElevenLabs), framed by `notice {jobId, start|end}`. A turn that starts first preempts it (retried later); a turn started during it stops it.
-- *Interrupting.* The client stops playback and sends `turn.cancel {reason: "interrupt" | "stop"}` (and `speech.stop` for notices). The Session records what was said so far in the conversation ("… [interrupted by the user]"). A/C: the response is cancelled (`response.cancel`, session kept), a pending `ask_opus` call gets a "cancelled" output, and the next `beginTurn()` drops the cancelled response's late audio as stale.
-- *Debug view (prompts & responses).* Each model call gets a `callId` (`orchestrators/trace.ts`): `llm.prompt` carries the exact request (system blocks labelled and marked cached, messages, tools, settings) and `llm.response` the raw result (final message / each Realtime `response.done`, stop reason, usage, duration, or the error). The Chat page pairs them per turn and per background job.
-- *On-device TTS (B, `ttsModel: "macos"`).* `tools/mactts/main.swift` (AVSpeechSynthesizer) runs as a persistent helper — compiled once into `node_modules/.cache/mactts/` (keyed by source hash) and started by `npm run dev` (`MAC_TTS=0` skips) — streaming PCM16 24 kHz framed on stdout. `server/adapters/macTts.ts` puts it behind the TtsStream interface: text goes a sentence at a time (rest on flush); the voice follows the turn's language (best en-US voice installed / Ioana), resolved per sentence because pre-opened streams learn the language later. Not billed: counted as `localTtsChars`, shown as saved vs ElevenLabs. Benchmarks: `docs/BENCH-tts.md`.
-- *Costs.* Each `llm.response` carries `costUsd` (its usage × the API-NOTES prices; `server/cost.ts callCost`). `RunRecord.costItems` itemizes a turn (each model-call kind, ElevenLabs characters per segment, Scribe seconds; sums to `costUsd`). Background jobs report `costUsd`/`costItems` (their Opus call, then + speaking the result); the Chat page adds them to the turn that started the job. Claude calls routed through `claude -p` run on the Claude Code subscription: they count $0 toward totals (`RunRecord.costUsd`, job `costUsd`) and carry `savedUsd` (their API-price cost), shown as "$… saved".
-- *Page context.* During a turn the client records clicks and the highlighted text and sends `turn.context` before `turn.release`; `formatPageContext` turns them into `Clicked: …` / `Selected text: …` lines for every approach (they need no word timestamps).
+- *Decision.* The router's forced `route` tool outputs `intent` (question | task | clarify | answer) and `estimate_seconds` before `say`; `onDecision` fires as soon as they parse. The orchestrator sends `decision {intent, estimateS, background}`. Clarify = the voice layer asks one follow-up question instead of guessing; the conversation memory carries the answer into the next turn.
+- *Short tasks (estimate ≤ longTaskSeconds): fillers.* `generateFillers` (fast tier, in parallel with the solver) returns ≤ 3 progress lines. `orchestrators/fillers.ts` speaks the next line once everything said so far has played (`SegmentOutput.playEnd`, estimated from bytes sent) plus a 900 ms pause, until the solver's spoken line is ready. One TTS socket per line (segment `filler`). The answer segment queues after any filler in progress.
+- *Long tasks: background jobs* (`orchestrators/jobs.ts`). The ack says it'll get back to the user; the turn ends; the solver runs on. On completion: `job {state: done, spoken, detail}`, the result joins the conversation log, and a notice is spoken once no turn is active (`ConnectionChannel.whenIdle`) with the turn's TTS engine, framed by `notice {jobId, start|end}`. A turn that starts first preempts it (retried later); a turn started during it stops it.
+- *Interrupting.* The client stops playback and sends `turn.cancel {reason: "interrupt" | "stop"}` (and `speech.stop` for notices). The Session records what was said so far in the conversation ("… [interrupted by the user]").
+- *Debug view (prompts & responses).* Each model call gets a `callId` (`orchestrators/trace.ts`): `llm.prompt` carries the exact request (system blocks labelled and marked cached, messages, tools, settings) and `llm.response` the raw result (final message, stop reason, usage, duration, or the error). The Chat page pairs them per turn and per background job.
+- *On-device TTS (`ttsModel: "macos"`).* `tools/mactts/main.swift` (AVSpeechSynthesizer) runs as a persistent helper — compiled once into `node_modules/.cache/mactts/` (keyed by source hash) and started by `npm run dev` (`MAC_TTS=0` skips) — streaming PCM16 24 kHz framed on stdout. `server/adapters/macTts.ts` puts it behind the TtsStream interface: text goes a sentence at a time (rest on flush); the voice follows the turn's language (best en-US voice installed / Ioana), resolved per sentence because pre-opened streams learn the language later. Not billed: counted as `localTtsChars`, shown as saved vs ElevenLabs. Benchmarks: `docs/BENCH-tts.md`.
+- *Costs.* Each `llm.response` carries `costUsd` (its usage × the API-NOTES prices; `server/cost.ts callCost`). `RunRecord.costItems` itemizes a turn (each model-call kind, ElevenLabs characters per segment, Scribe seconds; sums to `costUsd`). Background jobs report `costUsd`/`costItems` (their solver call, then + speaking the result); the Chat page adds them to the turn that started the job. Calls through a CLI's own login (Claude Code, Codex, Grok on grok.com) run on a subscription: they count $0 toward totals (`RunRecord.costUsd`, job `costUsd`) and carry `savedUsd` (their API-price cost), shown as "$… saved".
+- *Page context.* During a turn the client records clicks and the highlighted text and sends `turn.context` before `turn.release`; `formatPageContext` turns them into `Clicked: …` / `Selected text: …` lines (they need no word timestamps).
 
 ## 8. Decisions and alternatives
 
-- **One server WebSocket for everything** (not browser WebRTC straight to OpenAI). Same network path for every approach, keys stay server-side, and every mark is instrumented in one place. A browser→OpenAI WebRTC variant of approach A is a follow-up, to measure how much the server hop costs.
-- **Push-to-talk only.** It removes end-of-speech detection delay from every approach.
-- **Replay mode is the source of truth** for benchmark numbers. Live mode is for feel.
+- **One server WebSocket for everything.** One network path, keys stay server-side, and every mark is instrumented in one place.
+- **Push-to-talk first.** It removes end-of-speech detection delay. Always listen (a level VAD in the sidebar) is an option.
+- **Replayed WAVs are the source of truth** for benchmark numbers (`npm run smoke:e2e`, `bench:*`). Live use is for feel.
 - **Scribe `commit_strategy=manual`.** The release is the commit.

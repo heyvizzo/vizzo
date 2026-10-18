@@ -4,7 +4,8 @@
 // - each highlight made during the recording, as its own entry (a browser shows only one selection at a
 //   time, so earlier highlights are painted with the CSS Custom Highlight API until the next turn).
 // Pure helpers are exported for tests; the DOM wiring in createPageContextRecorder stays thin.
-import type { ClickKind, PageClick, PageEvents, PageHighlight, PageSelection } from "../../shared/protocol.ts";
+import type { ClickCoords, ClickKind, PageClick, PageEvents, PageHighlight, PageSelection } from "../../shared/protocol.ts";
+import { clickCoords } from "../../shared/clickCoords.ts";
 import { describeElement, type ElLike, type ElementInfo } from "./dom.ts";
 
 /** A pointer that moved more than this between down and up was a drag (e.g. selecting text), not a click. */
@@ -27,7 +28,7 @@ export function clickKind(count: number): ClickKind {
 }
 
 /** One press+release that wasn't a drag. */
-export interface RawClick extends ElementInfo { t: number; tUp: number; x: number; y: number }
+export interface RawClick extends ElementInfo { t: number; tUp: number; x: number; y: number; coords?: ClickCoords }
 
 /**
  * Add a click to the event list: it joins the last event when it's on the same element, within
@@ -42,13 +43,14 @@ export function addClick(list: PageClick[], c: RawClick, groupMs = CLICK_GROUP_M
     Math.hypot(c.x - last.x, c.y - last.y) <= groupPx
   ) {
     last.times.push(c.t);
+    if (c.coords) last.coords = [...(last.coords ?? []), c.coords];
     last.count = last.times.length;
     last.kind = clickKind(last.count);
     last.tEnd = c.tUp;
     return list;
   }
-  const { t, tUp, x, y, ...info } = c;
-  list.push({ ...info, kind: "single", count: 1, t, tEnd: tUp, times: [t], x, y });
+  const { t, tUp, x, y, coords, ...info } = c;
+  list.push({ ...info, kind: "single", count: 1, t, tEnd: tUp, times: [t], x, y, ...(coords ? { coords: [coords] } : {}) });
   return list;
 }
 
@@ -135,7 +137,7 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
   let clicks: PageClick[] = [];
   let preselected: { sel: PageSelection; range: Range } | null = null;
   let highlights: { h: PageHighlight; span: Span; range: Range }[] = [];
-  let down: { t: number; x: number; y: number; target: Element } | null = null;
+  let down: { t: number; x: number; y: number; target: Element; coords: ClickCoords } | null = null;
   let keySelectStart: number | null = null;
 
   if (paint && !document.getElementById("page-context-highlights")) {
@@ -146,6 +148,11 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
   }
 
   const inside = (n: Node | null) => !!n && root.contains(n);
+  /** Where a click at viewport point `client` landed in `el` (its container) and on the page. */
+  const coordsOf = (client: { x: number; y: number }, el: Element): ClickCoords => clickCoords(
+    client, { x: window.scrollX, y: window.scrollY },
+    { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight }, el.getBoundingClientRect(),
+  );
   const describe = (el: Element | ElLike | null) => describeElement(el as unknown as ElLike, root as unknown as ElLike);
   const events = (): PageEvents => ({
     clicks: clicks.map((c) => ({ ...c, times: [...c.times] })),
@@ -220,7 +227,7 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
 
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0 || !(e.target instanceof Element)) return;
-    down = { t: performance.now(), x: e.clientX, y: e.clientY, target: e.target };
+    down = { t: performance.now(), x: e.clientX, y: e.clientY, target: e.target, coords: coordsOf({ x: e.clientX, y: e.clientY }, e.target) };
   };
   const onUp = (e: PointerEvent) => {
     const d = down;
@@ -231,7 +238,7 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
     let count = 0;
     if (!drag && d.t >= tFrom && inside(d.target)) {
       const info = describe(d.target);
-      if (info.elementPath) { addClick(clicks, { t: d.t, tUp, x: d.x, y: d.y, ...info }); count = clicks[clicks.length - 1]!.count; changed(); }
+      if (info.elementPath) { addClick(clicks, { t: d.t, tUp, x: d.x, y: d.y, coords: d.coords, ...info }); count = clicks[clicks.length - 1]!.count; changed(); }
     }
     // The selection is final once the button is up (drag, or the word/paragraph of a double/triple click).
     const via = drag ? "drag" : count >= 4 ? "multi-click" : count === 3 ? "triple-click" : count === 2 ? "double-click" : e.shiftKey ? "shift-click" : null;
@@ -246,7 +253,8 @@ export function createPageContextRecorder(root: HTMLElement, opts: RecorderOpts 
     const r = e.target.getBoundingClientRect();
     const t = performance.now();
     const info = describe(e.target);
-    if (info.elementPath) { clicks.push({ ...info, kind: "single", count: 1, t, tEnd: t, times: [t], x: r.left + r.width / 2, y: r.top + r.height / 2 }); changed(); }
+    const at = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    if (info.elementPath) { clicks.push({ ...info, kind: "single", count: 1, t, tEnd: t, times: [t], x: at.x, y: at.y, coords: [coordsOf(at, e.target)] }); changed(); }
   };
   // Shift+arrow (or similar) keyboard selection: a highlight finishes when Shift is released.
   const onKeyDown = (e: KeyboardEvent) => {

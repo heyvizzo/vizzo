@@ -1,40 +1,117 @@
 {
   "name": "realtime-voice-latency-lab",
+  "version": "0.1.0",
+  "description": "Talk to a coding agent about the page you are looking at.",
+  "author": "J",
   "private": true,
+  "main": "dist-electron/main.cjs",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
-    "dev:server": "tsx watch server/index.ts",
-    "dev:web": "node scripts/wait-port.mjs ${PORT:-8787} && vite",
+    "dev": "npm run build:electron && electron .",
+    "dev:server": "tsx watch server/cli.ts",
     "dev:fake": "FAKE_VENDORS=1 npm run dev",
-    "build": "vite build",
+    "build": "npm run build:electron",
+    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/page-preload.ts --bundle --platform=node --format=cjs --external:electron --external:vite --outdir=dist-electron --out-extension:.js=.cjs && esbuild electron/server-entry.ts --bundle --platform=node --format=esm --external:vite --outfile=dist-electron/server.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" && mkdir -p dist-electron/shell && cp electron/shell/*.html dist-electron/shell/",
+    "build:native": "bash scripts/build-native.sh",
+    "dist": "vite build && npm run build:electron && npm run build:native && electron-builder --mac dmg --arm64",
+    "app": "npm run dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke:scribe": "tsx scripts/smoke-scribe.ts",
-    "smoke:realtime": "tsx scripts/smoke-realtime.ts",
     "smoke:tts": "tsx scripts/smoke-tts.ts",
     "smoke:claude": "tsx scripts/smoke-claude.ts",
     "smoke:e2e": "tsx scripts/smoke-e2e.ts",
     "smoke:chat": "tsx scripts/smoke-chat.ts",
-    "bench:claude": "tsx scripts/bench-claude.ts",
+    "bench:harness": "tsx scripts/bench-harness.ts",
     "bench:tts": "tsx scripts/bench-tts.ts",
-    "setup:local-tts": "bash scripts/setup-local-tts.sh"
+    "setup:local-tts": "bash scripts/setup-local-tts.sh",
+    "setup:local-stt": "bash scripts/setup-local-stt.sh"
   },
-  "dependencies": {
+  "devDependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
-    "dotenv": "^18.0.7",
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "@yogesharc/thinking-orbs": "^0.1.2",
+    "concurrently": "^10.0.6",
+    "electron": "^44.7.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
+    "vitest": "^5.0.4",
     "ws": "^8.22.0"
   },
-  "devDependencies": {
-    "@types/node": "^26.6.5",
-    "@types/ws": "^8.18.2",
-    "concurrently": "^10.0.6",
-    "vitest": "^5.0.4"
+  "build": {
+    "appId": "com.dpaunoiu.voicelatencylab",
+    "productName": "Voice Latency Lab",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "dist-native/**",
+      "server/prompts/**",
+      "scripts/setup-local-tts.sh",
+      "scripts/setup-local-stt.sh",
+      "tools/localtts/**",
+      "tools/localstt/**",
+      "tools/mactts/main.swift",
+      "tools/macstt/main.swift",
+      "package.json",
+      "!**/*.test.*",
+      "!**/__pycache__/**"
+    ],
+    "asarUnpack": [
+      "dist-native/**",
+      "server/prompts/**",
+      "scripts/**",
+      "tools/**"
+    ],
+    "npmRebuild": false,
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "13.0",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Voice Latency Lab listens while you talk to it.",
+        "NSSpeechRecognitionUsageDescription": "On-device transcription with Apple SpeechTranscriber."
+      }
+    },
+    "dmg": {
+      "title": "${productName}",
+      "contents": [
+        {
+          "x": 150,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 560,
+        "height": 400
+      }
+    }
   }
 }

@@ -15,6 +15,16 @@ describe("pageContext helpers", () => {
     expect([1, 2, 3, 4, 7].map(clickKind)).toEqual(["single", "double", "triple", "multi", "multi"]);
   });
 
+  it("addClick keeps each click's coords through a group", () => {
+    const at = (x: number) => ({ container: { size: { width: 10, height: 10 }, at: { px: { x, y: 0 }, pct: { x: x * 10, y: 0 } } }, page: { size: { width: 100, height: 100 }, at: { px: { x, y: 0 }, pct: { x, y: 0 } } } });
+    const list: PageClick[] = [];
+    addClick(list, { ...raw(0, "h3"), coords: at(1) });
+    addClick(list, { ...raw(200, "h3"), coords: at(2) });
+    addClick(list, raw(300, "h3")); // no coords: the group still counts it, but coords only has the two that had them
+    expect(list[0]!.times).toHaveLength(3);
+    expect(list[0]!.coords).toEqual([at(1), at(2)]);
+  });
+
   it("addClick groups rapid clicks on the same element and keeps every timestamp", () => {
     const list: PageClick[] = [];
     for (const t of [0, 200, 380]) addClick(list, raw(t, "h3")); // triple click

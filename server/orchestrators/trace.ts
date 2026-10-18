@@ -1,16 +1,14 @@
 // Debug view: each model call gets an id; its exact prompt (llm.prompt) and raw result (llm.response)
 // go to the client under that id, so the Chat page can pair them.
 import { randomUUID } from "node:crypto";
-import type { RealtimeModel } from "../../shared/config.ts";
 import type { LlmPrompt, LlmResponse, ServerMsg } from "../../shared/protocol.ts";
 import { callCost } from "../cost.ts";
 
 /** Attach what the call cost (from its usage). */
 export function priced(r: LlmResponse): LlmResponse {
   if (r.error || !r.usage) return r;
-  const model = (r.target === "realtime" && r.model ? r.model : "gpt-realtime-2.1") as RealtimeModel;
-  const usd = callCost(r.target, r.usage, model);
-  // claude -p calls run on the Claude Code subscription: nothing billed per call, show what was saved.
+  const usd = callCost(r.target, r.usage, r.model);
+  // Calls through a CLI's own login (claude -p, Codex, Grok) run on a subscription: nothing billed per call, show what was saved.
   return r.billing === "subscription" ? { ...r, costUsd: 0, savedUsd: usd } : { ...r, costUsd: usd };
 }
 

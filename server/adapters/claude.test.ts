@@ -1,57 +1,55 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { CursorSample, PointingTarget } from "../../shared/protocol.ts";
 import type { MarkName } from "../../shared/marks.ts";
+import type { LlmChoice } from "../../shared/config.ts";
 import {
-  ClaudeRefusalError, DEFAULT_LONG_TASK_SECONDS, type ClaudeClient, formatPointingForPrompt, generateFillers, loadFixtureContext,
-  routeWithHaiku, routerTool, setClient, setLogger, solveWithOpus, validateRouterInput,
+  ClaudeRefusalError, DEFAULT_LONG_TASK_SECONDS, flattenMessages, extractJsonObject, formatPointingForPrompt, generateFillers,
+  routeTurn, setLogger, solveInThread, solveTask, threadUserMessage, validateRouterInput,
 } from "./claude.ts";
+import type { HarnessThread, ThreadBrief } from "./types.ts";
+import type { AgentSpec, HarnessResult, WarmAgent } from "./harnesses.ts";
+import { setAgentFactory, stopWarm } from "./warmPool.ts";
+import { setProjectDir } from "../project.ts";
 
-// ── Mock SDK stream ────────────────────────────────────────────────────────
-
-type Ev = Record<string, unknown>;
-interface FakeStream { [Symbol.asyncIterator](): AsyncIterator<Ev>; finalMessage(): Promise<unknown> }
-
-function fakeStream(events: Ev[], final: Record<string, unknown>, failWith?: unknown): FakeStream {
-  return {
-    async *[Symbol.asyncIterator]() {
-      if (failWith) throw failWith;
-      for (const e of events) {
-        await Promise.resolve();
-        yield e;
-      }
-    },
-    finalMessage: () => (failWith ? Promise.reject(failWith) : Promise.resolve(final)),
-  };
-}
-
-const usage = (o: Partial<Record<string, unknown>> = {}): Record<string, unknown> => ({
-  input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, speed: null, ...o,
+// A small project folder for these tests (the real one is PROJECT_DIR; the tests don't depend on it).
+const PROJECT = mkdtempSync(join(tmpdir(), "claude-test-project-"));
+beforeAll(() => {
+  writeFileSync(join(PROJECT, "demo.html"), '<div class="card-grid" data-source="demo.html:34">');
+  setProjectDir(PROJECT);
 });
+afterAll(() => setProjectDir(null));
 
-const textDelta = (index: number, text: string): Ev => ({ type: "content_block_delta", index, delta: { type: "text_delta", text } });
-const jsonDelta = (index: number, partial_json: string): Ev => ({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json } });
+// ── Fake harness agents ─────────────────────────────────────────────────────
+// Each request streams the next scripted reply in small chunks (or fails), and records what it was sent.
 
-function mockClient(opts: { messages?: FakeStream[]; beta?: FakeStream[]; create?: unknown[] }) {
-  const messagesStream = vi.fn((_params: unknown, _o?: unknown) => {
-    const s = opts.messages?.shift();
-    if (!s) throw new Error("unexpected messages.stream call");
-    return s;
-  });
-  /** messages.create: each queued item resolves, or rejects if it's an Error. */
-  const messagesCreate = vi.fn(async (_params: unknown, _o?: unknown) => {
-    if (!opts.create?.length) throw new Error("unexpected messages.create call");
-    const r = opts.create.shift();
-    if (r instanceof Error) throw r;
-    return r;
-  });
-  const betaStream = vi.fn((_params: unknown, _o?: unknown) => {
-    const s = opts.beta?.shift();
-    if (!s) throw new Error("unexpected beta.messages.stream call");
-    return s;
-  });
-  const client = { messages: { stream: messagesStream, create: messagesCreate }, beta: { messages: { stream: betaStream } } } as unknown as ClaudeClient;
-  return { client, messagesStream, messagesCreate, betaStream };
+interface Script { text?: string; chunk?: number; result?: Partial<HarnessResult>; fail?: Error; failAfter?: number }
+let scripts: Script[] = [];
+let sent: { spec: AgentSpec; user: string }[] = [];
+
+class FakeAgent implements WarmAgent {
+  private used = false;
+  constructor(private spec: AgentSpec) {}
+  alive(): boolean { return !this.used; }
+  ready(): boolean { return true; }
+  async request(user: string, onText: ((d: string) => void) | undefined): Promise<HarnessResult> {
+    this.used = true;
+    sent.push({ spec: this.spec, user });
+    const s = scripts.shift();
+    if (!s) throw new Error("unexpected request");
+    if (s.fail && s.failAfter === undefined) throw s.fail;
+    const text = s.text ?? "";
+    const n = s.chunk ?? 4;
+    for (let i = 0; i < text.length; i += n) {
+      if (s.failAfter !== undefined && i >= s.failAfter) throw s.fail;
+      await Promise.resolve();
+      onText?.(text.slice(i, i + n));
+    }
+    return { text, stopReason: "end_turn", model: this.spec.model, usage: { input_tokens: 100, output_tokens: 20 }, raw: null, warm: true, ...s.result };
+  }
+  kill(): void {}
 }
 
 function recorder() {
@@ -63,20 +61,26 @@ const sample = (o: Partial<CursorSample>): CursorSample => ({
   t: 1000, x: 10, y: 10, scrollX: 0, scrollY: 0, elementPath: null, dataSource: null, label: null, ...o,
 });
 const GRID_TARGETS: PointingTarget[] = [
-  { word: "this", wordStart: 0.42, algorithm: "atStart", sample: sample({ elementPath: "body > main > section#features > h2", label: "Features heading", dataSource: "web/cursor/demo/demo.html:33" }) },
-  { word: "this", wordStart: 0.42, algorithm: "dwellMode", sample: sample({ elementPath: "body > main > section#features > div.card-grid", label: "Feature card grid", dataSource: "web/cursor/demo/demo.html:34" }) },
+  { word: "this", wordStart: 0.42, algorithm: "atStart", sample: sample({ elementPath: "body > main > section#features > h2", label: "Features heading", dataSource: "demo.html:33" }) },
+  { word: "this", wordStart: 0.42, algorithm: "dwellMode", sample: sample({ elementPath: "body > main > section#features > div.card-grid", label: "Feature card grid", dataSource: "demo.html:34" }) },
 ];
 const U3 = "Why is this section built with a grid instead of flexbox?";
 
 let logs: string[] = [];
-beforeEach(() => { logs = []; setLogger((m) => logs.push(m)); });
-afterEach(() => { setClient(null); setLogger((m) => console.info(m)); });
+beforeEach(() => { logs = []; scripts = []; sent = []; setLogger((m) => logs.push(m)); setAgentFactory((s) => new FakeAgent(s)); });
+afterEach(() => { stopWarm(); setAgentFactory(null); setLogger((m) => console.info(m)); });
 
 // ── formatPointingForPrompt ────────────────────────────────────────────────
 
 describe("formatPointingForPrompt", () => {
+  it("adds each pointed element's CSS selector when asked", () => {
+    expect(formatPointingForPrompt(GRID_TARGETS, { selectors: true })).toBe(
+      `Pointing: "this" → <div> "Feature card grid" [data-source=demo.html:34]\n   selector: body > main > section#features > div.card-grid`,
+    );
+  });
+
   it("prefers dwellMode and formats tag, label and data-source", () => {
-    expect(formatPointingForPrompt(GRID_TARGETS)).toBe(`Pointing: "this" → <div> "Feature card grid" [data-source=web/cursor/demo/demo.html:34]`);
+    expect(formatPointingForPrompt(GRID_TARGETS)).toBe(`Pointing: "this" → <div> "Feature card grid" [data-source=demo.html:34]`);
   });
   it("one line per word, in spoken order; strips punctuation; handles unresolved", () => {
     const t: PointingTarget[] = [
@@ -90,62 +94,47 @@ describe("formatPointingForPrompt", () => {
   });
 });
 
-// ── routeWithHaiku ─────────────────────────────────────────────────────────
+// ── routeTurn ─────────────────────────────────────────────────────────
 
-describe("routeWithHaiku", () => {
-  const toolStart: Ev = { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "route", input: {} } };
+describe("routeTurn", () => {
   const Q_INPUT = {
     intent: "question", estimate_seconds: 12, say: "Let me check that card grid.",
-    question: "Why is the Feature card grid (web/cursor/demo/demo.html:34) built with CSS grid instead of flexbox?",
+    question: "Why is the Feature card grid (demo.html:34) built with CSS grid instead of flexbox?",
   };
 
-  function toolEvents(json: string, chunk = 5): Ev[] {
-    const evs: Ev[] = [{ type: "message_start", message: {} }, toolStart];
-    for (let i = 0; i < json.length; i += chunk) evs.push(jsonDelta(0, json.slice(i, i + chunk)));
-    evs.push({ type: "content_block_stop", index: 0 }, { type: "message_stop" });
-    return evs;
-  }
-  const finalFor = (input: unknown, o: Record<string, unknown> = {}) => ({ stop_reason: "tool_use", content: [{ type: "tool_use", name: "route", input }], usage: usage(), ...o });
-
-  /** Runs the router on a streamed JSON string and records every callback in order. */
-  async function run(json: string, opts: { mode?: "forced" | "auto"; transcript?: string; pointing?: PointingTarget[]; chunk?: number; final?: Record<string, unknown> } = {}) {
-    let parsed: unknown = null;
-    try { parsed = JSON.parse(json); } catch { /* truncated */ }
-    const { client, messagesStream } = mockClient({ messages: [fakeStream(toolEvents(json, opts.chunk ?? 4), opts.final ?? finalFor(parsed))] });
-    setClient(client);
+  /** Runs the router on a streamed JSON reply and records every callback in order. */
+  async function run(json: string, opts: { mode?: "forced" | "auto"; transcript?: string; pointing?: PointingTarget[]; chunk?: number; result?: Partial<HarnessResult>; llm?: LlmChoice } = {}) {
+    scripts.push({ text: json, chunk: opts.chunk ?? 4, ...(opts.result ? { result: opts.result } : {}) });
     const r = recorder();
     const events: string[] = [];
     const spoken: string[] = [];
     const decisions: unknown[] = [];
-    const res = await routeWithHaiku({
-      mark: r.mark, transcript: opts.transcript ?? U3, pointing: opts.pointing ?? GRID_TARGETS, mode: opts.mode ?? "forced",
+    const res = await routeTurn({
+      mark: r.mark, transcript: opts.transcript ?? U3, pointing: opts.pointing ?? GRID_TARGETS, mode: opts.mode ?? "forced", llm: opts.llm,
       onDecision: (d) => { decisions.push(d); events.push(`decision:${d.intent}`); },
       onSpokenDelta: (d, kind) => { spoken.push(d); events.push(`say:${kind}`); },
       onSpokenEnd: (kind) => events.push(`end:${kind}`),
     });
-    return { res, r, events, spoken, said: spoken.join(""), decisions, params: messagesStream.mock.calls[0]![0] as Record<string, any> };
+    return { res, r, events, spoken, said: spoken.join(""), decisions, sent: sent.at(-1)! };
   }
 
-  it("request shape: one forced `route` tool in both modes, §4 settings, cached system prompt", async () => {
+  it("request: the role's system prompt (JSON format, long-task threshold), the tier's choice, the turn in one message", async () => {
     for (const mode of ["forced", "auto"] as const) {
-      const { params: p } = await run(JSON.stringify(Q_INPUT), { mode });
-      expect(p.model).toBe("claude-haiku-5-5");
-      expect(p.output_config).toEqual({ effort: "low" });
-      expect(p.tool_choice).toEqual({ type: "tool", name: "route", disable_parallel_tool_use: true });
-      for (const k of ["temperature", "top_p", "top_k", "thinking", "fallbacks", "betas", "speed"]) expect(p).not.toHaveProperty(k);
-      expect(p.tools).toEqual([routerTool(mode)]);
-      expect(p.tools[0].eager_input_streaming).toBe(true);
-      expect(Object.keys(p.tools[0].input_schema.properties)).toEqual(["intent", "estimate_seconds", "say", "question"]);
-      expect(p.tools[0].input_schema.properties.intent.enum).toEqual(
-        mode === "forced" ? ["question", "task", "clarify"] : ["question", "task", "clarify", "answer"],
-      );
-      expect(p.system[0].cache_control).toEqual({ type: "ephemeral" });
-      expect(p.system[0].text).toContain(`${DEFAULT_LONG_TASK_SECONDS} seconds`);
-      expect(p.system[0].text).not.toContain("{{");
-      expect(p.messages.at(-1).content).toContain(U3);
-      expect(p.messages.at(-1).content).toContain("[data-source=web/cursor/demo/demo.html:34]");
-      expect(p.messages.at(-1).content).toMatch(mode === "forced" ? /Never answer yourself/ : /You may use answer/);
+      const { sent: s } = await run(JSON.stringify(Q_INPUT), { mode, llm: { provider: "codex", model: "gpt-6-luna", level: "low" } });
+      expect(s.spec).toMatchObject({ role: "router", harness: "codex", model: "gpt-6-luna", level: "low" });
+      expect(s.spec.project).toBeUndefined();
+      expect(s.spec.system).toContain("Reply with ONLY one JSON object");
+      expect(s.spec.system).toContain(`${DEFAULT_LONG_TASK_SECONDS} seconds`);
+      expect(s.spec.system).not.toContain("{{");
+      expect(s.user).toContain(U3);
+      expect(s.user).toContain("[data-source=demo.html:34]");
+      expect(s.user).toMatch(mode === "forced" ? /Never answer yourself/ : /You may use answer/);
     }
+  });
+
+  it("no choice given: Claude Code with Haiku", async () => {
+    const { sent: s } = await run(JSON.stringify(Q_INPUT));
+    expect(s.spec).toMatchObject({ harness: "claude-code", model: "claude-haiku-5-5", level: "low" });
   });
 
   it("question: decision fires before any say delta, say streams as ack, returns the delegate", async () => {
@@ -159,34 +148,19 @@ describe("routeWithHaiku", () => {
     expect(said).toBe(Q_INPUT.say);
     expect(res.delegate).toEqual({ question: Q_INPUT.question, intent: "question", estimateS: 12 });
     expect(res.decision).toEqual({ intent: "question", estimateS: 12 });
-    expect(r.names()).toEqual(["llm.request", "llm.toolCall", "llm.firstToken"]);
+    expect(r.names()).toEqual(["llm.request", "llm.firstToken", "llm.toolCall"]);
   });
 
-  it("onSpokenEnd fires at say's closing quote, before the question streams", async () => {
-    const json = JSON.stringify(Q_INPUT);
-    let fed = 0;
-    const evs = toolEvents(json, 1);
-    const stream: FakeStream = {
-      async *[Symbol.asyncIterator]() {
-        for (const e of evs) {
-          await Promise.resolve();
-          if ((e.delta as { type?: string } | undefined)?.type === "input_json_delta") fed++;
-          yield e;
-        }
-      },
-      finalMessage: () => Promise.resolve(finalFor(Q_INPUT)),
-    };
-    const { client } = mockClient({ messages: [stream] });
-    setClient(client);
-    let fedAtEnd = -1;
-    await routeWithHaiku({ mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "forced", onSpokenDelta: () => {}, onSpokenEnd: () => { fedAtEnd = fed; } });
-    expect(fedAtEnd).toBe(json.indexOf(`","question"`) + 1); // right at the closing quote
+  it("a code fence before the JSON is skipped", async () => {
+    const { res, said } = await run("```json\n" + JSON.stringify(Q_INPUT) + "\n```");
+    expect(said).toBe(Q_INPUT.say);
+    expect(res.delegate?.question).toBe(Q_INPUT.question);
   });
 
   it("long task: decision carries the estimate; the 'take a while' line is spoken as ack", async () => {
     const input = {
       intent: "task", estimate_seconds: 120, say: "On it. That'll take a couple of minutes, I'll let you know when it's done.",
-      question: "Make the Get started button (web/cursor/demo/demo.html:20) bigger.",
+      question: "Make the Get started button (demo.html:20) bigger.",
     };
     const { res, events, said, decisions } = await run(JSON.stringify(input));
     expect(decisions).toEqual([{ intent: "task", estimateS: 120 }]);
@@ -263,29 +237,14 @@ describe("routeWithHaiku", () => {
     expect(res.delegate).toEqual({ question: "Why grid?", intent: "question", estimateS: null });
   });
 
-  it("non-eager fallback: no JSON deltas, the input comes only in finalMessage()", async () => {
-    const evs: Ev[] = [{ type: "message_start", message: {} }, toolStart, { type: "content_block_stop", index: 0 }];
-    const { client } = mockClient({ messages: [fakeStream(evs, finalFor(Q_INPUT))] });
-    setClient(client);
-    const events: string[] = [];
-    const res = await routeWithHaiku({
-      mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "forced",
-      onDecision: (d) => events.push(`decision:${d.intent}:${d.estimateS}`),
-      onSpokenDelta: (d, k) => events.push(`say:${k}:${d}`),
-      onSpokenEnd: (k) => events.push(`end:${k}`),
-    });
-    expect(events).toEqual(["decision:question:12", `say:ack:${Q_INPUT.say}`, "end:ack"]);
-    expect(res.delegate?.estimateS).toBe(12);
-  });
-
   it("truncated input: delegates the raw transcript + pointing, keeping the announced decision", async () => {
     const truncated = JSON.stringify({ ...Q_INPUT, intent: "task", estimate_seconds: 90 }).slice(0, 90); // cut off mid-question
-    const { res, decisions } = await run(truncated, { final: { stop_reason: "max_tokens", content: [], usage: usage() } });
+    const { res, decisions } = await run(truncated, { result: { stopReason: "max_tokens" } });
     expect(decisions).toEqual([{ intent: "task", estimateS: 90 }]);
     expect(res.delegate?.question).toContain(U3);
     expect(res.delegate?.question).toContain("demo.html:34");
     expect(res.delegate).toMatchObject({ intent: "task", estimateS: 90 });
-    expect(logs.some((l) => l.includes("input invalid"))).toBe(true);
+    expect(logs.some((l) => l.includes("output invalid"))).toBe(true);
   });
 
   it("schema-invalid input (question intent without a question): question fallback, estimate null", async () => {
@@ -297,41 +256,44 @@ describe("routeWithHaiku", () => {
 
   it("truncated after a complete clarify: keeps the clarify (it was already spoken)", async () => {
     const json = `{"intent":"clarify","say":"Which button do you mean?","question":"x`;
-    const { res, said } = await run(json, { final: { stop_reason: "max_tokens", content: [], usage: usage() } });
+    const { res, said } = await run(json, { result: { stopReason: "max_tokens" } });
     expect(said).toBe("Which button do you mean?");
     expect(res).toMatchObject({ delegate: null, decision: { intent: "clarify", estimateS: null } });
   });
 
   it("invalid input with an empty transcript: nothing to delegate", async () => {
-    const { res, decisions } = await run(`{"say":"`, { transcript: "  ", pointing: [], final: { stop_reason: "max_tokens", content: [], usage: usage() } });
+    const { res, decisions } = await run(`{"say":"`, { transcript: "  ", pointing: [], result: { stopReason: "max_tokens" } });
     expect(res.delegate).toBeNull();
     expect(decisions).toHaveLength(1);
   });
 
-  it("history is threaded as prior messages (follow-up to a clarifying question)", async () => {
+  it("history is flattened into the one message (follow-up to a clarifying question)", async () => {
     const history = [{ turnId: "t1", approach: "pipeline" as const, user: "Make this button bigger", assistant: "Which button, the Get started one or Sign up?", detail: "" }];
-    const { client, messagesStream } = mockClient({ messages: [fakeStream(toolEvents(JSON.stringify(Q_INPUT)), finalFor(Q_INPUT))] });
-    setClient(client);
-    await routeWithHaiku({ mark: () => {}, transcript: "the first one", pointing: [], mode: "forced", history, onSpokenDelta: () => {} });
-    const msgs = (messagesStream.mock.calls[0]![0] as any).messages;
-    expect(msgs.map((m: any) => m.role)).toEqual(["user", "assistant", "user"]);
-    expect(msgs[1].content).toBe("Which button, the Get started one or Sign up?");
-    expect(msgs[2].content).toContain('"the first one"');
+    scripts.push({ text: JSON.stringify(Q_INPUT) });
+    await routeTurn({ mark: () => {}, transcript: "the first one", pointing: [], mode: "forced", history, onSpokenDelta: () => {} });
+    expect(sent[0]!.user).toMatch(/^Conversation so far \(oldest first\):\n\nUser: Make this button bigger\n\nAssistant: Which button, the Get started one or Sign up\?\n\n---\n\nThis turn:\n/);
+    expect(sent[0]!.user).toContain('"the first one"');
   });
 
-  it("refusal: throws (no fallback for Haiku)", async () => {
-    const final = { stop_reason: "refusal", stop_details: { type: "refusal", category: "cyber", explanation: null }, content: [], usage: usage() };
-    const { client } = mockClient({ messages: [fakeStream([], final)] });
-    setClient(client);
-    await expect(routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: [], mode: "forced", onSpokenDelta: () => {} }))
+  it("a harness failure before any JSON propagates", async () => {
+    const err = new Error("codex app-server exited");
+    scripts.push({ fail: err });
+    await expect(routeTurn({ mark: recorder().mark, transcript: U3, pointing: [], mode: "forced", onSpokenDelta: () => {} })).rejects.toBe(err);
+  });
+
+  it("a failure mid-stream degrades with what streamed (the announced decision stays)", async () => {
+    scripts.push({ text: JSON.stringify({ ...Q_INPUT, intent: "task", estimate_seconds: 90 }), fail: new Error("timed out"), failAfter: 60 });
+    const decisions: unknown[] = [];
+    const res = await routeTurn({ mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "forced", onDecision: (d) => decisions.push(d), onSpokenDelta: () => {} });
+    expect(decisions).toEqual([{ intent: "task", estimateS: 90 }]);
+    expect(res.delegate).toMatchObject({ intent: "task", estimateS: 90 });
+    expect(res.delegate?.question).toContain(U3);
+  });
+
+  it("refusal: throws", async () => {
+    scripts.push({ text: "", result: { stopReason: "refusal" } });
+    await expect(routeTurn({ mark: recorder().mark, transcript: U3, pointing: [], mode: "forced", onSpokenDelta: () => {} }))
       .rejects.toBeInstanceOf(ClaudeRefusalError);
-  });
-
-  it("API errors propagate", async () => {
-    const err = new Anthropic.AuthenticationError(401, undefined, "bad key", new Headers());
-    const { client } = mockClient({ messages: [fakeStream([], {}, err)] });
-    setClient(client);
-    await expect(routeWithHaiku({ mark: recorder().mark, transcript: U3, pointing: [], mode: "forced", onSpokenDelta: () => {} })).rejects.toBe(err);
   });
 
   it("validateRouterInput", () => {
@@ -344,137 +306,226 @@ describe("routeWithHaiku", () => {
   });
 });
 
+
 // ── generateFillers ────────────────────────────────────────────────────────
+
+describe("routeTurn, threads mode", () => {
+  const BRIEFS: ThreadBrief[] = [
+    { threadId: "t1", title: "the 'Get started' button", state: "running", summary: "Making it bigger with rounder corners.", onCurrentPage: true, underCursor: true },
+    { threadId: "t2", title: "the footer", state: "pending", summary: "Lighter grey links.", onCurrentPage: false, underCursor: false },
+  ];
+  async function runT(fields: Record<string, unknown>, o: { threads?: ThreadBrief[]; anchorLabel?: string; mode?: "forced" | "auto"; raw?: string } = {}) {
+    scripts.push({ text: o.raw ?? JSON.stringify(fields), chunk: 3 });
+    const events: string[] = [];
+    const decisions: unknown[] = [];
+    const res = await routeTurn({
+      mark: () => {}, transcript: "Also change the label to Start free.", pointing: GRID_TARGETS, mode: o.mode ?? "auto",
+      threads: o.threads ?? BRIEFS, anchorLabel: "anchorLabel" in o ? o.anchorLabel : "the 'Get started' button",
+      onDecision: (d) => { decisions.push(d); events.push("decision"); },
+      onSpokenDelta: () => events.push("say"),
+      onSpokenEnd: () => events.push("end"),
+    });
+    return { res, events, decisions, sent: sent.at(-1)! };
+  }
+
+  it("the system prompt is unchanged; the turn's message carries the rules, the pointed element, the threads and the format", async () => {
+    const { sent: s } = await runT({ intent: "task", estimate_seconds: 60, target: "t1", relation: "followup", tell: null, say: "Sure.", question: "q" });
+    expect(s.spec.system).not.toMatch(/thread/i);
+    expect(s.user).toContain("What the user SAYS wins over the cursor");
+    expect(s.user).toContain("Pointed element this turn: the 'Get started' button.");
+    expect(s.user).toContain("- t1: the 'Get started' button (running, under the cursor): Making it bigger with rounder corners.");
+    expect(s.user).toContain("- t2: the footer (pending, on another page): Lighter grey links.");
+    expect(s.user).toContain(`"target": "new" | "<thread id>" | "central", "relation"`);
+    expect(s.user).not.toContain("<!--");
+    // Without threads: nothing of it.
+    scripts.push({ text: JSON.stringify({ intent: "clarify", say: "Which one?" }) });
+    await routeTurn({ mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "auto", onSpokenDelta: () => {} });
+    expect(sent.at(-1)!.user).not.toMatch(/thread/i);
+    expect(sent.at(-1)!.spec.system).toBe(s.spec.system);
+  });
+
+  it("empty thread list still means threads mode", async () => {
+    const { sent: s, res } = await runT({ intent: "task", estimate_seconds: 60, target: "new", relation: null, tell: null, say: "Sure.", question: "q" }, { threads: [] });
+    expect(s.user).toContain("Threads: none yet.");
+    expect(res.decision.target).toEqual({ kind: "new" });
+  });
+
+  it("followup/correction to a thread: the decision fires once, before say, and matches the result", async () => {
+    const { res, events, decisions } = await runT({
+      intent: "task", estimate_seconds: 60, target: "t1", relation: "correction", tell: null, say: "Okay, I'll switch it to Start free instead.", question: "Change the label to Start free.",
+    });
+    const want = { intent: "task", estimateS: 60, target: { kind: "thread", threadId: "t1", relation: "correction" } };
+    expect(decisions).toEqual([want]);
+    expect(events[0]).toBe("decision");
+    expect(events.filter((e) => e === "decision")).toHaveLength(1);
+    expect(res.decision).toEqual(want);
+    expect(res.delegate).toEqual({ question: "Change the label to Start free.", intent: "task", estimateS: 60 });
+  });
+
+  it("unknown id: new when pointing, central when not", async () => {
+    const f = { intent: "question", estimate_seconds: 8, target: "t7", relation: "followup", tell: null, say: "Let me check.", question: "q" };
+    expect((await runT(f)).res.decision.target).toEqual({ kind: "new" });
+    expect((await runT(f, { anchorLabel: undefined })).res.decision.target).toEqual({ kind: "central" });
+  });
+
+  it("tell: an answer with an empty say, nothing delegated, even in delegate mode", async () => {
+    const { res, events } = await runT(
+      { intent: "answer", estimate_seconds: null, target: "t2", relation: null, tell: "t2", say: "", question: "" }, { mode: "forced" },
+    );
+    expect(res.delegate).toBeNull();
+    expect(res.decision).toEqual({ intent: "answer", estimateS: null, target: { kind: "thread", threadId: "t2", relation: "followup" }, tell: "t2" });
+    expect(events).toEqual(["decision", "end"]);
+  });
+
+  it("delegate mode: an answer without tell becomes clarify", async () => {
+    const { res } = await runT({ intent: "answer", estimate_seconds: null, target: "t1", relation: "followup", tell: null, say: "It's still working on it." }, { mode: "forced" });
+    expect(res.decision).toMatchObject({ intent: "clarify", target: { kind: "thread", threadId: "t1" } });
+    expect(res.delegate).toBeNull();
+  });
+
+  it("truncated after a tell: keeps it", async () => {
+    const { res } = await runT({}, { raw: `{"intent":"answer","estimate_seconds":null,"target":"t2","relation":null,"tell":"t2","say":"` });
+    expect(res.decision.tell).toBe("t2");
+    expect(res.delegate).toBeNull();
+  });
+
+  it("invalid output: delegates the raw transcript, keeping the target", async () => {
+    const { res } = await runT({}, { raw: `{"intent":"task","estimate_seconds":60,"target":"t1","relation":"followup","tell":null,"say":"Sure` });
+    expect(res.decision).toEqual({ intent: "task", estimateS: 60, target: { kind: "thread", threadId: "t1", relation: "followup" } });
+    expect(res.delegate?.question).toContain("Start free");
+  });
+});
+
+// ── solveInThread ──────────────────────────────────────────────────────────
+
+class FakeThread implements HarnessThread {
+  readonly id = "hthread-test";
+  readonly live = true;
+  sentMsgs: string[] = [];
+  constructor(private reply: string, private filesTouched: string[] = [], readonly choice?: LlmChoice) {}
+  async send(user: string, onText: ((d: string) => void) | undefined) {
+    this.sentMsgs.push(user);
+    for (let i = 0; i < this.reply.length; i += 5) { await Promise.resolve(); onText?.(this.reply.slice(i, i + 5)); }
+    return {
+      text: this.reply, stopReason: "end_turn", model: "claude-opus-5-5", usage: { input_tokens: 5, output_tokens: 9 }, raw: null, warm: true,
+      filesTouched: this.filesTouched, reopened: false,
+    };
+  }
+  abort(): void {}
+  close(): void {}
+}
+
+describe("solveInThread", () => {
+  const answer = "SPOKEN: I changed the label to Start free.\n\n```diff\n- Get started\n+ Start free\n```";
+
+  it("sends through the thread (no history), streams, fires the SPOKEN line, returns filesTouched", async () => {
+    const thread = new FakeThread(answer, ["demo.html"], { provider: "claude-code", model: "claude-opus-5-5" });
+    const r = recorder();
+    const lines: string[] = [];
+    const deltas: string[] = [];
+    const prompts: unknown[] = [];
+    const responses: unknown[] = [];
+    const res = await solveInThread({
+      thread, kind: "request", mark: r.mark, question: "Make the button bigger.", pointing: GRID_TARGETS, intent: "task",
+      onSpokenLine: (l) => lines.push(l), onDelta: (d) => deltas.push(d), onPrompt: (p) => prompts.push(p), onResponse: (x) => responses.push(x),
+    });
+    expect(sent).toHaveLength(0); // never the warm pool
+    expect(thread.sentMsgs).toHaveLength(1);
+    expect(thread.sentMsgs[0]).toMatch(/^Request type: TASK/);
+    expect(thread.sentMsgs[0]).toContain("selector: body > main > section#features > div.card-grid");
+    expect(res).toEqual({ text: answer, usage: { input_tokens: 5, output_tokens: 9 }, filesTouched: ["demo.html"] });
+    expect(deltas.join("")).toBe(answer);
+    expect(lines).toEqual(["I changed the label to Start free."]);
+    expect(r.names()).toEqual(["solver.request", "solver.firstToken", "solver.spokenReady", "solver.done"]);
+    expect(r.marks[0]!.meta).toMatchObject({ thread: "hthread-test", kind: "request", intent: "task", backend: "claude-code" });
+    expect(prompts[0]).toMatchObject({ target: "solver", messages: [{ role: "user", text: thread.sentMsgs[0] }], settings: { thread: "hthread-test" } });
+    expect(responses[0]).toMatchObject({ target: "solver", raw: { filesTouched: ["demo.html"], reopened: false } });
+  });
+
+  it("an unknown or other harness: narration is dropped up to the SPOKEN line", async () => {
+    const thread = new FakeThread("Let me look at the CSS first. " + answer);
+    const lines: string[] = [];
+    const res = await solveInThread({
+      thread, kind: "followup", mark: () => {}, question: "Also round the corners.", pointing: [], intent: "task",
+      onSpokenLine: (l) => lines.push(l), onDelta: () => {},
+    });
+    expect(res.text.trim()).toBe(answer);
+    expect(lines).toEqual(["I changed the label to Start free."]);
+  });
+
+  it("frames follow-ups, corrections and reconcile notes", () => {
+    const f = threadUserMessage("followup", "Also round the corners.", [], "task");
+    expect(f).toMatch(/^Follow-up on the same element/);
+    expect(f).toContain("Task: Also round the corners.");
+    expect(f).not.toContain("Pointing");
+    expect(threadUserMessage("followup", "Why blue?", GRID_TARGETS, "question", undefined, "ro")).toMatch(/Question: Why blue\?[\s\S]*Pointing context[\s\S]*Romanian/);
+    const c = threadUserMessage("correction", "Make it green instead.", [], "task");
+    expect(c).toContain("changed their mind");
+    expect(c).toContain("replaces their previous instruction: Make it green instead.");
+    expect(c).toContain("final state match");
+    const n = threadUserMessage("reconcile", "demo.css was also changed by another task meanwhile: re-read it.", GRID_TARGETS);
+    expect(n).toMatch(/^System note \(not from the user\): demo\.css/);
+    expect(n).toContain("SPOKEN line first");
+  });
+
+  it("thread errors propagate (and are reported)", async () => {
+    const thread = new FakeThread(answer);
+    thread.send = async () => { throw Object.assign(new Error("stopped"), { name: "AbortError" }); };
+    const responses: { error?: string }[] = [];
+    await expect(solveInThread({
+      thread, kind: "request", mark: () => {}, question: "q", pointing: [], onSpokenLine: () => {}, onDelta: () => {}, onResponse: (x) => responses.push(x),
+    })).rejects.toThrow("stopped");
+    expect(responses[0]!.error).toBe("stopped");
+  });
+});
 
 describe("generateFillers", () => {
   const args = { transcript: U3, question: "Why is the grid a grid?", intent: "question" as const, pointing: GRID_TARGETS };
 
-  it("forced non-streaming `progress` call, Haiku effort low, cached system prompt; trims and caps lines", async () => {
-    const msg = {
-      stop_reason: "tool_use", usage: usage(),
-      content: [{ type: "tool_use", name: "progress", input: { lines: [" Opening the stylesheet for that grid. ", "", "Now checking the design notes.", "Looking at the card layout.", "Extra line."] } }],
-    };
-    const { client, messagesCreate } = mockClient({ create: [msg] });
-    setClient(client);
+  it("parses the JSON lines; trims, drops empty ones and caps at three", async () => {
+    scripts.push({ text: JSON.stringify({ lines: [" Opening the stylesheet for that grid. ", "", "Now checking the design notes.", "Looking at the card layout.", "Extra line."] }) });
     const res = await generateFillers(args);
     expect(res.lines).toEqual(["Opening the stylesheet for that grid.", "Now checking the design notes.", "Looking at the card layout."]);
-    expect(res.usage).toEqual(msg.usage);
-    const p = messagesCreate.mock.calls[0]![0] as Record<string, any>;
-    expect(p.model).toBe("claude-haiku-5-5");
-    expect(p.output_config).toEqual({ effort: "low" });
-    expect(p).not.toHaveProperty("stream");
-    expect(p.tool_choice).toEqual({ type: "tool", name: "progress", disable_parallel_tool_use: true });
-    expect(p.tools[0].input_schema.properties.lines.type).toBe("array");
-    expect(p.system[0].cache_control).toEqual({ type: "ephemeral" });
-    expect(p.messages[0].content).toContain("Intent: question");
-    expect(p.messages[0].content).toContain("demo.html:34");
+    expect(sent[0]!.spec).toMatchObject({ role: "fillers", harness: "claude-code" });
+    expect(sent[0]!.spec.system).toContain('{"lines"');
+    expect(sent[0]!.user).toContain("Intent: question");
+    expect(sent[0]!.user).toContain("demo.html:34");
   });
 
   it("task intent is passed through", async () => {
-    const { client, messagesCreate } = mockClient({ create: [{ stop_reason: "tool_use", usage: usage(), content: [{ type: "tool_use", name: "progress", input: { lines: ["a b c d"] } }] }] });
-    setClient(client);
+    scripts.push({ text: '{"lines":["a b c d"]}' });
     await generateFillers({ ...args, intent: "task" });
-    expect((messagesCreate.mock.calls[0]![0] as any).messages[0].content).toContain("Intent: task");
+    expect(sent[0]!.user).toContain("Intent: task");
   });
 
-  it("API failure: empty lines, never throws, logs", async () => {
-    const { client } = mockClient({ create: [new Anthropic.InternalServerError(500, undefined, "boom", new Headers())] });
-    setClient(client);
+  it("harness failure: empty lines, never throws, logs", async () => {
+    scripts.push({ fail: new Error("boom") });
     await expect(generateFillers(args)).resolves.toEqual({ lines: [], usage: null });
-    expect(logs.some((l) => l.includes("fillers failed"))).toBe(true);
+    expect(logs.some((l) => l.includes("progress lines failed"))).toBe(true);
   });
 
-  it("malformed tool input: empty lines", async () => {
-    const { client } = mockClient({ create: [{ stop_reason: "tool_use", usage: usage(), content: [{ type: "tool_use", name: "progress", input: { lines: "nope" } }] }] });
-    setClient(client);
+  it("malformed output: empty lines", async () => {
+    scripts.push({ text: '{"lines": "nope"}' });
     expect((await generateFillers(args)).lines).toEqual([]);
   });
 });
 
-// ── solveWithOpus ──────────────────────────────────────────────────────────
+// ── solveTask ──────────────────────────────────────────────────────────
 
-describe("solveWithOpus", () => {
+describe("solveTask", () => {
   const answer = "SPOKEN: The cards need to line up in rows and columns, and grid does that in one rule. Flexbox stretched the last row.\n\n## Details\nSee D1 in DECISIONS.md (`demo.css` `.card-grid`).";
-  function opusEvents(text: string, chunk = 7): Ev[] {
-    const evs: Ev[] = [
-      { type: "message_start", message: {} },
-      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
-      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "" } },
-      { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
-    ];
-    for (let i = 0; i < text.length; i += chunk) evs.push(textDelta(1, text.slice(i, i + chunk)));
-    return evs;
-  }
-  const finalOk = (o: Record<string, unknown> = {}) => ({ model: "claude-opus-5-5", stop_reason: "end_turn", stop_details: null, content: [], usage: usage(), ...o });
-
-  it("request shape: beta endpoint, effort medium, refusal fallback, cached fixture context", async () => {
-    const { client, betaStream, messagesStream } = mockClient({ beta: [fakeStream(opusEvents(answer), finalOk())] });
-    setClient(client);
-    await solveWithOpus({ mark: recorder().mark, question: U3, pointing: GRID_TARGETS, fast: false, onSpokenLine: () => {}, onDelta: () => {} });
-    expect(messagesStream).not.toHaveBeenCalled();
-    const [p, reqOpts] = betaStream.mock.calls[0]! as [Record<string, any>, unknown];
-    expect(p.model).toBe("claude-opus-5-5");
-    expect(p.output_config).toEqual({ effort: "medium" });
-    expect(p.fallbacks).toBe("default");
-    expect(p.betas).toEqual(["server-side-fallback-2026-07-01"]);
-    for (const k of ["thinking", "tool_choice", "tools", "speed", "temperature"]) expect(p).not.toHaveProperty(k);
-    expect(p.system).toHaveLength(2);
-    expect(p.system[0].cache_control).toBeUndefined();
-    expect(p.system[1].cache_control).toEqual({ type: "ephemeral" });
-    expect(p.system[1].text).toContain("grid-template-columns: repeat(auto-fill, minmax(240px, 1fr))");
-    expect(p.system[1].text).toContain("## D1. Feature cards use CSS grid");
-    expect(p.messages[0].content).toContain(U3);
-    expect(p.messages[0].content).toContain("[data-source=web/cursor/demo/demo.html:34]");
-    expect(reqOpts).toBeUndefined();
-  });
-
-  it("task intent: the user message frames a change request; system blocks stay byte-identical", async () => {
-    const { client, betaStream } = mockClient({ beta: [fakeStream(opusEvents(answer), finalOk()), fakeStream(opusEvents(answer), finalOk())] });
-    setClient(client);
-    const r = recorder();
-    await solveWithOpus({ mark: r.mark, question: "Make the Get started button bigger.", pointing: GRID_TARGETS, fast: false, intent: "task", onSpokenLine: () => {}, onDelta: () => {} });
-    await solveWithOpus({ mark: recorder().mark, question: U3, pointing: GRID_TARGETS, fast: false, onSpokenLine: () => {}, onDelta: () => {} });
-    const [task, question] = betaStream.mock.calls.map((c) => c[0] as Record<string, any>);
-    expect(task!.messages.at(-1).content).toMatch(/^Request type: TASK\. This is a change request/);
-    expect(task!.messages.at(-1).content).toContain("Task: Make the Get started button bigger.");
-    expect(task!.messages.at(-1).content).toContain("[data-source=web/cursor/demo/demo.html:34]");
-    expect(question!.messages.at(-1).content).toMatch(/^Question: /);
-    expect(question!.messages.at(-1).content).not.toContain("TASK");
-    expect(JSON.stringify(task!.system)).toBe(JSON.stringify(question!.system));
-    expect(task!.system[0].text).toContain("Request type: TASK");
-    expect(r.marks.find((m) => m.name === "opus.request")?.meta).toMatchObject({ intent: "task" });
-  });
-
-  it("system blocks are byte-identical across calls (cache prefix stability)", async () => {
-    const { client, betaStream } = mockClient({ beta: [fakeStream(opusEvents(answer), finalOk()), fakeStream(opusEvents(answer), finalOk())] });
-    setClient(client);
-    const go = (q: string) => solveWithOpus({ mark: recorder().mark, question: q, pointing: [], fast: false, onSpokenLine: () => {}, onDelta: () => {} });
-    await go("a");
-    await go("b");
-    const sys = betaStream.mock.calls.map((c) => JSON.stringify((c[0] as any).system));
-    expect(sys[0]).toBe(sys[1]);
-  });
-
-  it("fast mode: speed fast + fast beta, no SDK retries", async () => {
-    const { client, betaStream } = mockClient({ beta: [fakeStream(opusEvents(answer), finalOk({ usage: usage({ speed: "fast" }) }))] });
-    setClient(client);
-    const r = recorder();
-    await solveWithOpus({ mark: r.mark, question: U3, pointing: GRID_TARGETS, fast: true, onSpokenLine: () => {}, onDelta: () => {} });
-    const [p, reqOpts] = betaStream.mock.calls[0]! as [Record<string, any>, unknown];
-    expect(p.speed).toBe("fast");
-    expect(p.betas).toEqual(["fast-mode-2026-02-01", "server-side-fallback-2026-07-01"]);
-    expect(p.fallbacks).toBe("default");
-    expect(reqOpts).toEqual({ maxRetries: 0 });
-    expect(r.marks.find((m) => m.name === "opus.done")?.meta).toMatchObject({ speed: "fast" });
-  });
+  const solve = (o: { llm?: LlmChoice; lines?: string[]; deltas?: string[]; mark?: (n: MarkName, m?: Record<string, unknown>) => void } = {}) =>
+    solveTask({
+      mark: o.mark ?? (() => {}), question: U3, pointing: GRID_TARGETS, fast: false, llm: o.llm,
+      onSpokenLine: (l) => o.lines?.push(l), onDelta: (d) => o.deltas?.push(d),
+    });
 
   it("streams deltas, fires the SPOKEN line once, emits marks in order", async () => {
-    const { client } = mockClient({ beta: [fakeStream(opusEvents(answer, 4), finalOk({ usage: usage({ cache_read_input_tokens: 4321 }) }))] });
-    setClient(client);
+    scripts.push({ text: answer, result: { usage: { input_tokens: 10, output_tokens: 50, cache_read_input_tokens: 4321 } } });
     const r = recorder();
     const deltas: string[] = [];
     const lines: string[] = [];
-    const res = await solveWithOpus({
+    const res = await solveTask({
       mark: r.mark, question: U3, pointing: GRID_TARGETS, fast: false,
       onSpokenLine: (l) => { lines.push(l); r.mark("turn.end", { probe: deltas.join("").length }); },
       onDelta: (d) => deltas.push(d),
@@ -485,81 +536,79 @@ describe("solveWithOpus", () => {
     // spoken line fired as soon as the newline streamed in, well before the end
     const probe = r.marks.find((m) => m.name === "turn.end")!.meta!.probe as number;
     expect(probe).toBeLessThan(answer.indexOf("\n") + 5);
-    expect(r.names()).toEqual(["opus.request", "opus.firstToken", "opus.spokenReady", "turn.end", "opus.done"]);
+    expect(r.names()).toEqual(["solver.request", "solver.firstToken", "solver.spokenReady", "turn.end", "solver.done"]);
     expect(r.marks.at(-1)!.meta).toMatchObject({ stopReason: "end_turn", cacheReadInputTokens: 4321 });
-    expect(logs.some((l) => l.includes("opus") && l.includes("cache_read=4321"))).toBe(true);
+    expect(logs.some((l) => l.includes("solver") && l.includes("cache_read=4321"))).toBe(true);
+  });
+
+  it("works in the project folder; Claude Code gets its own tool names in the note", async () => {
+    scripts.push({ text: answer });
+    await solve();
+    expect(sent[0]!.spec).toMatchObject({ role: "solver", harness: "claude-code", model: "claude-opus-5-5", project: PROJECT });
+    expect(sent[0]!.spec.system).toContain("with Glob, Grep and Read");
+    scripts.push({ text: answer });
+    await solve({ llm: { provider: "omp", model: "anthropic/claude-opus-5-5", level: "high", speed: "fast" } });
+    expect(sent[1]!.spec).toMatchObject({ harness: "omp", level: "high", speed: "fast", project: PROJECT });
+    expect(sent[1]!.spec.system).toContain("with your file search and read tools");
+  });
+
+  it("another harness's narration before its tools is dropped up to the SPOKEN line", async () => {
+    scripts.push({ text: "I'll check the grid's CSS and the decisions file." + answer });
+    const deltas: string[] = [];
+    const lines: string[] = [];
+    const res = await solve({ llm: { provider: "codex", model: "gpt-6.1-sol" }, deltas, lines });
+    expect(res.text).toBe(answer);
+    expect(lines[0]).toMatch(/^The cards need to line up/);
   });
 
   it("missing SPOKEN prefix falls back to the first sentence", async () => {
-    const text = "Grid lines the cards up on shared column tracks across every row. Flexbox can't do that.\n\nMore.";
-    const { client } = mockClient({ beta: [fakeStream(opusEvents(text), finalOk())] });
-    setClient(client);
+    scripts.push({ text: "Grid lines the cards up on shared column tracks across every row. Flexbox can't do that.\n\nMore." });
     const r = recorder();
     const lines: string[] = [];
-    await solveWithOpus({ mark: r.mark, question: U3, pointing: [], fast: false, onSpokenLine: (l) => lines.push(l), onDelta: () => {} });
+    await solve({ mark: r.mark, lines });
     expect(lines).toEqual(["Grid lines the cards up on shared column tracks across every row."]);
-    expect(r.marks.find((m) => m.name === "opus.spokenReady")?.meta).toEqual({ viaPrefix: false });
+    expect(r.marks.find((m) => m.name === "solver.spokenReady")?.meta).toEqual({ viaPrefix: false });
   });
 
-  it("fast mode 429 before any output falls back to standard speed", async () => {
-    const rl = new Anthropic.RateLimitError(429, undefined, "fast mode rate limited", new Headers());
-    const { client, betaStream } = mockClient({ beta: [fakeStream([], {}, rl), fakeStream(opusEvents(answer), finalOk())] });
-    setClient(client);
-    const r = recorder();
-    const res = await solveWithOpus({ mark: r.mark, question: U3, pointing: [], fast: true, onSpokenLine: () => {}, onDelta: () => {} });
-    expect(res.text).toBe(answer);
-    expect(betaStream).toHaveBeenCalledTimes(2);
-    const second = betaStream.mock.calls[1]![0] as Record<string, any>;
-    expect(second).not.toHaveProperty("speed");
-    expect(second.betas).toEqual(["server-side-fallback-2026-07-01"]);
-    expect(r.names().filter((n) => n === "opus.request")).toHaveLength(2);
-    expect(r.marks.at(-1)!.meta).toMatchObject({ fastFallback: true });
+  it("harness errors propagate", async () => {
+    const err = new Error("pi (solver) exited");
+    scripts.push({ fail: err });
+    await expect(solve()).rejects.toBe(err);
   });
 
-  it("429 in standard mode is not swallowed", async () => {
-    const rl = new Anthropic.RateLimitError(429, undefined, "rate limited", new Headers());
-    const { client } = mockClient({ beta: [fakeStream([], {}, rl)] });
-    setClient(client);
-    await expect(solveWithOpus({ mark: recorder().mark, question: U3, pointing: [], fast: false, onSpokenLine: () => {}, onDelta: () => {} })).rejects.toBe(rl);
-  });
-
-  it("records a server-side refusal fallback hop", async () => {
-    const evs: Ev[] = [
-      { type: "content_block_start", index: 0, content_block: { type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } } },
-      ...opusEvents(answer).slice(1),
-    ];
-    const { client } = mockClient({ beta: [fakeStream(evs, finalOk({ model: "claude-opus-4-8" }))] });
-    setClient(client);
-    const r = recorder();
-    await solveWithOpus({ mark: r.mark, question: U3, pointing: [], fast: false, onSpokenLine: () => {}, onDelta: () => {} });
-    expect(r.marks.at(-1)!.meta).toMatchObject({ refusalFallbacks: [{ from: "claude-opus-5-5", to: "claude-opus-4-8" }] });
-  });
-
-  it("refusal after the fallback chain: throws", async () => {
-    const final = finalOk({ stop_reason: "refusal", stop_details: { type: "refusal", category: "bio", explanation: "x" } });
-    const { client } = mockClient({ beta: [fakeStream([], final)] });
-    setClient(client);
-    const err = await solveWithOpus({ mark: recorder().mark, question: U3, pointing: [], fast: false, onSpokenLine: () => {}, onDelta: () => {} }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ClaudeRefusalError);
-    expect((err as ClaudeRefusalError).category).toBe("bio");
+  it("refusal: throws", async () => {
+    scripts.push({ text: "", result: { stopReason: "refusal" } });
+    await expect(solve()).rejects.toBeInstanceOf(ClaudeRefusalError);
   });
 
   it("stream that ends without a newline still emits the spoken line", async () => {
-    const { client } = mockClient({ beta: [fakeStream(opusEvents("SPOKEN: Short and done."), finalOk())] });
-    setClient(client);
+    scripts.push({ text: "SPOKEN: Short and done." });
     const lines: string[] = [];
-    await solveWithOpus({ mark: recorder().mark, question: U3, pointing: [], fast: false, onSpokenLine: (l) => lines.push(l), onDelta: () => {} });
+    await solve({ lines });
     expect(lines).toEqual(["Short and done."]);
+  });
+
+  it("without a project folder: no folder, no project note", async () => {
+    setProjectDir(null);
+    try {
+      scripts.push({ text: answer });
+      await solve();
+      expect(sent[0]!.spec.project).toBeUndefined();
+      expect(sent[0]!.spec.system).not.toContain("Your working directory is the project");
+    } finally {
+      setProjectDir(PROJECT);
+    }
   });
 });
 
-describe("fixture context", () => {
-  it("includes every fixture file with stable paths and line numbers", () => {
-    const ctx = loadFixtureContext();
-    for (const p of ["web/cursor/demo/demo.html", "web/cursor/demo/demo.css", "web/cursor/demo/demo.ts", "DECISIONS.md", "notes/claude-code-session-2026-03-18.md"]) {
-      expect(ctx).toContain(`<file path="${p}"`);
-    }
-    expect(ctx).toMatch(/ 34\| {7}<div class="card-grid" data-source="web\/cursor\/demo\/demo.html:34"/);
-    expect(loadFixtureContext()).toBe(ctx);
+describe("request shaping", () => {
+  it("flattens earlier turns into one user message; extracts the JSON object from fenced text", () => {
+    const msg = flattenMessages({ messages: [
+      { role: "user", content: "What is this?" }, { role: "assistant", content: "The pricing table." }, { role: "user", content: "Transcript: \"and that?\"" },
+    ] });
+    expect(msg).toBe('Conversation so far (oldest first):\n\nUser: What is this?\n\nAssistant: The pricing table.\n\n---\n\nThis turn:\nTranscript: "and that?"');
+    expect(flattenMessages({ messages: [{ role: "user", content: "only" }] })).toBe("only");
+    expect(extractJsonObject('```json\n{"intent":"clarify","say":"Which one?"}\n```')).toBe('{"intent":"clarify","say":"Which one?"}');
+    expect(extractJsonObject("no json")).toBeNull();
   });
 });

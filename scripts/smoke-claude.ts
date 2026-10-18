@@ -1,24 +1,22 @@
-// Smoke test for the Claude adapter: real API calls, prints marks with ms timings.
-// Runs the Haiku router on several transcripts (pointing, no pointing, auto mode, a two-turn follow-up)
+// Smoke test for the model tiers: real harness calls (the saved tier selection), prints marks with ms timings.
+// Runs the router on several transcripts (pointing, no pointing, auto mode, a two-turn follow-up)
 // and prints the decision, the spoken `say` and the delegated question; then fillers for the first two
-// cases and one Opus run on the change request (task intent).
-// Uses OpenRouter when OPENROUTER_API_KEY is set (else ANTHROPIC_API_KEY). Without credentials it prints SKIP and exits 0.
-// Pass --opus-cache to also run Opus twice more on the question (fast on, then standard again to show cache reads).
-import "dotenv/config";
+// cases and one the solver run on the change request (task intent).
+// Uses the tiers the Chat page last picked (~/.config/realtime-voice/llm-selection.json; Claude Code by default).
+import { loadDesktopEnv } from "../electron/settings.ts";
 import { performance } from "node:perf_hooks";
 import type { RouterMode } from "../shared/config.ts";
 import type { MarkName } from "../shared/marks.ts";
 import type { Intent, PointingTarget } from "../shared/protocol.ts";
 import type { ChatTurn } from "../server/conversation.ts";
-import {
-  claudeProvider, DEFAULT_LONG_TASK_SECONDS, generateFillers, hasClaudeCredentials, modelId, routeWithHaiku, setLogger, solveWithOpus,
-} from "../server/adapters/claude.ts";
+import { DEFAULT_LONG_TASK_SECONDS, generateFillers, routeTurn, setLogger, solveTask } from "../server/adapters/claude.ts";
+import { stopWarm } from "../server/adapters/warmPool.ts";
+import { currentSelection } from "../server/llmSelection.ts";
 
-if (!hasClaudeCredentials()) {
-  console.log("SKIP smoke:claude: set OPENROUTER_API_KEY (or ANTHROPIC_API_KEY) in .env to run against the real API.");
-  process.exit(0);
-}
-console.log(`provider: ${claudeProvider()} · models: ${modelId("claude-haiku-5-5")}, ${modelId("claude-opus-5-5")} · long task > ${DEFAULT_LONG_TASK_SECONDS} s`);
+loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
+
+const sel = currentSelection();
+console.log(`fast tier: ${sel.fast.provider} ${sel.fast.model} · smart tier: ${sel.smart.provider} ${sel.smart.model} · long task > ${DEFAULT_LONG_TASK_SECONDS} s`);
 
 const target = (word: string, wordStart: number, elementPath: string, label: string, dataSource: string): PointingTarget => ({
   word, wordStart, algorithm: "dwellMode",
@@ -61,8 +59,8 @@ async function router(c: Case): Promise<{ question: string; intent: Intent } | n
   const at = (): string => `${(performance.now() - t0).toFixed(0)} ms`;
   let spoken = "";
   let kind = "";
-  const res = await routeWithHaiku({
-    mark, transcript: c.transcript, pointing: c.pointing, mode: c.mode, history: c.history,
+  const res = await routeTurn({
+    mark, transcript: c.transcript, pointing: c.pointing, mode: c.mode, history: c.history, llm: sel.fast,
     onDecision: (d) => console.log(`  ${at().padStart(9)}  decision ${JSON.stringify(d)}`),
     onSpokenDelta: (d, k) => { spoken += d; kind = k; },
     onSpokenEnd: (k) => console.log(`  ${at().padStart(9)}  say end (${k})`),
@@ -76,16 +74,16 @@ async function router(c: Case): Promise<{ question: string; intent: Intent } | n
 async function fillers(c: Case, d: { question: string; intent: Intent }): Promise<void> {
   const t0 = performance.now();
   console.log(`\n=== fillers ${c.id} (${d.intent}) ===`);
-  const res = await generateFillers({ transcript: c.transcript, question: d.question, intent: d.intent, pointing: c.pointing });
+  const res = await generateFillers({ transcript: c.transcript, question: d.question, intent: d.intent, pointing: c.pointing, llm: sel.fast });
   console.log(`  ${(performance.now() - t0).toFixed(0)} ms`);
   for (const l of res.lines) console.log(`  - ${JSON.stringify(l)}`);
   if (!res.lines.length) console.log("  (no lines)");
 }
 
-async function opus(question: string, pointing: PointingTarget[], intent: Intent, fast: boolean, label: string, print: boolean): Promise<number> {
-  const mark = timer(`solver: Opus ${intent}, fast ${fast ? "on" : "off"}${label}`);
-  const res = await solveWithOpus({
-    mark, question, pointing, fast, intent,
+async function solver(question: string, pointing: PointingTarget[], intent: Intent, label: string, print: boolean): Promise<number> {
+  const mark = timer(`solver: ${intent}${label}`);
+  const res = await solveTask({
+    mark, question, pointing, fast: false, intent, llm: sel.smart,
     onSpokenLine: (line) => console.log(`  SPOKEN → ${JSON.stringify(line)}`),
     onDelta: () => {},
   });
@@ -104,15 +102,11 @@ try {
     if (d) await fillers(CASES.find((c) => c.id === id)!, d);
   }
   const task = delegates.get("b");
-  if (task) await opus(task.question, CASES[1]!.pointing, task.intent, false, " (change request)", true);
-  if (process.argv.includes("--opus-cache")) {
-    const q = delegates.get("a")?.question ?? CASES[0]!.transcript;
-    await opus(q, CASES[0]!.pointing, "question", false, " (run 1: writes cache)", false);
-    await opus(q, CASES[0]!.pointing, "question", true, "", false);
-    const reads = await opus(q, CASES[0]!.pointing, "question", false, " (run 2: should read cache)", false);
-    console.log(reads > 0 ? `\nOK cache hit on second standard run: ${reads} tokens read from cache.` : "\nWARN no cache read on the second standard run.");
-  }
+  if (task) await solver(task.question, CASES[1]!.pointing, task.intent, " (change request)", true);
+  stopWarm();
+  process.exit(0);
 } catch (err) {
   console.error("\nFAIL smoke:claude:", err);
+  stopWarm();
   process.exit(1);
 }

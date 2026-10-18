@@ -1,0 +1,169 @@
+:root {
+  --bg: #f4f4f5;
+  --card: #ffffff;
+  --field: #ffffff;
+  --line: #d4d4d8;
+  --text: #18181b;
+  --muted: #71717a;
+  --accent: #2563eb;
+  --ok: #16a34a;
+  --bad: #dc2626;
+  --warn: #b45309;
+  --hover: #f4f4f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #18181b; --card: #27272a; --field: #18181b; --line: #3f3f46;
+    --text: #f4f4f5; --muted: #a1a1aa; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --hover: #3f3f46;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #18181b; --card: #27272a; --field: #18181b; --line: #3f3f46;
+  --text: #f4f4f5; --muted: #a1a1aa; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --hover: #3f3f46;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 22px 22px 40px; }
+h1 { font-size: 20px; font-weight: 650; margin: 0 0 18px; }
+h2 { font-size: 13px; font-weight: 650; margin: 0 0 10px; }
+.head h2 { margin: 0; }
+section { margin: 0 0 22px; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+[hidden] { display: none !important; }
+
+/* Permissions */
+.row { display: grid; grid-template-columns: 16px 1fr; gap: 10px; padding: 14px 14px 12px; }
+.row + .row { border-top: 1px solid var(--line); }
+.dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
+.row.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.name { font-weight: 650; }
+.summary { color: var(--bad); font-weight: 600; }
+.row.ok .summary { color: var(--ok); }
+.instruction { color: var(--muted); margin: 4px 0 0; }
+
+/* Fields */
+.fields, #fields, .sub { display: grid; gap: 12px; }
+.fields { padding: 14px; }
+.sub { padding-left: 12px; border-left: 2px solid var(--line); }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+label, .tier { display: grid; gap: 4px; }
+.label { font-weight: 600; }
+.hint, .note { color: var(--muted); margin: 0; }
+.note { margin: -6px 0 10px; }
+.head + .note { margin-top: -4px; }
+.note.err, .warn { color: var(--warn); }
+input, select {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+}
+input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.secret { display: flex; gap: 6px; }
+.secret input { flex: 1; min-width: 0; }
+label.check { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+label.check input { flex: none; width: 16px; height: 16px; margin: 1px 0 0; padding: 0; accent-color: var(--accent); }
+label.check input:focus { box-shadow: none; }
+label.check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Model tiers: harness, model (typed or picked), level, speed */
+.tier-row { display: flex; gap: 6px; }
+.tier-row select { flex: 0 1 auto; width: auto; min-width: 0; }
+.tier-row .combo { flex: 1 1 180px; min-width: 0; }
+.combo { position: relative; display: flex; align-items: center; }
+.combo .llm-model { padding-right: 26px; }
+.combo-toggle { position: absolute; right: 1px; top: 1px; bottom: 1px; width: 24px; height: auto; padding: 0; border-radius: 0 8px 8px 0; background: transparent; color: var(--muted); font-size: 11px; line-height: 1; }
+.combo-toggle:hover:not(:disabled) { color: var(--text); filter: none; }
+.combo-list { position: absolute; top: calc(100% + 2px); left: 0; z-index: 100; min-width: 100%; max-height: 240px; overflow: auto; margin: 0; padding: 4px 0; list-style: none; background: var(--field); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16); }
+.combo-list li { padding: 4px 10px; color: var(--text); white-space: nowrap; cursor: pointer; }
+.combo-list li.current { color: var(--accent); }
+.combo-list li.active, .combo-list li:hover { background: var(--hover); }
+
+/* Buttons */
+button {
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--line);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { filter: brightness(0.97); }
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+button.small { margin-top: 8px; }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+#cookies-status:empty { display: none; }
+#cookies-status.error { color: var(--bad); }
+.savebar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+#save-status { color: var(--muted); min-height: 1.2em; margin: 0; }
+#save-status.error { color: var(--bad); }
+
+@media (max-width: 480px) {
+  .tier-row { flex-wrap: wrap; }
+  .pair { grid-template-columns: 1fr; }
+}
+
+/* The selected on-device model's engine loading (speechView.ts notes). */
+@keyframes engine-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .model-note .spin { animation-duration: 2.4s; } }
+
+/* Speech to text / Text to speech: a row per model (radio, name + notes, its settings, Install / Uninstall). */
+.models { padding: 4px 0; }
+.models .group { margin: 0; padding: 12px 14px 4px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.models .group + .model { border-top: 0; }
+.model { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; align-items: start; gap: 4px 12px; padding: 10px 14px; border-top: 1px solid var(--line); }
+.model.selected { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.model > input[type="radio"] { width: 16px; height: 16px; margin: 1px 0 0; padding: 0; accent-color: var(--accent); }
+.model > input[type="radio"]:focus { box-shadow: none; }
+.model > input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.model-main { display: grid; gap: 2px; min-width: 0; }
+.model-name { display: block; font-weight: 600; cursor: pointer; }
+.model-name .vendor { color: var(--muted); font-weight: 400; }
+.model > input:disabled + .model-main .model-name { cursor: default; }
+.model-notes { display: grid; gap: 2px; justify-items: start; }
+.model-notes:empty { display: none; }
+.model-note { margin: 0; padding: 0; height: auto; border-radius: 0; background: none; text-align: left; display: inline-flex; align-items: center; gap: 6px; }
+.model-note.error { color: var(--bad); }
+.model-note.warn { color: var(--warn); }
+.model-note.muted { color: var(--muted); }
+.model-note.ok { color: var(--ok); }
+.model-note.loading { color: var(--muted); }
+button.model-note { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+button.model-note:hover:not(:disabled) { filter: none; text-decoration-thickness: 2px; }
+.model-note .spin { flex: none; width: 11px; height: 11px; border: 2px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; border-radius: 50%; animation: engine-spin 0.8s linear infinite; }
+.model-params { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 250px; }
+.param { display: grid; gap: 2px; width: 74px; }
+.param.wide { width: 160px; }
+.param-label { font-size: 11px; color: var(--muted); }
+.param input, .param select { height: 28px; padding: 0 8px; }
+.model-install { display: grid; justify-items: end; gap: 4px; width: 120px; }
+.model-install button.small { margin: 0; height: 28px; }
+.install-text { color: var(--muted); font-size: 12px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+/* The install bar: filled while downloading; a sweeping highlight (no value) while a step can't be measured. */
+.model-install progress { appearance: none; width: 100%; height: 4px; border: 0; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.model-install progress::-webkit-progress-bar { background: transparent; }
+.model-install progress::-webkit-progress-value { background: var(--accent); border-radius: 2px; transition: width 0.4s ease-out; }
+.model-install progress:indeterminate { background-image: linear-gradient(90deg, transparent, var(--accent), transparent); background-size: 40% 100%; background-repeat: no-repeat; animation: install-busy 1.2s ease-in-out infinite; }
+@keyframes install-busy { from { background-position: -70% 0; } to { background-position: 170% 0; } }
+@media (prefers-reduced-motion: reduce) { .model-install progress:indeterminate { animation-duration: 3s; } }
+/* A device row without settings: Install sits in the settings column's place. */
+.model[data-group="device"]:not(:has(.model-params)) .model-install { grid-column: 3 / span 2; }
+@media (max-width: 560px) {
+  .model { grid-template-columns: 16px minmax(0, 1fr); }
+  .model-params, .model-install { grid-column: 2; justify-content: flex-start; justify-items: start; max-width: none; }
+  .install-text { text-align: left; }
+}
+/* A missing API key's field, after its note was clicked. */
+label.flash { animation: flash 1.6s ease-out; border-radius: 8px; }
+@keyframes flash { from { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 45%, transparent); } to { box-shadow: 0 0 0 4px transparent; } }
+@media (prefers-reduced-motion: reduce) { label.flash { animation-duration: 3s; } }

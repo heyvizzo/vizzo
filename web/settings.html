@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Settings</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <main>
+    <h1>Settings</h1>
+
+    <section>
+      <h2>Conversation</h2>
+      <p class="note">Changes save at once and apply from the next turn.</p>
+      <div class="card fields">
+        <label>
+          <span class="label">Router</span>
+          <span class="hint">Auto lets the fast router answer easy questions itself; forced sends every turn to the solver.</span>
+          <select id="router">
+            <option value="auto">Auto (router may answer)</option>
+            <option value="forced">Forced (always the solver)</option>
+          </select>
+        </label>
+        <label>
+          <span class="label">Language</span>
+          <span class="hint">Transcription and the pointing words (“this”, “ăsta”…). Auto detects English or Romanian. Speech-to-text models that won't follow it are flagged below.</span>
+          <select id="language"></select>
+        </label>
+        <label>
+          <span class="label">Background after</span>
+          <span class="hint">Tasks estimated longer than this run in the background; the result is read out when done.</span>
+          <select id="long-task"></select>
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <h2>Speech to text</h2>
+      <p class="note">Transcribes what you say. Scribe streams while you talk; the OpenRouter models get the whole clip on release. On-device models are free and run offline.</p>
+      <div class="card models" id="stt-models"></div>
+    </section>
+
+    <section>
+      <h2>Text to speech</h2>
+      <p class="note">Speaks the answers. On-device voices are free and run offline.</p>
+      <div class="card models" id="tts-models"></div>
+    </section>
+
+    <section>
+      <div class="head">
+        <h2>Models</h2>
+        <button type="button" id="llm-scan" title="Look again for installed harnesses and list each one's models, reasoning levels and speeds">Scan harnesses</button>
+      </div>
+      <p class="note" id="llm-scan-note" role="status">Agents are kept warm for the chosen harness, model, level and speed.</p>
+      <div class="card fields">
+        <div class="tier">
+          <span class="label">Fast</span>
+          <span class="hint">The router and the spoken progress lines, on a harness or a model API.</span>
+          <div class="tier-row">
+            <select id="llm-fast-provider" aria-label="Fast tier harness or API"></select>
+            <input id="llm-fast-model" class="llm-model" type="text" spellcheck="false" autocomplete="off" aria-label="Fast tier model" />
+            <select id="llm-fast-level" title="Reasoning level (the harness's or API's own names)" aria-label="Fast tier reasoning level" hidden></select>
+            <select id="llm-fast-speed" title="Fast is the faster, pricier tier (Codex Fast (priority), Opus fast mode)" aria-label="Fast tier speed" hidden><option value="standard">standard</option><option value="fast">fast</option></select>
+          </div>
+        </div>
+        <div class="tier">
+          <span class="label">Smart</span>
+          <span class="hint">The solver: hard questions and change requests, worked in the project folder with file tools.</span>
+          <div class="tier-row">
+            <select id="llm-smart-provider" aria-label="Smart tier harness"></select>
+            <input id="llm-smart-model" class="llm-model" type="text" spellcheck="false" autocomplete="off" aria-label="Smart tier model" />
+            <select id="llm-smart-level" title="Reasoning level (the harness's own names)" aria-label="Smart tier reasoning level" hidden></select>
+            <select id="llm-smart-speed" title="Fast is the faster, pricier tier (Codex Fast (priority), Opus fast mode)" aria-label="Smart tier speed" hidden><option value="standard">standard</option><option value="fast">fast</option></select>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Chat sidebar</h2>
+      <div class="card fields">
+        <label class="check"><input type="checkbox" id="show-cost"> <span><span class="label">Cost</span> <span class="hint">What each turn, task and thread cost, and what subscriptions and on-device speech saved.</span></span></label>
+        <label class="check"><input type="checkbox" id="show-ram"> <span><span class="label">RAM</span> <span class="hint">How much memory the app server and each thread use, the on-device speech models included.</span></span></label>
+        <label class="check"><input type="checkbox" id="debug-outlines"> <span><span class="label">Outlines</span> <span class="hint">Debugging: outline what each turn pointed at on the page (picked elements, cursor rests).</span></span></label>
+        <label class="check"><input type="checkbox" id="hover-outline"> <span><span class="label">Hover outline</span> <span class="hint">Always outline the element under the pointer, as comment mode does, so you can see what “this” will point at (handy with Always listen). Clicks still go to the page.</span></span></label>
+      </div>
+    </section>
+
+    <section>
+      <h2>Browser cookies</h2>
+      <p class="note">Copy another browser's cookies into the browser pane so sites open signed in, or clear the pane's own. The page reloads.</p>
+      <div class="card fields">
+        <div class="buttons" id="cookies">
+          <button type="button" data-browser="chrome" title="Import cookies from Chrome into the browser pane">Import from Chrome</button>
+          <button type="button" data-browser="safari" title="Import cookies from Safari into the browser pane">Import from Safari</button>
+          <button type="button" data-browser="firefox" title="Import cookies from Firefox into the browser pane">Import from Firefox</button>
+          <button type="button" class="danger" title="Delete every cookie in the browser pane (your other browsers keep theirs)">Clear cookies</button>
+        </div>
+        <p class="hint" id="cookies-status" role="status"></p>
+      </div>
+    </section>
+
+    <section>
+      <div class="head">
+        <h2>Permissions</h2>
+        <button type="button" id="refresh" title="Re-check the app's macOS permissions">Check again</button>
+      </div>
+      <div id="permissions" class="card"></div>
+    </section>
+
+    <section>
+      <h2>API keys</h2>
+      <p class="note">They stay on this Mac, saved encrypted with a key in your macOS Keychain, and are sent only to the voice server.</p>
+      <form id="keys" class="card" autocomplete="off">
+        <div class="fields">
+          <div id="fields"></div>
+        </div>
+      </form>
+      <div class="savebar">
+        <button type="submit" form="keys" class="primary" id="save" title="Save the API keys">Save</button>
+        <p id="save-status"></p>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/settings/main.ts"></script>
+</body>
+</html>

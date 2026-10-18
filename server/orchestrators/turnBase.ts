@@ -1,7 +1,9 @@
 import { isMarkedSegment } from "../../shared/marks.ts";
-// Shared per-turn plumbing for the A/B/C orchestrators: ordered audio segments, text accumulation,
+// Shared per-turn plumbing for the orchestrators: ordered audio segments, text accumulation,
 // socket cleanup, the overall turn timeout and "finish exactly once" semantics.
 import type { MarkName } from "../../shared/marks.ts";
+import { browserUrl } from "../browserPage.ts";
+import { formatElementDetails, referencedElements } from "../../shared/elementDetails.ts";
 import { annotateTranscript, computeRests, detectLanguage, formatPageContext, formatRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
 import type { CursorRest, PointingTarget, Segment, Usage, Word } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
@@ -110,7 +112,7 @@ export class TurnBase {
   readonly output: SegmentOutput;
   readonly done: Promise<TurnResult>;
   voiceText = "";
-  opusText = "";
+  solverText = "";
   transcript = "";
   pointing: PointingTarget[] = [];
   /** Extra meta merged into specific marks (e.g. `cold` on llm.request). */
@@ -137,16 +139,17 @@ export class TurnBase {
 
   get isFinished(): boolean { return this.finished; }
 
-  voice(delta: string): void {
+  /** `line`: the delta starts a new spoken line (see the voice.text message). */
+  voice(delta: string, line = false): void {
     if (this.finished || !delta) return;
     this.voiceText += delta;
-    this.ctx.send({ type: "voice.text", turnId: this.ctx.turnId, delta });
+    this.ctx.send({ type: "voice.text", turnId: this.ctx.turnId, delta, ...(line ? { line: true as const } : {}) });
   }
 
-  opus(delta: string): void {
+  solver(delta: string): void {
     if (this.finished || !delta) return;
-    this.opusText += delta;
-    this.ctx.send({ type: "opus.text", turnId: this.ctx.turnId, delta });
+    this.solverText += delta;
+    this.ctx.send({ type: "solver.text", turnId: this.ctx.turnId, delta });
   }
 
   sttPartial(text: string): void {
@@ -193,14 +196,18 @@ export class TurnBase {
   }
 
   /**
-   * Extra pointing context as LLM lines ("" if none): where the cursor rested (@n), then clicks and
-   * highlighted text. Call after resolvePointing for word alignment.
+   * Extra page context as LLM lines ("" if none): the browser's URL, where the cursor rested (@n), clicks and
+   * highlighted text, then the design details of the elements referenced ([n], [@n]): one compact line each, or
+   * everything (selector, DOM path, bounds, computed styles, HTML) with `elements: "full"` (the solver).
+   * Call after resolvePointing for word alignment.
    */
-  pageContext(words: Word[] = this.words): string {
+  pageContext(words: Word[] = this.words, opts: { elements?: "compact" | "full" } = {}): string {
     const tAudioStart = this.ctx.tAudioStart();
     const ev = this.ctx.pageEvents?.();
-    const lines = [formatRests(this.rests, words, tAudioStart)];
+    const page = this.ctx.pageUrl?.() ?? browserUrl();
+    const lines = [page ? `Browser: the user is on ${JSON.stringify(page)} (the page to the left of the chat).` : "", formatRests(this.rests, words, tAudioStart)];
     if (ev && (ev.clicks.length || ev.preselected || ev.highlights.length)) lines.push(formatPageContext(ev, words, tAudioStart, this.pointing));
+    lines.push(formatElementDetails(referencedElements(this.pointing, this.rests, this.ctx.cursorSamples()), opts.elements === "full"));
     return lines.filter(Boolean).join("\n");
   }
 
@@ -262,7 +269,7 @@ export class TurnBase {
     let usage: Usage = {};
     try { usage = this.opts.collectUsage(); } catch (e) { console.error("[orchestrator] usage failed", e); }
     this.resolveDone({
-      transcript: this.transcript, pointing: this.pointing, voiceText: this.voiceText, opusText: this.opusText,
+      transcript: this.transcript, pointing: this.pointing, voiceText: this.voiceText, solverText: this.solverText,
       usage, ...extra, ...(this.errors.length ? { error: this.errors.join("; ") } : {}),
     });
   }
