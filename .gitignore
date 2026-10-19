@@ -17,3 +17,6 @@ dist-native/
 # Python bytecode (tools/localtts)
 __pycache__/
 *.pyc
+
+# The public site has its own git repo
+website/
