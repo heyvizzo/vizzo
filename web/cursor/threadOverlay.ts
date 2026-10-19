@@ -11,8 +11,8 @@ import { stripVoiceCues } from "../../shared/cues.ts";
 import type { CursorSample } from "../../shared/protocol.ts";
 import type { FormHub, InlineForm } from "./inlineForm.ts";
 import type { BubbleConfirm, ConvoEntry, OrbPos, OrbState, PageConfirmAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
-import { mountPulseOrb, PULSE_ORB_CSS, type PulseState } from "./pulseOrb.ts";
-import { ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
+import { mountPlasmaOrb, PLASMA_ORB_CSS, type PlasmaState } from "./plasmaOrb.ts";
+import { ORB_ASKING_COLORS, ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
 
 const MARKER = 20;
 /** Markers of threads on one element sit side by side, this far apart. */
@@ -37,15 +37,15 @@ const ICON_TRASH = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden=
 const ORB = 78;
 const ORB_BOTTOM = 25;
 /**
- * The Pulse Orb drawn in it (web/cursor/pulseOrb.ts), bigger than the button (its core is about 42% of it, the rings
- * reach out to its edge), one motion per state: slow rings when idle, quick inward rings while listening, quick outward
- * rings while anything is being read out, a spinning arc while the conversation or any thread is working, in the logo's
- * colours (colors.ts ORB_COLORS); idle in amber when the last reply asked you something, and idle in rose when the
- * last turn failed (after blinking for ORB_SHAKE_MS).
+ * The Plasma Orb drawn in it (web/cursor/plasmaOrb.ts; pulseOrb.ts and particlesOrb.ts are the earlier ones), a little
+ * smaller than the button so its glow spreads round it, one motion per state: slow plasma when idle, a swelling glow
+ * while listening, fast churning while anything is being read out, a beat while the conversation or any thread is
+ * working, in the logo's colours (colors.ts ORB_COLORS); idle in cyan when the last reply asked you something (ORB_ASKING_COLORS), and
+ * idle in rose when the last turn failed (after shaking and flaring rose for ORB_SHAKE_MS).
  */
-const ORB_ART = 150;
+const ORB_ART = 70;
 const ORB_SHAKE_MS = 1200;
-const ORB_LOOKS: Record<OrbState, { state: PulseState; colors: StateColor }> = {
+const ORB_LOOKS: Record<OrbState, { state: PlasmaState; colors: StateColor }> = {
   idle: { state: "idle", colors: "working" },
   listening: { state: "listening", colors: "working" },
   speaking: { state: "speaking", colors: "working" },
@@ -80,7 +80,7 @@ export const THREAD_CSS = `
 /* The canvas is bigger than the button (the sphere fills about 60% of it): centred on it, overflowing evenly. */
 /* On a light page the palette deepens (colors.ts STATE_COLORS_ON_LIGHT). */
 .th-layer[data-tone="light"] { ${cssVars(stateColorVars("light"))} }
-.th-orb .po { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+.th-orb .pl { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; }
 .th-orb:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .th-orb.dragging { cursor: grabbing; }
 /* Waiting on you (amber): a small bounce now and then, the orb and markers alike (on the orb's button, so its canvas keeps its centring). */
@@ -157,7 +157,7 @@ export const THREAD_CSS = `
 .th-ask .th-no svg { position: absolute; left: -1px; top: -1px; width: calc(100% + 2px); height: calc(100% + 2px); overflow: visible; pointer-events: none; }
 .th-ask .th-no rect { x: 0.75px; y: 0.75px; width: calc(100% - 1.5px); height: calc(100% - 1.5px); rx: 6px; fill: none; stroke: var(--ui-accent); stroke-width: 1.5px; stroke-dasharray: 100; stroke-dashoffset: 100; animation: th-outline linear forwards; }
 @keyframes th-outline { to { stroke-dashoffset: 0; } }
-${PULSE_ORB_CSS}`;
+${PLASMA_ORB_CSS}`;
 
 export interface ThreadOverlayOpts {
   /** Positioned at document (0,0), inside the shadow root. */
@@ -935,7 +935,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
 
   // ── the orb ──
 
-  const orbArt = mountPulseOrb({ size: ORB_ART });
+  const orbArt = mountPlasmaOrb({ size: ORB_ART });
   orb.btn.append(orbArt.el);
 
   /** The state the orb was last drawn in, and the timer ending a failure's shake. */
@@ -946,14 +946,14 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     if (orb.state !== orbDrawn) {
       const look = ORB_LOOKS[orb.state];
       if (orbShake) { clearTimeout(orbShake); orbShake = null; }
-      // A failure blinks (the orb's error look), then settles to idle in the failed colours.
+      // A failure shakes and flares (the orb's error look), then settles to idle in the failed colours.
       if (orb.state === "failed") {
         orbArt.setState("error");
         orbShake = setTimeout(() => { orbShake = null; orbArt.setState(look.state); }, ORB_SHAKE_MS);
       } else orbArt.setState(look.state);
-      // Its own looks are the logo's six colours; asking and failed keep their state's gradient.
+      // Its own looks are the logo's six colours, asking is cyan (amber is for the markers); failed keeps its rose.
       const colors = stateColors(tone ?? "light")[look.colors];
-      orbArt.setColors(look.colors === "working" ? ORB_COLORS : [colors.from, colors.to]);
+      orbArt.setColors(look.colors === "working" ? ORB_COLORS : look.colors === "asking" ? ORB_ASKING_COLORS : [colors.from, colors.to]);
       orbDrawn = orb.state;
     }
     orb.btn.dataset.state = orb.state;

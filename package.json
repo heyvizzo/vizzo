@@ -1,8 +1,12 @@
 {
   "name": "vizzo",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Talk to a coding agent about the page you are looking at.",
-  "author": { "name": "Vizzo", "email": "hello@heyvizzo.com", "url": "https://heyvizzo.com" },
+  "author": {
+    "name": "Vizzo",
+    "email": "hello@heyvizzo.com",
+    "url": "https://heyvizzo.com"
+  },
   "homepage": "https://heyvizzo.com",
   "private": true,
   "main": "dist-electron/main.cjs",
@@ -118,5 +122,8 @@
         "height": 400
       }
     }
+  },
+  "dependencies": {
+    "@paper-design/shaders": "0.0.81"
   }
 }

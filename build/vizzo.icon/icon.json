@@ -2,19 +2,28 @@
   "features" : [
     "refractivity"
   ],
-  "fill" : "automatic",
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:0.47684,0.50481,1.00000,1.00000",
+      "srgb:0.00486,0.09609,0.57499,1.00000"
+    ]
+  },
   "groups" : [
     {
       "layers" : [
         {
+          "blend-mode" : "normal",
+          "fill" : "system-light",
+          "glass" : true,
           "hidden" : true,
           "image-name" : "vizzo.svg",
           "name" : "vizzo",
+          "opacity" : 1,
           "position" : {
-            "scale" : 0.9,
+            "scale" : 1,
             "translation-in-points" : [
-              0.4388747472343084,
-              -38
+              0,
+              -26
             ]
           }
         }
@@ -38,11 +47,30 @@
       "blur-material" : null,
       "layers" : [
         {
+          "blend-mode" : "normal",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.39590,0.78837,0.33314,1.00000",
+              "srgb:0.00000,0.99144,1.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 1
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0
+              }
+            }
+          },
+          "glass" : true,
           "hidden" : false,
           "image-name" : "v.svg",
           "name" : "v",
+          "opacity" : 1,
           "position" : {
-            "scale" : 2.8,
+            "scale" : 3.3,
             "translation-in-points" : [
               0,
               0
@@ -94,10 +122,20 @@
       "blur-material" : null,
       "layers" : [
         {
+          "blend-mode" : "lighten",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.92531,0.92862,1.00000,1.00000",
+              "display-p3:0.76801,0.20539,0.77830,1.00000"
+            ]
+          },
+          "glass" : false,
+          "hidden" : true,
           "image-name" : "Dotted Orb with Colorful Icon Accents.png 3.svg",
           "name" : "Dotted Orb with Colorful Icon Accents.png 3",
+          "opacity" : 0.53,
           "position" : {
-            "scale" : 0.85,
+            "scale" : 1.16,
             "translation-in-points" : [
               0,
               0

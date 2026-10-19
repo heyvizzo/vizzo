@@ -7,6 +7,7 @@
 // rings, light to deep (3–5). The arc sweeps through them all. Two colours spread across the six.
 
 import { ORB_COLORS } from "./colors.ts";
+import { resample } from "./orbColor.ts";
 
 export type PulseState = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "error" | "disabled";
 
@@ -36,35 +37,8 @@ const SETTLE_RATE = 5;
 const ERROR_RATE = 10;
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 
-// ── colours ──
-
-type Rgb = [number, number, number];
-const hexToRgb = (hex: string): Rgb => {
-  const clean = hex.replace("#", "");
-  const full = clean.length === 3 ? [...clean].map((c) => c + c).join("") : clean;
-  const n = Number.parseInt(full, 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-};
-const toLinear = (c: number): number => {
-  const v = c / 255;
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-};
-const toSrgb = (v: number): number => Math.min(255, Math.max(0, (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055) * 255));
-const mixRgb = (a: Rgb, b: Rgb, t: number): Rgb =>
-  [toSrgb(toLinear(a[0]) + (toLinear(b[0]) - toLinear(a[0])) * t), toSrgb(toLinear(a[1]) + (toLinear(b[1]) - toLinear(a[1])) * t), toSrgb(toLinear(a[2]) + (toLinear(b[2]) - toLinear(a[2])) * t)];
-const toHex = (c: Rgb): string => `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
-
 /** Any number of stops (at least one) as the six the orb uses, evenly along the gradient they make. */
-export function sixStops(colors: readonly string[]): string[] {
-  if (colors.length === STOPS) return [...colors];
-  const rgb = colors.length > 0 ? colors.map(hexToRgb) : [[255, 255, 255] as Rgb];
-  if (rgb.length === 1) return Array<string>(STOPS).fill(toHex(rgb[0]!));
-  return Array.from({ length: STOPS }, (_, i) => {
-    const x = (i / (STOPS - 1)) * (rgb.length - 1);
-    const j = Math.min(rgb.length - 2, Math.floor(x));
-    return toHex(mixRgb(rgb[j]!, rgb[j + 1]!, x - j));
-  });
-}
+export const sixStops = (colors: readonly string[]): string[] => resample(colors.length > 0 ? colors : ["#ffffff"], STOPS);
 
 // ── level: how lively each state is, blended as the orb moves between them ──
 

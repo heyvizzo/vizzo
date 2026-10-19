@@ -42,10 +42,15 @@ export const STATE_COLORS_ON_LIGHT: Record<StateColor, { from: string; to: strin
   queued: { from: "#a1a1aa", to: "#71717a" },
 };
 /**
- * The conversation orb's own colours when it isn't asking or failed: all six of the logo's, in the Pulse Orb's role
- * order (pulseOrb.ts): the core in the V's cyan, teal and green, the glow and rings in the field's blues.
+ * The conversation orb's own colours when it isn't asking or failed: all six of the logo's, the V's cyan, teal and
+ * green, then the field's blues (in the Pulse Orb, pulseOrb.ts, that's its core then its glow and rings).
  */
 export const ORB_COLORS: readonly string[] = [LOGO.v.from, LOGO.v.mid, LOGO.v.to, LOGO.field.from, LOGO.field.mid, LOGO.field.to];
+/**
+ * The conversation orb's colours while its last reply is asking you something: the V's cyan, light to deep, so it
+ * stands apart from its usual blues. Only the orb; asking thread markers stay amber (STATE_COLORS.asking).
+ */
+export const ORB_ASKING_COLORS: readonly string[] = ["#a6fffe", LOGO.v.from, "#00c9d8", LOGO.v.mid, "#0a8fa8"];
 /** What's behind a marker: a light or a dark background. */
 export type Tone = "light" | "dark";
 export const stateColors = (tone: Tone): Record<StateColor, { from: string; to: string }> => (tone === "light" ? STATE_COLORS_ON_LIGHT : STATE_COLORS);
