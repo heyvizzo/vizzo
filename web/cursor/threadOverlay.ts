@@ -10,8 +10,9 @@ import { displayTitle, type ThreadAnchor, type ThreadInfo, type ThreadMessage, t
 import { stripVoiceCues } from "../../shared/cues.ts";
 import type { CursorSample } from "../../shared/protocol.ts";
 import type { FormHub, InlineForm } from "./inlineForm.ts";
-import type { ConvoEntry, OrbPos, OrbState, PageOrbAction, PageThreadAction } from "./pageBridge.ts";
-import { mountOrb } from "@yogesharc/thinking-orbs/vanilla";
+import type { BubbleConfirm, ConvoEntry, OrbPos, OrbState, PageConfirmAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
+import { mountPulseOrb, PULSE_ORB_CSS, type PulseState } from "./pulseOrb.ts";
+import { ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
 
 const MARKER = 20;
 /** Markers of threads on one element sit side by side, this far apart. */
@@ -33,20 +34,27 @@ const CHECK = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'
 /** The panel header's delete button. */
 const ICON_TRASH = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.5 4.5h11M6.5 4.5V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M4 4.5l.7 8.6a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.6M6.8 7v4.5M9.2 7v4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 /** The conversation orb, and how far its bottom edge sits above the viewport's bottom before it's dragged. */
-const ORB = 56;
+const ORB = 78;
 const ORB_BOTTOM = 25;
 /**
- * The thinking orb drawn inside it (@yogesharc/thinking-orbs), one look per state: a plain spin when idle, a pulse
- * like a recording light while listening, a wandering spark while working, and blinking in amber when the last reply
- * asked you something (its bubble then needs no amber border of its own).
+ * The Pulse Orb drawn in it (web/cursor/pulseOrb.ts), bigger than the button (its core is about 42% of it, the rings
+ * reach out to its edge), one motion per state: slow rings when idle, quick inward rings while listening, quick outward
+ * rings while anything is being read out, a spinning arc while the conversation or any thread is working, in the logo's
+ * colours (colors.ts ORB_COLORS); idle in amber when the last reply asked you something, and idle in rose when the
+ * last turn failed (after blinking for ORB_SHAKE_MS).
  */
-const ORB_DOTS = 52;
-const ORB_LOOKS = {
-  idle: { state: "idle" },
-  listening: { state: "using", variant: "record" },
-  running: { state: "reasoning" },
-  asking: { state: "idle", variant: "blink" },
-} as const satisfies Record<OrbState, Parameters<typeof mountOrb>[1]>;
+const ORB_ART = 150;
+const ORB_SHAKE_MS = 1200;
+const ORB_LOOKS: Record<OrbState, { state: PulseState; colors: StateColor }> = {
+  idle: { state: "idle", colors: "working" },
+  listening: { state: "listening", colors: "working" },
+  speaking: { state: "speaking", colors: "working" },
+  running: { state: "thinking", colors: "working" },
+  asking: { state: "idle", colors: "asking" },
+  failed: { state: "idle", colors: "failed" },
+};
+/** A marker's look: its thread's state, or "asking" when the thread's last reply asked you something. */
+const markerLook = (t: ThreadInfo): string => (t.awaitingReply && (t.state === "idle" || t.state === "pending") ? "asking" : t.state);
 /** The orb is kept this far inside the viewport. */
 const ORB_MARGIN = 4;
 /** A press on the orb that moves more than this is a drag, not a click. */
@@ -54,81 +62,102 @@ const DRAG_SLOP = 4;
 const PANEL_WIDTH = 340;
 const PANEL_GAP = 8;
 
+const cssVars = (vars: Record<string, string>): string => Object.entries(vars).map(([k, v]) => `${k}: ${v};`).join(" ");
+
 export const THREAD_CSS = `
-.th-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 1; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: #e6e8ee; }
-.th-marker { position: absolute; width: ${MARKER}px; height: ${MARKER}px; margin: -${MARKER / 2}px 0 0 -${MARKER / 2}px; padding: 0; box-sizing: border-box; border-radius: 50%; border: 3px solid #fff; background: #6366f1; box-shadow: 0 0 0 1px #000; cursor: pointer; pointer-events: auto; z-index: 1; }
-.th-marker:focus-visible { outline: 2px solid #6ea8fe; outline-offset: 2px; }
-.th-marker[data-state="running"] { animation: th-ring 1.4s ease-out infinite; }
-.th-marker[data-state="idle"], .th-marker[data-state="pending"] { background: #22c55e ${CHECK} center / 10px no-repeat; }
-.th-marker[data-state="failed"] { background: #ef4444; }
-.th-marker[data-state="queued"] { background: #a78bfa; opacity: .55; }
+.th-layer { ${cssVars(stateColorVars("dark"))} --th-edge: 0 0 0 1.5px rgba(255,255,255,.85), 0 1px 4px rgba(0,0,0,.45); position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 1; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: var(--ui-text); }
+/* Markers are small orbs in the shared palette (colors.ts): a white hairline and a soft shadow keep them clear on any page. */
+.th-marker { position: absolute; width: ${MARKER}px; height: ${MARKER}px; margin: -${MARKER / 2}px 0 0 -${MARKER / 2}px; padding: 0; box-sizing: border-box; border-radius: 50%; border: 0; background: var(--st-working-fill); box-shadow: var(--th-edge); cursor: pointer; pointer-events: auto; z-index: 1; }
+.th-marker:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
+.th-marker[data-state="running"] { animation: th-beat var(--st-beat) ease-in-out infinite; }
+.th-marker[data-state="idle"], .th-marker[data-state="pending"] { background: ${CHECK} center / 10px no-repeat, var(--st-done-fill); }
+.th-marker[data-state="asking"] { background: var(--st-asking-fill); }
+.th-marker[data-state="failed"] { background: var(--st-failed-fill); }
+.th-marker[data-state="queued"] { background: var(--st-queued-fill); opacity: .55; }
 .th-marker.faded { opacity: .5; }
-.th-marker.open { box-shadow: 0 0 0 1px #000, 0 0 0 4px rgba(110,168,254,.6); }
-.th-orb { position: fixed; width: ${ORB}px; height: ${ORB}px; margin: -${ORB / 2}px 0 0 -${ORB / 2}px; padding: 0; display: grid; place-items: center; box-sizing: border-box; border-radius: 50%; border: 0; background: none; color: #6366f1; cursor: grab; pointer-events: auto; touch-action: none; z-index: 1; }
-.th-orb svg { display: block; pointer-events: none; }
-.th-orb:focus-visible { outline: 2px solid #6ea8fe; outline-offset: 2px; }
+.th-marker.open { box-shadow: var(--th-edge), var(--st-open-ring); }
+.th-orb { position: fixed; width: ${ORB}px; height: ${ORB}px; margin: -${ORB / 2}px 0 0 -${ORB / 2}px; padding: 0; display: grid; place-items: center; box-sizing: border-box; border-radius: 50%; border: 0; background: none; cursor: grab; pointer-events: auto; touch-action: none; z-index: 1; }
+/* The canvas is bigger than the button (the sphere fills about 60% of it): centred on it, overflowing evenly. */
+/* On a light page the palette deepens (colors.ts STATE_COLORS_ON_LIGHT). */
+.th-layer[data-tone="light"] { ${cssVars(stateColorVars("light"))} }
+.th-orb .po { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+.th-orb:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .th-orb.dragging { cursor: grabbing; }
-.th-orb[data-state="listening"] { color: #ef4444; }
-.th-orb[data-state="asking"] { color: #f59e0b; }
-.th-orb.open { box-shadow: 0 0 0 3px rgba(110,168,254,.6); }
+/* Waiting on you (amber): a small bounce now and then, the orb and markers alike (on the orb's button, so its canvas keeps its centring). */
+.th-orb[data-state="asking"], .th-marker[data-state="asking"] { animation: th-bounce 1.8s ease-in-out infinite; }
+.th-marker[data-state="asking"] { --hop: 4px; }
+@keyframes th-bounce { 0%, 50%, 100% { transform: none; } 15% { transform: translateY(calc(-1 * var(--hop, 6px))); } 30% { transform: none; } 40% { transform: translateY(calc(-1 * var(--hop, 6px) / 3)); } }
 .th-bubble.fixed, .th-panel.fixed { position: fixed; }
-.th-prov { position: absolute; width: ${MARKER}px; height: ${MARKER}px; margin: -${MARKER / 2}px 0 0 -${MARKER / 2}px; box-sizing: border-box; border-radius: 50%; border: 3px solid #fff; background: #a3a3a3; box-shadow: 0 0 0 1px #000; animation: th-pulse 1.2s ease-in-out infinite; }
-@keyframes th-ring { 0% { box-shadow: 0 0 0 1px #000, 0 0 0 0 rgba(99,102,241,.6); } 100% { box-shadow: 0 0 0 1px #000, 0 0 0 12px rgba(99,102,241,0); } }
-@keyframes th-pulse { 50% { opacity: .35; } }
+/* Drawn at release until the turn's thread is known: still the moment you spoke, so the listening ripple. */
+.th-prov { position: absolute; width: ${MARKER}px; height: ${MARKER}px; margin: -${MARKER / 2}px 0 0 -${MARKER / 2}px; box-sizing: border-box; border-radius: 50%; background: var(--st-working-fill); box-shadow: var(--th-edge); animation: th-ripple 1s ease-out infinite; }
+/* Working breathes at the orb's thinking beat; listening ripples outward, faster. */
+@keyframes th-beat { 50% { transform: scale(.82); } }
+@keyframes th-ripple { 0% { box-shadow: var(--th-edge), 0 0 0 0 color-mix(in srgb, var(--st-working-to) 60%, transparent); } 100% { box-shadow: var(--th-edge), 0 0 0 9px transparent; } }
 @media (prefers-reduced-motion: reduce) {
-  .th-marker[data-state="running"] { animation: none; box-shadow: 0 0 0 1px #000, 0 0 0 3px rgba(99,102,241,.45); }
+  .th-marker[data-state="running"] { animation: none; }
+  .th-orb[data-state="asking"], .th-marker[data-state="asking"] { animation: none; }
   .th-prov { animation: none; }
   .th-bubble, .th-bubble.collapsed { transition: opacity .15s linear; }
   .th-bubble.collapsed { --s: 1; }
 }
 /* Collapsed, the bubble shrinks into its marker: scaled about its tail's tip, which sits on the marker. */
-.th-bubble { --s: 1; position: absolute; transform: translate(-100%, -100%) scale(var(--s)); transform-origin: calc(100% - var(--tail-right, 11px) - ${TAIL / 2}px) calc(100% + ${TAIL_REACH}px); max-width: 280px; width: max-content; padding: 6px 10px; box-sizing: border-box; border-radius: 12px; background: #1f232c; border: 1px solid #3b4a6b; box-shadow: 0 2px 10px rgba(0,0,0,.35); white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: auto; cursor: default; transition: transform .22s cubic-bezier(.2,.9,.3,1.15), opacity .18s linear; z-index: 2; }
+.th-bubble { --s: 1; position: absolute; transform: translate(-100%, -100%) scale(var(--s)); transform-origin: calc(100% - var(--tail-right, 11px) - ${TAIL / 2}px) calc(100% + ${TAIL_REACH}px); max-width: 280px; width: max-content; padding: 6px 10px; box-sizing: border-box; border-radius: 12px; background: var(--ui-raised); border: 1px solid var(--ui-accent-line); box-shadow: 0 2px 10px var(--ui-shadow); white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: auto; cursor: default; transition: transform .22s cubic-bezier(.2,.9,.3,1.15), opacity .18s linear; z-index: 2; }
 .th-bubble.collapsed { --s: 0; opacity: 0; pointer-events: none; transition: transform .2s cubic-bezier(.5,0,.75,0), opacity .2s linear; }
-.th-bubble::after, .th-panel::before { content: ""; position: absolute; right: var(--tail-right, 11px); width: ${TAIL}px; height: ${TAIL}px; box-sizing: border-box; background: inherit; border: solid #3b4a6b; transform: rotate(45deg); }
+.th-bubble::after, .th-panel::before { content: ""; position: absolute; right: var(--tail-right, 11px); width: ${TAIL}px; height: ${TAIL}px; box-sizing: border-box; background: inherit; border: solid var(--ui-accent-line); transform: rotate(45deg); }
 .th-bubble::after { bottom: -${TAIL / 2 + 1}px; border-width: 0 1px 1px 0; }
 .th-bubble[data-side="below"] { transform: translateX(-100%) scale(var(--s)); transform-origin: calc(100% - var(--tail-right, 11px) - ${TAIL / 2}px) -${TAIL_REACH}px; }
 .th-bubble[data-side="below"]::after { bottom: auto; top: -${TAIL / 2 + 1}px; border-width: 1px 0 0 1px; }
-.th-bubble.reply { border-color: #b7791f; }
-.th-bubble.reply::after { border-color: #b7791f; }
-.th-panel { position: absolute; width: ${PANEL_WIDTH}px; max-height: 420px; display: flex; flex-direction: column; box-sizing: border-box; background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45); pointer-events: auto; z-index: 3; text-align: left; }
-.th-panel::before { border-color: #2a2f3a; top: -${TAIL / 2 + 1}px; border-width: 1px 0 0 1px; }
+.th-panel { position: absolute; width: ${PANEL_WIDTH}px; max-height: 420px; display: flex; flex-direction: column; box-sizing: border-box; background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 10px; box-shadow: 0 8px 28px var(--ui-shadow); pointer-events: auto; z-index: 3; text-align: left; }
+.th-panel::before { border-color: var(--ui-line); top: -${TAIL / 2 + 1}px; border-width: 1px 0 0 1px; }
 .th-panel[data-side="above"]::before { top: auto; bottom: -${TAIL / 2 + 1}px; border-width: 0 1px 1px 0; }
 .th-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
 .th-title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.th-state { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid #2a2f3a; color: #8a93a6; }
-.th-state[data-state="running"] { color: #a5b4fc; border-color: #44396b; }
-.th-state[data-state="pending"] { color: #4ade80; border-color: #1f4d33; }
-.th-state[data-state="failed"] { color: #f87171; border-color: #5b2424; }
-.th-state[data-state="idle"] { color: #4ade80; border-color: #1f4d33; }
-.th-state[data-state="queued"] { color: #c4b5fd; border-color: #3f3566; }
-.th-panel button { font: inherit; font-size: 12px; color: inherit; background: #222733; border: 1px solid #2a2f3a; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
-.th-panel button:hover { border-color: #6ea8fe; }
-.th-panel button:focus-visible { outline: 2px solid #6ea8fe; outline-offset: 1px; }
-.th-panel .th-close { padding: 0 7px; font-size: 15px; line-height: 20px; border: 0; background: transparent; color: #8a93a6; }
-.th-panel .th-trash { display: flex; align-items: center; padding: 3px 5px; border: 0; background: transparent; color: #8a93a6; }
-.th-panel .th-trash:hover { color: #fca5a5; }
-.th-summary { padding: 0 12px 8px; font-size: 12px; color: #8a93a6; }
-.th-body { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #2a2f3a; padding-top: 8px; }
-.th-msg { border-left: 2px solid #2a2f3a; padding-left: 8px; }
-.th-msg.role-user { border-left-color: #3b5b8f; }
-.th-msg.role-assistant { border-left-color: #2f6b4b; }
-.th-msg.role-system { border-left-color: #6b5a2f; }
-.th-msg.kind-error { border-left-color: #b91c1c; }
-.th-meta { font: 10.5px ui-monospace, monospace; color: #8a93a6; }
+.th-state { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--ui-line); color: var(--ui-muted); }
+.th-state[data-state="running"], .th-state[data-state="speaking"] { color: var(--st-working); border-color: color-mix(in srgb, var(--st-working-to) 45%, transparent); }
+.th-state[data-state="pending"], .th-state[data-state="idle"] { color: var(--st-done); border-color: color-mix(in srgb, var(--st-done-to) 40%, transparent); }
+.th-state[data-state="asking"] { color: var(--st-asking); border-color: color-mix(in srgb, var(--st-asking-to) 45%, transparent); }
+.th-state[data-state="failed"] { color: var(--st-failed); border-color: color-mix(in srgb, var(--st-failed-to) 45%, transparent); }
+.th-state[data-state="queued"] { color: var(--ui-violet); border-color: color-mix(in srgb, var(--ui-violet) 35%, transparent); }
+.th-panel button { font: inherit; font-size: 12px; color: inherit; background: var(--ui-field); border: 1px solid var(--ui-line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.th-panel button:hover { border-color: var(--ui-accent); }
+.th-panel button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
+.th-panel .th-close { padding: 0 7px; font-size: 15px; line-height: 20px; border: 0; background: transparent; color: var(--ui-muted); }
+.th-panel .th-trash { display: flex; align-items: center; padding: 3px 5px; border: 0; background: transparent; color: var(--ui-muted); }
+.th-panel .th-trash:hover { color: var(--ui-err-text); }
+.th-summary { padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); }
+.th-body { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--ui-line); padding-top: 8px; }
+.th-msg { border-left: 2px solid var(--ui-line); padding-left: 8px; }
+.th-msg.role-user { border-left-color: color-mix(in srgb, var(--ui-accent) 50%, transparent); }
+.th-msg.role-assistant { border-left-color: color-mix(in srgb, var(--ui-ok) 50%, transparent); }
+.th-msg.role-system { border-left-color: color-mix(in srgb, var(--ui-warn) 50%, transparent); }
+.th-msg.kind-error { border-left-color: var(--ui-err); }
+.th-meta { font: 10.5px ui-monospace, monospace; color: var(--ui-muted); }
 .th-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.th-msg details summary { cursor: pointer; color: #6ea8fe; font-size: 12px; }
-.th-msg pre { margin: 4px 0 0; padding: 6px 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-sans-serif, system-ui, sans-serif; background: #13161c; border: 1px solid #2a2f3a; border-radius: 6px; }
-.th-files { margin-top: 2px; font: 11px ui-monospace, monospace; color: #9fd8b5; overflow-wrap: anywhere; }
-.th-empty { color: #8a93a6; font-style: italic; }
+.th-msg details summary { cursor: pointer; color: var(--ui-accent); font-size: 12px; }
+.th-msg pre { margin: 4px 0 0; padding: 6px 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-sans-serif, system-ui, sans-serif; background: var(--ui-sunken); border: 1px solid var(--ui-line); border-radius: 6px; }
+.th-files { margin-top: 2px; font: 11px ui-monospace, monospace; color: var(--ui-ok); overflow-wrap: anywhere; }
+.th-empty { color: var(--ui-muted); font-style: italic; }
 .th-turn { display: flex; flex-direction: column; gap: 4px; }
 .th-turn.note { opacity: .7; }
-.th-msg.queued { border-left-style: dashed; border-left-color: #a78bfa; opacity: .85; }
-.th-compose { padding: 8px 12px; border-top: 1px solid #2a2f3a; }
-.th-foot { display: flex; align-items: center; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid #2a2f3a; }
+.th-msg.queued { border-left-style: dashed; border-left-color: var(--ui-violet); opacity: .85; }
+.th-compose { padding: 8px 12px; border-top: 1px solid var(--ui-line); }
+.th-foot { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--ui-line); }
 .th-foot .th-confirm { flex: 1; font-size: 12px; }
-.th-foot .th-danger { border-color: #7f1d1d; color: #fca5a5; }
-.th-foot .th-danger:hover { border-color: #f87171; }
-.th-foot .spacer { flex: 1; }`;
+.th-foot .th-danger { border-color: color-mix(in srgb, var(--ui-err) 50%, transparent); color: var(--ui-err-text); }
+.th-foot .th-danger:hover { border-color: var(--ui-err); }
+.th-foot .spacer { flex: 1; }
+/* A bubble's question (stop this task?): Yes, and No, the default, whose outline closes as the time to answer runs out. */
+.th-bubble.asking { display: flex; align-items: center; gap: 10px; max-width: 400px; }
+.th-ask { flex: none; display: flex; gap: 6px; white-space: normal; }
+.th-ask button { position: relative; font: inherit; font-size: 12px; color: inherit; background: var(--ui-field); border: 1px solid var(--ui-line); border-radius: 6px; padding: 3px 12px; cursor: pointer; }
+.th-ask button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
+.th-ask .th-yes { border-color: color-mix(in srgb, var(--ui-err) 50%, transparent); color: var(--ui-err-text); }
+.th-ask .th-yes:hover { border-color: var(--ui-err); }
+.th-ask .th-no:hover { background: var(--ui-sunken); }
+.th-ask .th-no svg { position: absolute; left: -1px; top: -1px; width: calc(100% + 2px); height: calc(100% + 2px); overflow: visible; pointer-events: none; }
+.th-ask .th-no rect { x: 0.75px; y: 0.75px; width: calc(100% - 1.5px); height: calc(100% - 1.5px); rx: 6px; fill: none; stroke: var(--ui-accent); stroke-width: 1.5px; stroke-dasharray: 100; stroke-dashoffset: 100; animation: th-outline linear forwards; }
+@keyframes th-outline { to { stroke-dashoffset: 0; } }
+${PULSE_ORB_CSS}`;
 
 export interface ThreadOverlayOpts {
   /** Positioned at document (0,0), inside the shadow root. */
@@ -141,7 +170,7 @@ export interface ThreadOverlayOpts {
   pointed(): Element | null;
   /** The pointer's last sampled position in document coordinates (where the provisional dot goes on that element). */
   pointer?(): { x: number; y: number } | null;
-  send(action: PageThreadAction | PageOrbAction): void;
+  send(action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction): void;
   /** The page element at a viewport point, as a sample (a marker stands for its thread's element). */
   sampleAt(x: number, y: number): { sample: CursorSample } | null;
   /** The panel's form, its dictation, and sending (web/cursor/inlineForm.ts). */
@@ -151,7 +180,7 @@ export interface ThreadOverlayOpts {
 
 export interface ThreadOverlay {
   setThreads(threads: ThreadInfo[]): void;
-  bubble(say: ThreadSay, ended: boolean): void;
+  bubble(say: ThreadSay, ended: boolean, confirm?: BubbleConfirm): void;
   provisional(turnId: string): void;
   clearProvisional(turnId: string): void;
   /** Open a thread's panel and scroll its element into view (from the sidebar's list). */
@@ -160,6 +189,8 @@ export interface ThreadOverlay {
   setOrb(state: OrbState, pos: OrbPos | null): void;
   /** The conversation shown in the orb's panel. */
   setConversation(entries: ConvoEntry[]): void;
+  /** Debugging → Details: show each answer's "Full answer" and its edited files in the panel (off until the sidebar says otherwise). */
+  setDetails(on: boolean): void;
   /** The node is the orb, its bubble or its panel: it stands for no element (pointing at it points at nothing). */
   isOrb(node: Node): boolean;
   /**
@@ -273,10 +304,13 @@ interface MarkerView { thread: ThreadInfo; el: Element | null; btn: HTMLButtonEl
 interface Spot { x: number; y: number; r: number; fixed: boolean }
 /** `home`: where the bubble points with no marker (the viewport's top-right when it appeared). */
 /** `collapsed`: shrunk into its marker (hovering the marker grows it back out). `leave`: the pending collapse. */
+/** `asking`: it holds a question (Yes / No): it stays out until answered. */
 interface BubbleView {
   say: ThreadSay; div: HTMLElement; home: { x: number; y: number };
-  collapsed: boolean; leave: ReturnType<typeof setTimeout> | null;
+  collapsed: boolean; leave: ReturnType<typeof setTimeout> | null; asking: boolean;
 }
+
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -321,6 +355,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     dragged: false,
   };
   let entries: ConvoEntry[] = [];
+  /** Debugging → Details: answers show their "Full answer" and the files they edited. */
+  let details = false;
 
   // Clicks, presses and keys in the overlay stay in the overlay (the page's own handlers don't see them).
   for (const type of ["click", "pointerdown", "pointerup", "mousedown", "mouseup", "dblclick", "keydown", "keyup", "keypress", "input", "contextmenu"]) {
@@ -345,6 +381,34 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     ({ x: orb.x, y: orb.y } = orbPoint(orb.pos, innerWidth, innerHeight));
     orb.btn.style.left = `${orb.x}px`;
     orb.btn.style.top = `${orb.y}px`;
+    setTone(pageToneAt(orb.x, orb.y));
+  }
+
+  /**
+   * Whether the page behind (x, y) (viewport coords) is light or dark: the first element under it, ours aside, with a
+   * mostly opaque background colour; else the root's or the body's; else light (the browser's default white).
+   */
+  function pageToneAt(x: number, y: number): Tone {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el === host) continue;
+      const t = toneOfCss(getComputedStyle(el).backgroundColor);
+      if (t) return t;
+    }
+    for (const el of [document.body, document.documentElement]) {
+      const t = el && toneOfCss(getComputedStyle(el).backgroundColor);
+      if (t) return t;
+    }
+    return "light";
+  }
+
+  /** The page's tone, behind the orb: the whole overlay (orb and markers) takes its palette from it. */
+  let tone: Tone | null = null;
+  function setTone(next: Tone): void {
+    if (next === tone) return;
+    tone = next;
+    layer.dataset.tone = next;
+    orbDrawn = null; // recolour the orb
+    renderOrb();
   }
 
   function position(): void {
@@ -392,22 +456,29 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   window.addEventListener("scroll", schedulePosition, { capture: true, passive: true });
   window.addEventListener("resize", schedulePosition);
   new MutationObserver(scheduleResolve).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
-  setInterval(() => { if (markers.size || prov) resolveAll(); else opts.attach(); }, RESOLVE_EVERY_MS);
+  setInterval(() => {
+    if (markers.size || prov) resolveAll(); else opts.attach();
+    setTone(pageToneAt(orb.x, orb.y)); // the page can turn light or dark without a scroll (a theme switch)
+  }, RESOLVE_EVERY_MS);
 
   // ── markers ──
 
   function renderMarker(m: MarkerView): void {
     const t = m.thread;
-    m.btn.dataset.state = t.state;
+    const look = markerLook(t);
+    m.btn.dataset.state = look;
     m.btn.classList.toggle("open", panel?.threadId === t.threadId);
-    const label = [displayTitle(t.title), STATE_LABEL[t.state], t.unread ? "unread" : ""].filter(Boolean).join(" · ");
+    const label = [displayTitle(t.title), look === "asking" ? "asking you" : STATE_LABEL[t.state], t.unread ? "unread" : ""].filter(Boolean).join(" · ");
     // No native tooltip: hovering a marker grows its bubble out instead.
     m.btn.setAttribute("aria-label", t.summary ? `${label}. ${stripVoiceCues(t.summary)}` : label);
   }
 
-  /** Hovering the orb when it has a bubble grows the bubble out: no native tooltip on top of it. */
+  /**
+   * Hovering the orb when it has a bubble grows the bubble out: no tooltip on top of it. Overlay tooltips are `data-tip`
+   * (drawn by electron/tooltip.ts), never `title`, so Chromium doesn't draw its own as well.
+   */
   function tipUnlessBubble(btn: HTMLElement, b: BubbleView | undefined): void {
-    btn.title = b ? "" : btn.dataset.tip ?? "";
+    btn.dataset.tip = b ? "" : btn.dataset.tipText ?? "";
   }
 
   function setThreads(threads: ThreadInfo[]): void {
@@ -425,6 +496,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       if (!m) {
         const btn = h("button", "th-marker");
         btn.type = "button";
+        btn.addEventListener("mousedown", (e) => e.preventDefault()); // as the orb: no focus ring after a click and Shift
         btn.addEventListener("click", () => (panel?.threadId === t.threadId ? closePanel() : openPanel(t.threadId)));
         btn.addEventListener("pointerenter", () => { const b = bubbleOf(t.threadId); if (b && panel?.threadId !== t.threadId) expand(b); });
         btn.addEventListener("pointerleave", () => { const b = bubbleOf(t.threadId); if (b) collapseSoon(b); });
@@ -525,27 +597,59 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     }
   }
 
+  /** Leaving it or its marker: a question stays out (it waits for an answer). */
   function collapseSoon(b: BubbleView): void {
-    if (b.collapsed || b.leave) return;
+    if (b.collapsed || b.leave || b.asking) return;
     b.leave = setTimeout(() => { b.leave = null; collapse(b); }, COLLAPSE_DELAY_MS);
+  }
+
+  /**
+   * A question's Yes / No. No is the default: its outline closes over `ms`, and then the bubble goes as a No. Either
+   * answer removes the bubble; a new line of the thread replacing it first means no answer at all.
+   */
+  function askRow(sayId: string, c: BubbleConfirm): HTMLElement {
+    const answer = (yes: boolean) => {
+      if (!bubbles.has(sayId)) return;
+      removeBubble(sayId);
+      opts.send({ type: "bubble.answer", confirmId: c.confirmId, yes });
+    };
+    const yes = h("button", "th-yes", "Yes");
+    yes.type = "button";
+    yes.onclick = () => answer(true);
+    const no = h("button", "th-no", "No");
+    no.type = "button";
+    no.dataset.tip = "Keep it running (what happens when the outline closes)";
+    no.onclick = () => answer(false);
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("aria-hidden", "true");
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("pathLength", "100");
+    rect.style.animationDuration = `${c.ms}ms`;
+    rect.addEventListener("animationend", () => answer(false));
+    svg.append(rect);
+    no.append(svg);
+    const row = h("div", "th-ask");
+    row.append(yes, no);
+    return row;
   }
 
   /**
    * A spoken line: shown from its marker until the pointer leaves it (or it's clicked), then shrunk into the marker;
    * hovering the marker shows it again. A new line of the thread replaces it; it goes with its thread. Central lines
-   * (threadId null) come from the orb.
+   * (threadId null) come from the orb. With `confirm` it's a question instead (BubbleConfirm): it stays out, with
+   * Yes / No under the text, until answered or replaced.
    */
-  function bubble(say: ThreadSay, _ended: boolean): void {
+  function bubble(say: ThreadSay, _ended: boolean, confirm?: BubbleConfirm): void {
     let b = bubbles.get(say.sayId);
     if (!b) {
       // One bubble per thread: a new line replaces the previous one.
       for (const [id, other] of bubbles) if (other.say.threadId === say.threadId) removeBubble(id);
       const div = h("div", "th-bubble");
       div.setAttribute("role", "status");
-      const view: BubbleView = { say, div, home: { x: scrollX + innerWidth - 16, y: scrollY + 40 }, collapsed: false, leave: null };
+      const view: BubbleView = { say, div, home: { x: scrollX + innerWidth - 16, y: scrollY + 40 }, collapsed: false, leave: null, asking: false };
       div.addEventListener("pointerenter", () => expand(view));
       div.addEventListener("pointerleave", () => collapseSoon(view));
-      div.addEventListener("click", () => collapse(view));
+      div.addEventListener("click", () => { if (!view.asking) collapse(view); });
       layer.append(div);
       b = view;
       bubbles.set(say.sayId, b);
@@ -553,10 +657,12 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     // A turn's lines share one bubble: a new line (not more words of the same one) grows it back out of its marker.
     const newLine = !say.text.startsWith(b.say.text);
     b.say = say;
-    // The orb itself shows a central question (its "asking" state); a thread's marker doesn't, so its bubble does.
-    b.div.classList.toggle("reply", say.needsReply && say.threadId !== null);
     b.div.replaceChildren(stripVoiceCues(say.text));
-    if (newLine && b.collapsed) expand(b);
+    b.asking = !!confirm;
+    b.div.classList.toggle("asking", b.asking);
+    // The question and its Yes / No on one line.
+    if (confirm) b.div.append(askRow(say.sayId, confirm));
+    if ((newLine || confirm) && b.collapsed) expand(b);
     placeBubble(b);
   }
 
@@ -568,6 +674,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     panel = null;
     p.form?.destroy();
     p.root.remove();
+    if (p.threadId !== null) opts.send({ type: "thread.panel", threadId: null });
     const m = p.threadId === null ? undefined : markers.get(p.threadId);
     if (m) renderMarker(m);
     renderOrb();
@@ -594,6 +701,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     renderPanel();
     renderMarker(m);
     opts.send({ type: "thread.focus", threadId });
+    opts.send({ type: "thread.panel", threadId });
     root.querySelector<HTMLButtonElement>(".th-close")?.focus({ preventScroll: true });
   }
 
@@ -631,14 +739,14 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const who = msg.role === "user" ? "You" : msg.role === "assistant" ? "Assistant" : "System";
     const time = new Date(msg.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     row.append(h("div", "th-meta", `${who} · ${msg.kind} · ${time}`), h("div", "th-text", msg.role === "user" ? msg.text : stripVoiceCues(msg.text)));
-    if (msg.detail) {
+    if (msg.detail && details) {
       const d = h("details");
       d.open = openDetails.has(msg.id);
       d.addEventListener("toggle", () => { if (d.open) openDetails.add(msg.id); else openDetails.delete(msg.id); });
       d.append(h("summary", undefined, "Full answer"), h("pre", undefined, msg.detail));
       row.append(d);
     }
-    if (msg.filesTouched?.length) row.append(h("div", "th-files", `Edited: ${msg.filesTouched.join(", ")}`));
+    if (msg.filesTouched?.length && details) row.append(h("div", "th-files", `Edited: ${msg.filesTouched.join(", ")}`));
     return row;
   }
 
@@ -650,11 +758,11 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       user.append(h("div", "th-meta", ["You", ...e.badges, ...(e.note ? [e.note] : [])].join(" · ")), h("div", "th-text", e.user));
       row.append(user);
     }
-    if (e.assistant || e.who || e.detail) {
+    if (e.assistant || e.who || (e.detail && details)) {
       const bot = h("div", "th-msg role-assistant");
       bot.append(h("div", "th-meta", [e.who ?? "Assistant", ...(e.user === null ? e.badges : [])].join(" · ")));
       if (e.assistant) bot.append(h("div", "th-text", stripVoiceCues(e.assistant)));
-      if (e.detail) {
+      if (e.detail && details) {
         const d = h("details");
         d.open = openDetails.has(e.id);
         d.addEventListener("toggle", () => { if (d.open) openDetails.add(e.id); else openDetails.delete(e.id); });
@@ -674,22 +782,23 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const scroll = p.root.querySelector(".th-body")?.scrollTop;
     const close = h("button", "th-close", "×");
     close.type = "button";
-    close.title = "Close (Esc)";
+    close.dataset.tip = "Close (Esc)";
     close.setAttribute("aria-label", "Close");
     close.onclick = closePanel;
     const head = h("div", "th-head");
     head.append(h("span", "th-title", t ? displayTitle(t.title) : "Conversation"));
-    const stateOf: ThreadState | null = t ? t.state : orb.state === "running" ? "running" : null;
-    if (stateOf && STATE_LABEL[stateOf]) {
-      const state = h("span", "th-state", STATE_LABEL[stateOf]);
-      state.dataset.state = stateOf;
+    const look = t ? markerLook(t) : orb.state;
+    const chip = look === "asking" ? "asking you" : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
+    if (chip) {
+      const state = h("span", "th-state", chip);
+      state.dataset.state = look;
       head.append(state);
     }
     if (t) {
       const del = h("button", "th-trash");
       del.type = "button";
       del.innerHTML = ICON_TRASH;
-      del.title = t.state === "queued" ? "Delete this feedback (it won't be sent)" : "Delete this thread (its edits stay in the code)";
+      del.dataset.tip = t.state === "queued" ? "Delete this feedback (it won't be sent)" : "Delete this thread (its edits stay in the code)";
       del.setAttribute("aria-label", "Delete");
       del.onclick = () => { p.confirming = true; renderPanel(); p.root.querySelector<HTMLButtonElement>(".th-foot button")?.focus(); };
       head.append(del);
@@ -733,16 +842,16 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       }
     } else body.append(h("div", "th-empty", "Nothing here yet."));
 
-    // The footer only holds the delete confirmation (the trash button is in the header).
+    // The delete confirmation, right below the header's trash button.
     const foot = h("div", "th-foot");
     if (p.confirming) {
       const yes = h("button", "th-danger", t.state === "running" ? "Stop and delete" : "Delete");
       yes.type = "button";
-      yes.title = t.state === "running" ? "Stop the running task and delete this thread" : "Delete this thread";
+      yes.dataset.tip = t.state === "running" ? "Stop the running task and delete this thread" : "Delete this thread";
       yes.onclick = () => { opts.send({ type: "thread.delete", threadId: t.threadId }); closePanel(); };
       const no = h("button", undefined, "Cancel");
       no.type = "button";
-      no.title = "Keep this thread";
+      no.dataset.tip = "Keep this thread";
       no.onclick = () => { p.confirming = false; renderPanel(); };
       foot.append(h("span", "th-confirm", deleteConfirmText(t.state)), no, yes);
     }
@@ -751,8 +860,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const compose = form.root.parentElement ?? h("div", "th-compose");
     if (!compose.isConnected) { compose.append(form.root); p.root.append(compose); }
     for (const c of [...p.root.children]) if (c !== compose) c.remove();
-    compose.before(head, ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
-    if (p.confirming) compose.after(foot);
+    compose.before(head, ...(p.confirming ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
     scrollBody(p, body, scroll, firstRender, fresh);
     placePanel();
   }
@@ -827,27 +935,39 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
 
   // ── the orb ──
 
-  /** The drawing inside the orb and the state it was mounted with (the library can't change state in place). */
-  let orbArt: { state: OrbState; svg: SVGSVGElement; destroy(): void } | null = null;
+  const orbArt = mountPulseOrb({ size: ORB_ART });
+  orb.btn.append(orbArt.el);
+
+  /** The state the orb was last drawn in, and the timer ending a failure's shake. */
+  let orbDrawn: OrbState | null = null;
+  let orbShake: ReturnType<typeof setTimeout> | null = null;
 
   function renderOrb(): void {
-    if (orbArt?.state !== orb.state) {
-      orbArt?.destroy();
-      orbArt?.svg.remove();
-      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      orb.btn.append(svg);
-      const m = mountOrb(svg, { ...ORB_LOOKS[orb.state], size: ORB_DOTS });
-      orbArt = { state: orb.state, svg, destroy: m.destroy };
+    if (orb.state !== orbDrawn) {
+      const look = ORB_LOOKS[orb.state];
+      if (orbShake) { clearTimeout(orbShake); orbShake = null; }
+      // A failure blinks (the orb's error look), then settles to idle in the failed colours.
+      if (orb.state === "failed") {
+        orbArt.setState("error");
+        orbShake = setTimeout(() => { orbShake = null; orbArt.setState(look.state); }, ORB_SHAKE_MS);
+      } else orbArt.setState(look.state);
+      // Its own looks are the logo's six colours; asking and failed keep their state's gradient.
+      const colors = stateColors(tone ?? "light")[look.colors];
+      orbArt.setColors(look.colors === "working" ? ORB_COLORS : [colors.from, colors.to]);
+      orbDrawn = orb.state;
     }
     orb.btn.dataset.state = orb.state;
     orb.btn.classList.toggle("open", panel?.threadId === null);
-    const label = `Conversation${orb.state === "running" ? " · working" : orb.state === "listening" ? " · listening" : orb.state === "asking" ? " · asking you something" : ""}`;
-    orb.btn.dataset.tip = `${label}\nClick to see the conversation; drag to move`;
-    orb.btn.title = orb.btn.dataset.tip;
+    const ORB_LABEL: Record<OrbState, string> = { idle: "", listening: " · listening", speaking: " · speaking", running: " · working", asking: " · asking you something", failed: " · the last turn failed" };
+    const label = `Conversation${ORB_LABEL[orb.state]}`;
+    orb.btn.dataset.tipText = `${label}\nClick to see the conversation; drag to move`;
+    orb.btn.dataset.tip = orb.btn.dataset.tipText;
     orb.btn.setAttribute("aria-label", label);
   }
 
   orb.btn.type = "button";
+  // A press doesn't focus the orb (Tab still does): focused, the next key (Shift to talk) would draw its focus ring.
+  orb.btn.addEventListener("mousedown", (e) => e.preventDefault());
   orb.btn.addEventListener("click", () => {
     if (orb.dragged) { orb.dragged = false; return; }
     if (panel?.threadId === null) closePanel(); else openCentral();
@@ -900,6 +1020,12 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     if (panel?.threadId === null) renderPanel();
   }
 
+  function setDetails(on: boolean): void {
+    if (on === details) return;
+    details = on;
+    if (panel) renderPanel();
+  }
+
   return {
     setThreads,
     bubble,
@@ -908,6 +1034,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     open,
     setOrb,
     setConversation,
+    setDetails,
     isOrb(node) {
       if (orb.btn.contains(node)) return true;
       if (panel?.threadId === null && panel.root.contains(node)) return true;

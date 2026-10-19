@@ -39,9 +39,13 @@ export interface FakeScenario {
   estimateS?: number;
   /** Lines generateFillers returns (default two lines). */
   fillerLines?: string[];
+  /** Audio chunks (20 ms each) per TTS take (default 5). */
+  ttsChunks?: number;
   /** Threads mode (the router got `threads`): where the router sends the turn (default new) and a tell. */
   target?: RouteTarget;
   tell?: string;
+  /** The router judges the transcript a description of silence: clarify with nothing to say. */
+  silent?: boolean;
   /** Element threads: how long one thread request takes (default 3 × solverFirstMs) and the files it edits. */
   threadRunMs?: number;
   filesTouched?: string[];
@@ -61,6 +65,7 @@ export const SPOKEN_LINE = "The grid keeps the three feature cards aligned in eq
 export const ACK = "Sure, checking that grid now.";
 export const CLARIFY = "Which section do you mean, the features or the pricing?";
 export const FILLER_LINES = ["I'm opening the stylesheet for that grid.", "Now checking the design notes."];
+export const FILLER_CUT_IN = "Oh, wait, here it is.";
 export const DIRECT_ANSWER = "Yes, I can hear you.";
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -150,7 +155,7 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
         void (async () => {
           await wait(t.ttsFirstMs);
           let first = true;
-          for (const b of tone(5)) {
+          for (const b of tone(sc.ttsChunks ?? 5)) {
             if (closed) return;
             if (first) { first = false; mark(segment === "ack" ? "ack.ttsFirstByte" : "answer.ttsFirstByte", { fake: true }); }
             for (const cb of cbs) cb(b);
@@ -194,6 +199,10 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
       ...(threads ? { target: sc.target ?? { kind: "new" } } : {}),
     };
     onDecision?.(decision);
+    if (routed === "clarify" && sc.silent) {
+      onResponse?.(fakeResponse("router", "tool_use", usage));
+      return { delegate: null, decision, usage };
+    }
     if (routed === "clarify" || routed === "answer") {
       for (const w of (routed === "clarify" ? CLARIFY : DIRECT_ANSWER).split(/(?<= )/)) { onSpokenDelta(w, "answer"); await wait(t.chunkMs); }
       onSpokenEnd?.("answer");
@@ -211,12 +220,18 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
     onPrompt?.(fakePrompt("fillers", question));
     await wait(t.llmFirstMs);
     onResponse?.(fakeResponse("fillers", "tool_use", { input_tokens: 300, output_tokens: 30 }));
-    return { lines: sc.fillerLines ?? FILLER_LINES, usage: { input_tokens: 300, output_tokens: 30 } };
+    return { lines: sc.fillerLines ?? FILLER_LINES, cutIn: FILLER_CUT_IN, usage: { input_tokens: 300, output_tokens: 30 } };
   };
 
-  const solveTask: SolveTask = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt, onResponse }) => {
+  const solveTask: SolveTask = async ({ mark, fast, onSpokenLine, onDelta, question, onPrompt, onResponse, signal }) => {
     onPrompt?.(fakePrompt("solver", `Question: ${question}`));
     mark("solver.request", { fast });
+    // Aborted (a stopped job): rejects at once, like a killed harness.
+    const wait = (ms: number) => new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(signal.reason);
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+    });
     await wait(t.solverFirstMs);
     if (sc.failIn === "solver") throw new Error("fake solver: 500");
     mark("solver.firstToken");

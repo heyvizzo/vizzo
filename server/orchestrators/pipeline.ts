@@ -19,7 +19,7 @@
 // With config.silent (set for them) nothing is spoken: the TTS sockets are stand-ins and there are no fillers, so the
 // reply is only text (voice.text), and the thread runs it starts announce their results as text too.
 import type { Segment } from "../../shared/protocol.ts";
-import { hasSpokenWords } from "../../shared/speech.ts";
+import { hasSpokenWords, isNoSpeechNote } from "../../shared/speech.ts";
 import { typedWords } from "../../shared/comment.ts";
 import { tracer } from "./trace.ts";
 import type { RouteDecision, TtsStream } from "../adapters/types.ts";
@@ -30,7 +30,7 @@ import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
-import { isLocalTts } from "../../shared/config.ts";
+import { isLocalTts, taskTimeoutMs } from "../../shared/config.ts";
 import { startJob } from "./jobs.ts";
 import { browserUrl } from "../browserPage.ts";
 import { threadStore } from "../threads/store.ts";
@@ -49,6 +49,13 @@ const silentTts = async (): Promise<TtsStream> => ({
   pushText() {}, flush() {}, onAudio() {}, done: async () => {}, close() {}, chars: 0,
 });
 
+/** The cut-in when the progress lines came without one (generateFillers' cutIn). */
+function fallbackCutIn(intent: string, language: string | undefined): string {
+  const ro = language?.startsWith("ro");
+  if (intent === "task") return ro ? "A, stai, gata." : "Oh, wait, it's finished.";
+  return ro ? "A, stai, uite." : "Oh, wait, here it is.";
+}
+
 /** One TTS socket = one segment. Text/flush before the socket opens are queued. */
 class SegmentTts {
   label: Segment | null = null;
@@ -58,6 +65,9 @@ class SegmentTts {
   private flushed = false;
   private preAudio: Buffer[] = [];
   private used = false;
+  /** Set by cut(): done() stops waiting for the socket. */
+  private cutOff: (() => void) | null = null;
+  private readonly cutP = new Promise<void>((r) => { this.cutOff = r; });
   readonly ready: Promise<TtsStream>;
 
   constructor(private base: TurnBase, deps: OrchestratorDeps, voiceId: string, hint: Segment) {
@@ -97,16 +107,33 @@ class SegmentTts {
     this.stream?.flush();
   }
 
-  /** Resolves when the segment's audio is complete (the socket closed). Unused sockets are closed. */
+  /** Resolves when the segment's audio is complete (the socket closed), or it was cut. Unused sockets are closed. */
   async done(): Promise<void> {
     try {
-      const s = await this.ready;
+      const s = await Promise.race([this.ready, this.cutP.then(() => null)]);
+      if (!s) return;
       if (!this.used) { s.close(); return; }
       this.flush();
-      await tag("tts", s.done());
+      const finished = tag("tts", s.done());
+      finished.catch(() => {}); // cut: nobody waits for it any more
+      await Promise.race([finished, this.cutP]);
     } finally {
       this.writer?.end();
     }
+  }
+
+  /**
+   * Stop it mid-sentence: no more synthesis, its unsent audio dropped, the client told to stop playing it. Returns
+   * whether the user was hearing it (SegmentOutput.cut), so what comes next can say why it broke off.
+   */
+  cut(): boolean {
+    this.flushed = true;
+    this.textQueue = [];
+    this.stream?.close();
+    this.ready.then((s) => s.close(), () => {});
+    const heard = this.writer ? this.base.output.cut(this.writer) : false;
+    this.cutOff?.();
+    return heard;
   }
 
   get chars(): number { return this.stream?.chars ?? 0; }
@@ -167,9 +194,11 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       if (!cfg.silent && !voiceId && cfg.ttsModel.startsWith("eleven_")) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
       const fin = typed !== undefined ? { text: typed.trim(), words: typedWords(typed), language: undefined } : await tag("scribe", scribe.final());
       if (base.isFinished) return;
-      // Always-listen: a bump or a room noise that produced no words never reaches the router.
-      if (ctx.autoEndpoint?.() && !hasSpokenWords(fin.text, fin.words)) {
-        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], skipped: "no-words" };
+      // Always-listen: a bump or a room noise that produced no words never reaches the router. Neither does a
+      // recognizer's note that nothing was said ("(nothing heard)", "[BLANK_AUDIO]"), in any mode.
+      const noSpeechNote = typed === undefined && isNoSpeechNote(fin.text);
+      if ((ctx.autoEndpoint?.() || noSpeechNote) && !hasSpokenWords(fin.text, fin.words)) {
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], skipped: noSpeechNote ? "no-speech-note" : "no-words" };
         base.finish();
         return;
       }
@@ -194,7 +223,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       const canBackground = cfg.memory && cfg.backgroundLongTasks && !!ctx.channel;
       // Element threads: the element this turn is about and what the router is told about the threads.
       const tt = threadsEnabled(cfg, deps, ctx)
-        ? prepareThreads({ words: fin.words, pointing, rests: base.rests, samples: ctx.cursorSamples(), pageUrl: ctx.pageUrl?.() ?? browserUrl() ?? "" })
+        ? prepareThreads({ words: fin.words, pointing, rests: base.rests, samples: ctx.cursorSamples(), pageUrl: ctx.pageUrl?.() ?? browserUrl() ?? "" }, undefined, ctx.pinnedThread)
         : null;
       const th: { plan: ThreadPlan | null } = { plan: null };
       let background = false;
@@ -235,6 +264,13 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       routerUsage = route.usage;
       if (base.isFinished) return;
       decide(route.decision, true);
+      // The router judged the transcript a description of silence: no reply, and nothing kept in the conversation.
+      if (!route.delegate && !route.decision.tell && route.decision.intent === "clarify" && !base.voiceText.trim()) {
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], skipped: "router-silent" };
+        if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; }
+        base.finish({ transcript: "" });
+        return;
+      }
       const first = spoken as SegmentTts | null;
       first?.flush();
       if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // pre-warmed but nothing was said
@@ -300,29 +336,34 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         // is only created when the line arrives, so filler segments queue before it.
         let answerTts: SegmentTts | null = warm ? openTts("answer") : null;
         let spokenLine = false;
+        let cutIn: string | undefined;
         const fillers = cfg.fillers && !cfg.silent && deps.generateFillers
           ? new FillerScheduler(
             base,
             deps.generateFillers({ transcript: fin.text, question: delegate.question, intent: delegate.intent, pointing, language: base.language, voiceCues: useVoiceCues(cfg.ttsModel, base.language), llm: cfg.llm.fast, ...trace() })
-              .then((r) => { fillerUsage = r.usage; return r.lines; }),
-            async (line) => {
+              .then((r) => { fillerUsage = r.usage; cutIn = r.cutIn; return r.lines; }),
+            (line) => {
               const t = openTts("filler");
               t.setLabel("filler");
               base.voice(sep() + line, true);
               t.pushText(line);
               t.flush();
-              await t.done();
+              return { done: t.done(), cut: () => t.cut() };
             },
           )
           : null;
         const onSpokenLine = (line: string): void => {
           if (base.isFinished || spokenLine) return;
           spokenLine = true;
-          fillers?.stop();
+          // The answer doesn't wait for a progress line to end: it's broken off, and if that was heard, the answer
+          // starts by saying why ("Oh, wait, here it is."). A line that had ended, or was about to, isn't.
+          const cut = fillers?.cut() ?? false;
+          const said = cut ? `${cutIn ?? fallbackCutIn(delegate.intent, base.language)} ${line}` : line;
+          if (cut) base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], fillerCut: true };
           answerTts ??= openTts("answer");
           answerTts.setLabel("answer");
-          base.voice(sep() + line, true);
-          answerTts.pushText(line);
+          base.voice(cut ? ` — ${said}` : sep() + said, true);
+          answerTts.pushText(said);
           answerTts.flush();
         };
         const onDelta = (d: string): void => base.solver(d);
@@ -335,7 +376,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         } else {
           const solved = await tag("solver", deps.solveTask({
             mark: base.mark, question: delegate.question, pointing, fast: cfg.solverFast, history, intent: delegate.intent, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
-            voiceCues: useVoiceCues(cfg.ttsModel, base.language),
+            timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
             onDelta,
             ...trace(),
             onSpokenLine,

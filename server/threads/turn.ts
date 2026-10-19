@@ -13,6 +13,8 @@ export interface TurnThreads {
   /** anchorTitle(anchor): "the red button". */
   anchorLabel?: string;
   briefs: ThreadBrief[];
+  /** The thread whose panel is open: every turn goes to it. */
+  pinned?: string;
 }
 
 /** Where a turn went: a thread (new or existing, or a tell about it). Null = the central conversation. */
@@ -30,8 +32,18 @@ const safe = <T>(f: () => T, fallback: T): T => {
   try { return f(); } catch (e) { console.warn("[threads] anchor", e); return fallback; }
 };
 
-/** The turn's anchor, its match among the threads and the router's briefs. */
-export function prepareThreads(input: AnchorInput, store: ThreadStore = threadStore()): TurnThreads {
+/**
+ * The turn's anchor, its match among the threads and the router's briefs. `pinned` (its panel is open): the router
+ * is told only about that thread, as the pointed one, and planThread sends the turn there.
+ */
+export function prepareThreads(input: AnchorInput, store: ThreadStore = threadStore(), pinned?: string): TurnThreads {
+  const pin = pinned ? store.info(pinned) : undefined;
+  if (pin) {
+    return {
+      anchor: pin.anchor, anchorLabel: pin.title, pinned: pin.threadId,
+      briefs: [{ threadId: pin.threadId, title: pin.title, state: pin.state, summary: pin.summary, onCurrentPage: true, underCursor: true }],
+    };
+  }
   const anchor = safe(() => inferAnchor(input), null);
   const threads = store.list();
   const under = anchor ? safe(() => matchAnchor(anchor, threads), null) : null;
@@ -49,6 +61,11 @@ export function prepareThreads(input: AnchorInput, store: ThreadStore = threadSt
  * work on a pointed element; anything else goes to the central conversation).
  */
 export function planThread(d: RouteDecision, tt: TurnThreads, store: ThreadStore = threadStore()): ThreadPlan | null {
+  if (tt.pinned && store.info(tt.pinned)) {
+    const t = d.target;
+    if (d.tell === tt.pinned) return { threadId: tt.pinned, relation: "tell" };
+    return { threadId: tt.pinned, relation: t?.kind === "thread" && t.threadId === tt.pinned ? t.relation : "followup" };
+  }
   if (d.tell && store.info(d.tell)) return { threadId: d.tell, relation: "tell" };
   const t = d.target;
   if (t?.kind === "thread" && store.info(t.threadId)) return { threadId: t.threadId, relation: t.relation };

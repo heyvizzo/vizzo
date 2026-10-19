@@ -33,7 +33,7 @@ const ENV_KEYS = new Set(ENV_FIELDS.map((field) => field.key));
 export const SECRET_KEYS = ENV_FIELDS.filter((field) => field.secret).map((field) => field.key);
 
 /** The unpackaged app's name (package.json): its settings folder and its Keychain entry are named after it. */
-const DEV_APP_NAME = "realtime-voice-latency-lab";
+export const DEV_APP_NAME = "vizzo";
 
 /** Unpackaged Electron stores this under ~/Library/Application Support/. `npm run dev` reads the same file. */
 export function desktopSettingsPath(): string {

@@ -13,8 +13,11 @@ export type PageCmd =
   | { type: "overlay"; targets: PointingTarget[]; rests: CursorRest[]; visible: string[] }
   /** Element threads on this page (already filtered by normalizePageUrl): draw/update their markers. */
   | { type: "threads"; threads: ThreadInfo[] }
-  /** A thread's spoken line: show a bubble from its marker. `ended`: its audio finished (the fade may start). */
-  | { type: "bubble"; say: ThreadSay; ended: boolean }
+  /**
+   * A thread's spoken line: show a bubble from its marker. `ended`: its audio finished (the fade may start).
+   * `confirm`: a question with Yes / No instead (stop the task?); unanswered after `ms`, it's a No and goes.
+   */
+  | { type: "bubble"; say: ThreadSay; ended: boolean; confirm?: BubbleConfirm }
   /** The conversation orb (the page as a whole): its state, and where it was dragged to (null: the default spot). */
   | { type: "orb"; state: OrbState; pos: OrbPos | null }
   /** The conversation as the sidebar shows it, for the orb's panel. */
@@ -24,15 +27,18 @@ export type PageCmd =
   /**
    * Settings toggles, off until the sidebar says otherwise. outlines (debugging): draw the `overlay` outlines.
    * hover: the comment mode's hover box on the element under the pointer, outside the mode too.
+   * details: the thread panel's "Full answer" (Debugging → Details).
    */
-  | { type: "debug"; outlines: boolean; hover: boolean }
+  | { type: "debug"; outlines: boolean; hover: boolean; details: boolean }
   /** The comment bubble (web/cursor/commentOverlay.ts): Send or Add to list, dictation running, its live words. */
   | { type: "comment.state"; state: CommentState }
   /** Dictated words to insert at the comment field's caret. */
   | { type: "comment.insert"; text: string };
 
+export interface BubbleConfirm { confirmId: string; ms: number }
+
 /** The orb's look: running while a turn or task that isn't an element thread's is being worked on. */
-export type OrbState = "idle" | "listening" | "running" | "asking";
+export type OrbState = "idle" | "listening" | "speaking" | "running" | "asking" | "failed";
 
 /** The orb's center as fractions of the viewport (kept in place, relatively, as the window resizes). */
 export interface OrbPos { x: number; y: number }
@@ -93,8 +99,30 @@ export function isPageThreadAction(m: unknown): m is PageThreadAction {
   return !!a && (a.type === "thread.focus" || a.type === "thread.delete") && typeof a.threadId === "string" && !!a.threadId;
 }
 
+/**
+ * Page → chat: the answer to a bubble's question (BubbleConfirm). `yes` false: No, or nothing pressed in time. Relayed
+ * on the thread channel, not sent to the server.
+ */
+export type PageConfirmAction = { type: "bubble.answer"; confirmId: string; yes: boolean };
+
+export function isPageConfirmAction(m: unknown): m is PageConfirmAction {
+  const a = m as { type?: unknown; confirmId?: unknown; yes?: unknown } | null;
+  return !!a && a.type === "bubble.answer" && typeof a.confirmId === "string" && typeof a.yes === "boolean";
+}
+
 /** Page → chat: the orb was dragged (sent when it's dropped). Relayed on the thread channel, not sent to the server. */
 export type PageOrbAction = { type: "orb.move"; pos: OrbPos };
+
+/**
+ * Page → chat: the thread whose panel is open (null: none, or the orb's). While one is, a talk turn goes to that
+ * thread (turn.start `threadId`). Relayed on the thread channel, not sent to the server.
+ */
+export type PagePanelAction = { type: "thread.panel"; threadId: string | null };
+
+export function isPagePanelAction(m: unknown): m is PagePanelAction {
+  const a = m as { type?: unknown; threadId?: unknown } | null;
+  return !!a && a.type === "thread.panel" && (a.threadId === null || (typeof a.threadId === "string" && !!a.threadId));
+}
 
 export function isPageOrbAction(m: unknown): m is PageOrbAction {
   const a = m as { type?: unknown; pos?: { x?: unknown; y?: unknown } } | null;
@@ -114,7 +142,7 @@ export interface PageBridge {
   navigate?(url: string): void;
   /** Open a thread's panel on the page (and scroll its marker into view). */
   openThread?(threadId: string): void;
-  onThreadAction?(cb: (action: PageThreadAction | PageOrbAction) => void): void;
+  onThreadAction?(cb: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction) => void): void;
   /** The comment bubble's actions (comment mode, from the toolbar's pointer button). */
   onComment?(cb: (action: PageCommentAction) => void): void;
 }

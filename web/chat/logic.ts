@@ -60,6 +60,7 @@ export function jobHeadline(job: Pick<JobInfo, "state" | "intent" | "elapsedMs">
   if (job.state === "running") return `Background ${kind} · running ${fmtElapsed(elapsedMs)}`;
   const took = job.elapsedMs ?? elapsedMs;
   if (job.state === "done") return `Background ${kind} · ${fmtElapsed(took)}`;
+  if (job.state === "stopped") return `Background ${kind} · stopped by you`;
   return `Failed after ${fmtElapsed(took)}`;
 }
 
@@ -90,6 +91,10 @@ export class PlaybackClock {
   }
   reset(): void {
     this.until = 0;
+  }
+  /** What was playing was cut off (audio.cut): nothing after it had come yet, so playback ends now. */
+  cut(now: number): void {
+    this.until = Math.min(this.until, now);
   }
   isPlaying(now: number): boolean {
     return now < this.until;

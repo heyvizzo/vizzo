@@ -48,20 +48,20 @@ describe("markerPoint", () => {
 
 describe("orbPoint", () => {
   it("starts bottom center, its bottom edge 25 px above the viewport's bottom", () => {
-    expect(orbPoint(null, 1000, 800)).toEqual({ x: 500, y: 800 - 25 - 28 });
+    expect(orbPoint(null, 1000, 800)).toEqual({ x: 500, y: 800 - 25 - 39 });
   });
   it("goes where it was dragged, as fractions of the viewport", () => {
     expect(orbPoint({ x: 0.25, y: 0.5 }, 1000, 800)).toEqual({ x: 250, y: 400 });
   });
   it("stays inside the viewport", () => {
-    expect(orbPoint({ x: 1, y: 0 }, 1000, 800)).toEqual({ x: 1000 - 32, y: 32 });
+    expect(orbPoint({ x: 1, y: 0 }, 1000, 800)).toEqual({ x: 1000 - 43, y: 43 });
   });
 });
 
 describe("panelPosition with the orb's radius", () => {
   it("opens above an orb at the bottom, clear of it", () => {
-    const p = panelPosition(500, 747, 300, { sx: 0, sy: 0, vw: 1000, vh: 800 }, 28);
+    const p = panelPosition(500, 736, 300, { sx: 0, sy: 0, vw: 1000, vh: 800 }, 39);
     expect(p.side).toBe("above");
-    expect(p.top + 300).toBeLessThan(747 - 28);
+    expect(p.top + 300).toBeLessThan(736 - 39);
   });
 });

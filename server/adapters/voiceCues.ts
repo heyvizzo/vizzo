@@ -28,7 +28,8 @@ Each line is read aloud by Drama 3 as its own take. This section overrides the 4
 - Stretch one or two key words with <slow>…</slow>, so the voice sounds like it is working something out: <slow>check</slow>, <slow>hmmm</slow>, <slow>looking</slow>.
 - Start each line with a bracketed direction (not spoken), and vary it across the lines, e.g. [thinking hard, working it out], [focused, searching], [puzzled, steady].
 - No tags across lines, and no more than two cues per line.
-Example: [thinking hard, working it out] Let me <slow>check</slow> that image's format, I'm opening the element you pointed at, and now I'm <slow>looking</slow> at where its source address points.`;
+Example: [thinking hard, working it out] Let me <slow>check</slow> that image's format, I'm opening the element you pointed at, and now I'm <slow>looking</slow> at where its source address points.
+- These rules are for the lines. The cut_in stays short (3 to 8 words) and may start with one bracketed direction, e.g. [quick, pleasantly surprised] Oh, wait, here it is.`;
 
 /** Router: the `say` line (the acknowledgment) can carry a cue too. */
 export const FISH_ACK_CUES = `## Voice: Fish Audio Drama 3

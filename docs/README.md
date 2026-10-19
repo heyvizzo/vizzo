@@ -1,4 +1,4 @@
-# Realtime Voice: docs
+# Vizzo: docs
 
 A desktop app (Electron) for talking to your web app while pointing at it: the project's page in a browser pane, and a voice chat sidebar that works out which element you meant (cursor + word timestamps) and hands hard questions and code changes to a stronger model.
 

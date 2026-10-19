@@ -49,8 +49,8 @@ export function uninstallPaths(env: UninstallEnv): string[] {
     env.userData,
     // Run from the repo's: the packaged app keeps its selections in userData (electron/main.ts), so these stay
     // with `npm run dev`, which may be installed next to it.
-    env.packaged ? null : join(home, ".config", "realtime-voice"),
-    env.packaged ? null : join(env.tmp, "realtime-voice-agents"),
+    env.packaged ? null : join(home, ".config", "vizzo"),
+    env.packaged ? null : join(env.tmp, "vizzo-agents"),
   ];
   // Unpackaged, these are Electron's own (com.github.Electron), shared with any other app run with `electron .`.
   if (env.packaged && env.bundleId) {

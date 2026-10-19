@@ -3,15 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <title>Divider</title>
+  <link rel="stylesheet" href="theme.css" />
   <style>
-    :root { --line: #d4d4d8; --active: #2563eb; }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) { --line: #3f3f46; --active: #60a5fa; }
-    }
-    :root[data-theme="dark"] { --line: #3f3f46; --active: #60a5fa; }
+    /* Colours: theme.css, from shared/theme.ts (scripts/theme-css.ts). */
     html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; cursor: col-resize; user-select: none; }
     .line { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; margin-left: -0.5px; background: var(--line); transition: background 0.1s; }
-    body:hover .line { width: 2px; margin-left: -1px; background: var(--active); }
+    body:hover .line { width: 2px; margin-left: -1px; background: var(--accent); }
     /* While dragging the view covers the window (the panes' moving edge shows where the divider is). */
     body.dragging .line { display: none; }
   </style>

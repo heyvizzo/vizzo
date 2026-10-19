@@ -34,15 +34,14 @@ export interface CliHandlers {
   onEvent?: (ev: Record<string, unknown>) => void;
 }
 
-/** `claude -p` flags every agent gets: stream-json both ways; no hooks/plugins/CLAUDE.md/project settings
- * (--safe-mode), no MCP, nothing saved. */
+/** `claude -p` flags every agent gets: stream-json both ways, nothing saved. What it loads is up to its toggles (claudeArgs). */
 export const CLAUDE_BASE_ARGS = [
   "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-  "--safe-mode", "--strict-mcp-config", "--no-session-persistence",
+  "--no-session-persistence",
 ];
 
 /** Where agents run by default: an empty directory, so no project settings or CLAUDE.md are picked up. */
-export const EMPTY_CWD = join(tmpdir(), "realtime-voice-agents");
+export const EMPTY_CWD = join(tmpdir(), "vizzo-agents");
 
 export class CliAgent {
   readonly proc: ChildProcessWithoutNullStreams;
@@ -54,9 +53,9 @@ export class CliAgent {
   readonly exit: Promise<number | null>;
 
   /** `role`: a label for errors ("router", "grok solver"…). */
-  constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD) {
+  constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD, env: NodeJS.ProcessEnv = process.env) {
     mkdirSync(cwd, { recursive: true });
-    this.proc = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    this.proc = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env });
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (d: string) => this.onData(d));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
@@ -140,6 +139,6 @@ export class CliAgent {
  * Run a CLI that prints `claude -p`'s stream-json events with the prompt in `args` (Grok's -p), spawned for
  * this one request.
  */
-export function runStreamJson(label: string, bin: string, args: string[], cwd: string | undefined, handlers: CliHandlers, timeoutMs: number): Promise<CliResult> {
-  return new CliAgent(label, bin, args, cwd).request(null, handlers, timeoutMs, false);
+export function runStreamJson(label: string, bin: string, args: string[], cwd: string | undefined, handlers: CliHandlers, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<CliResult> {
+  return new CliAgent(label, bin, args, cwd, env).request(null, handlers, timeoutMs, false);
 }

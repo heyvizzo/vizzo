@@ -1,7 +1,6 @@
 :root {
-  --bg: #0f1115; --panel: #171a21; --line: #2a2f3a; --text: #e6e8ee; --muted: #8a93a6; --accent: #6ea8fe;
-  --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; font-size: 14px; color-scheme: dark;
+  /* Colours: shared/theme.ts (vite.config.ts puts them in the page). */
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; font-size: 14px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); }
@@ -13,7 +12,7 @@ nav.top .spacer { flex: 1; }
 #clock[data-status="connected"] { color: var(--ok); }
 #clock[data-status="closed"] { color: var(--err); }
 main { padding: 16px; }
-button, select, input { font: inherit; color: inherit; background: #222733; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+button, select, input { font: inherit; color: inherit; background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }

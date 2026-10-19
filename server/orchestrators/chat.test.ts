@@ -4,8 +4,9 @@ import { DEFAULT_CONFIG, type RunConfig } from "../../shared/config.ts";
 import type { ServerMsg } from "../../shared/protocol.ts";
 import { ConnectionState } from "../connection.ts";
 import { getConversation, resetConversation } from "../conversation.ts";
-import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING, FILLER_LINES, type FakeScenario } from "./fakes.ts";
+import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING, FILLER_CUT_IN, FILLER_LINES, SPOKEN_LINE, type FakeScenario } from "./fakes.ts";
 import { createPipelineOrchestrator } from "./pipeline.ts";
+import { stopJob } from "./jobs.ts";
 import type { ConnectionChannel, Orchestrator, TurnContext, TurnResult } from "./types.ts";
 
 const FRAME = Buffer.alloc(960);
@@ -67,6 +68,26 @@ describe("pipeline in chat mode", () => {
     expect(r.voiceText).toContain(FILLER_LINES[0]);
   }, 10_000);
 
+  // 40 chunks: every take is 800 ms of audio. The ack plays until ~0.8 s, the first progress line from ~1.7 s (after
+  // the 900 ms gap) to ~2.5 s, the next would start at ~3.4 s. The solver's spoken line comes at 2 × solverFirstMs.
+  it("answer ready mid-line: the line is cut off and the answer says why", async () => {
+    const s = setup({ approach: "pipeline" });
+    const r = await run(createPipelineOrchestrator(deps({ estimateS: 8, ttsChunks: 40 }, 1050)), s.ctx);
+    expect(r.error).toBeUndefined();
+    expect(s.events.filter((e) => e.type === "audio.cut")).toEqual([{ type: "audio.cut", turnId: "t1", segment: "filler" }]);
+    expect(r.voiceText).toContain(`${FILLER_LINES[0]} — ${FILLER_CUT_IN} ${SPOKEN_LINE}`);
+    expect(s.segments()).toEqual(["ack", "filler", "answer"]);
+  }, 10_000);
+
+  it("answer ready after a line ended: no cut, and no cut-in", async () => {
+    const s = setup({ approach: "pipeline" });
+    const r = await run(createPipelineOrchestrator(deps({ estimateS: 8, ttsChunks: 40 }, 1470)), s.ctx);
+    expect(r.error).toBeUndefined();
+    expect(s.events.some((e) => e.type === "audio.cut")).toBe(false);
+    expect(r.voiceText).toContain(`${FILLER_LINES[0]} ${SPOKEN_LINE}`);
+    expect(r.voiceText).not.toContain(FILLER_CUT_IN);
+  }, 10_000);
+
   it("fast solver: no fillers", async () => {
     const s = setup({ approach: "pipeline" });
     await run(createPipelineOrchestrator(deps({ estimateS: 8 })), s.ctx);
@@ -95,6 +116,19 @@ describe("pipeline in chat mode", () => {
     expect(getConversation(s.connection).some((t) => t.turnId === jobs[1]!.jobId)).toBe(true);
   });
 
+  it("long task stopped by the user: its solver is aborted, it's marked stopped, nothing is announced", async () => {
+    const s = setup({ approach: "pipeline" });
+    await run(createPipelineOrchestrator(deps({ intent: "task", estimateS: 120 }, 200)), s.ctx);
+    const jobs = () => s.channelEvents.filter((e) => e.type === "job").map((e) => (e as Extract<ServerMsg, { type: "job" }>).job);
+    const jobId = jobs()[0]!.jobId;
+    expect(stopJob(s.connection, s.ctx.channel!, jobId)).toBe(true);
+    expect(stopJob(s.connection, s.ctx.channel!, jobId)).toBe(false); // not running any more
+    await new Promise((r) => setTimeout(r, 600)); // past when the solver would have finished
+    expect(jobs().map((j) => j.state)).toEqual(["running", "stopped"]);
+    expect(s.channelEvents.some((e) => e.type === "notice")).toBe(false);
+    expect(getConversation(s.connection).at(-1)!.user).toMatch(/^\(Background task stopped by the user/);
+  });
+
   it("clarify: a follow-up question, no solver, spoken as the answer", async () => {
     const s = setup({ approach: "pipeline", routerMode: "auto" });
     const r = await run(createPipelineOrchestrator(deps({ intent: "clarify" })), s.ctx);
@@ -120,6 +154,25 @@ describe("pipeline in chat mode", () => {
     expect(r.transcript).toBe("");
     expect(r.voiceText).toBe("");
     expect(s.segments()).toEqual([]);
+  });
+
+  it("a recognizer's no-speech note does not call the router, push-to-talk too", async () => {
+    const s = setup({ approach: "pipeline" });
+    const r = await run(createPipelineOrchestrator(deps({ transcript: "(nothing heard)", words: [{ text: "(nothing", start: 0, end: 0.3 }, { text: "heard)", start: 0.3, end: 0.6 }] })), s.ctx);
+    expect(s.decision()).toBeUndefined();
+    expect(r.transcript).toBe("");
+    expect(r.voiceText).toBe("");
+    expect(s.segments()).toEqual([]);
+  });
+
+  it("a silent clarify from the router: nothing spoken, nothing remembered", async () => {
+    const s = setup({ approach: "pipeline", routerMode: "auto" });
+    const r = await run(createPipelineOrchestrator(deps({ intent: "clarify", silent: true, transcript: "The recording contains only room tone." })), s.ctx);
+    expect(r.transcript).toBe("");
+    expect(r.voiceText).toBe("");
+    expect(r.solverText).toBe("");
+    expect(s.segments()).toEqual([]);
+    expect(getConversation(s.connection)).toEqual([]);
   });
 });
 

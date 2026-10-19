@@ -229,7 +229,7 @@ Same 9 s clip (Drama 3 output, 24 kHz) and `verbose_json` + `timestamp_granulari
 All four return word timestamps (seconds from the first sample, like Scribe), so pointing works with each. Free; the
 Chat cost line shows them as saved vs Scribe. `npm run setup:local-stt` → `.venv-stt` (Python 3.12 via uv:
 `parakeet-mlx` 0.5.3, `moonshine-voice` 0.1.5), `whisperkit-cli` 1.1.1 (Homebrew), models in `.models/` (gitignored).
-Only the selected Speech model's helper runs (server/speechEngines.ts: saved in ~/.config/realtime-voice/speech-selection.json, switched from Settings, which shows loading / load time / RAM; `LOCAL_STT=0` skips starting it ahead of a turn). Adapter: `server/adapters/localStt.ts`.
+Only the selected Speech model's helper runs (server/speechEngines.ts: saved in ~/.config/vizzo/speech-selection.json, switched from Settings, which shows loading / load time / RAM; `LOCAL_STT=0` skips starting it ahead of a turn). Adapter: `server/adapters/localStt.ts`.
 - RAM: `ps` RSS misses MLX's GPU memory (Parakeet: 42 MB RSS vs 2.3 GB footprint). server/memory.ts counts each process's `phys_footprint` (tools/memfoot, `proc_pid_rusage`; under 1 ms for any number of pids). `footprint -p` reports only one process per call. WhisperKit's Core ML model shows as ~60 MB: the rest is held outside its process.
 
 | Option | Model / size | Partials | Languages | Release → final (3 s clip, M5, through /ws) |

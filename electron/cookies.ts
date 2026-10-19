@@ -293,7 +293,7 @@ function chromeProfileDir(userData: string): string | null {
   return null;
 }
 
-async function chromeSafeStoragePassword(): Promise<string> {
+export async function chromeSafeStoragePassword(): Promise<string> {
   const attempts = [
     ["find-generic-password", "-w", "-s", "Chrome Safe Storage", "-a", "Chrome"],
     ["find-generic-password", "-w", "-s", "Chrome Safe Storage"],

@@ -40,7 +40,11 @@ describe("permission copy", () => {
     expect(fullDiskRow("ok").ok).toBe(true);
     expect(fullDiskRow("ok").action).toBeUndefined();
     expect(keychainRow("denied").instruction).toMatch(/Always Allow/);
+    expect(keychainRow("denied").action?.id).toBe("allow-keychain");
     expect(keychainRow("missing").ok).toBe(false);
+    expect(keychainRow("missing").action).toBeUndefined();
+    expect(keychainRow("denied").optional && keychainRow("missing").optional).toBe(true);
+    expect(fullDiskRow("denied").optional).toBeUndefined();
   });
 });
 

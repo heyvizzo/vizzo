@@ -42,6 +42,7 @@ export type ThreadMessageKind =
   | "result" // the harness's answer (spoken line in `text`, full answer in `detail`)
   | "reminder" // "An earlier task on … finished"
   | "reconcile" // system follow-up after another thread changed the same file
+  | "stopped" // the user stopped the run before it finished
   | "error";
 
 export interface ThreadMessage {

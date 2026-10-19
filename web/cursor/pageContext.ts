@@ -7,6 +7,8 @@
 import type { ClickCoords, ClickKind, PageClick, PageEvents, PageHighlight, PageSelection } from "../../shared/protocol.ts";
 import { clickCoords } from "../../shared/clickCoords.ts";
 import { describeElement, type ElLike, type ElementInfo } from "./dom.ts";
+import { HIGHLIGHT_COLOR, PRESELECTED_COLOR } from "./colors.ts";
+import { withAlpha } from "../../shared/theme.ts";
 
 /** A pointer that moved more than this between down and up was a drag (e.g. selecting text), not a click. */
 export const DRAG_PX = 6;
@@ -121,8 +123,8 @@ export interface RecorderOpts {
 const HL_NOW = "turn-highlights";
 const HL_PRE = "turn-preselected";
 const HL_STYLE = `
-::highlight(${HL_NOW}) { background-color: rgba(110, 168, 254, 0.38); color: inherit; }
-::highlight(${HL_PRE}) { background-color: rgba(251, 191, 36, 0.32); color: inherit; }`;
+::highlight(${HL_NOW}) { background-color: ${withAlpha(HIGHLIGHT_COLOR, 0.38)}; color: inherit; }
+::highlight(${HL_PRE}) { background-color: ${withAlpha(PRESELECTED_COLOR, 0.32)}; color: inherit; }`;
 
 type HighlightRegistry = { set(name: string, h: unknown): void; delete(name: string): void };
 const registry = (): HighlightRegistry | null =>

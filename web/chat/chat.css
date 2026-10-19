@@ -3,7 +3,7 @@
 .row .spacer { flex: 1; }
 .row select { font-size: 12px; padding: 3px 5px; }
 .err { color: var(--err); white-space: pre-wrap; }
-button.armed { background: var(--warn); color: #000; }
+button.armed { background: var(--warn); color: var(--panel); }
 
 main.chat {
   display: flex;
@@ -22,17 +22,18 @@ main:not(.hide-ram) .chat-head:has(#session-mem:not([hidden])) { display: flex; 
 .seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; background: transparent; padding: 8px 6px; color: var(--muted); }
 .seg button + button { border-left: 1px solid var(--line); }
-.seg button[aria-pressed="true"] { background: #2a3550; color: var(--text); font-weight: 600; }
+.seg button[aria-pressed="true"] { background: var(--selected); color: var(--text); font-weight: 600; }
 .seg button:disabled { cursor: not-allowed; opacity: 0.6; }
 .opts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
 .opts [hidden] { display: none; }
 .opts .spacer { flex: 1; }
 .head-row { display: flex; gap: 8px; align-items: center; min-height: 30px; }
 .head-row .spacer { flex: 1; }
-.jobs-pill { font-size: 12px; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid #3b4a6b; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
-.jobs-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.jobs-pill { font-size: 12px; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid var(--accent-line); color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
+.jobs-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--st-working-fill); animation: beat var(--st-beat) ease-in-out infinite; }
 .jobs-pill[hidden] { display: none; }
-@keyframes pulse { 50% { opacity: 0.3; } }
+/* Working breathes at the page orb's thinking beat (the palette and --st-beat: web/cursor/colors.ts). */
+@keyframes beat { 50% { transform: scale(.75); } }
 @media (prefers-reduced-motion: reduce) { .jobs-pill::before { animation: none; } }
 
 .messages { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
@@ -47,31 +48,35 @@ div.empty { text-align: left; }
 .empty p + h3 { margin-top: 14px; }
 
 .turn { display: flex; flex-direction: column; gap: 6px; }
+.stamp { align-self: center; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; margin-bottom: -2px; }
+.turn:not(.say) > .stamp { align-self: flex-end; }
+.turn.say > .stamp { align-self: flex-start; }
+.job > .stamp { align-self: flex-end; }
 .bubble { padding: 8px 12px; border-radius: 12px; line-height: 1.45; max-width: 92%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.bubble.user { align-self: flex-end; background: #2a3550; border-bottom-right-radius: 4px; }
+.bubble.user { align-self: flex-end; background: var(--selected); border-bottom-right-radius: 4px; }
 .bubble.user.pending { color: var(--muted); font-style: italic; }
-.bubble.bot { align-self: flex-start; background: #1f232c; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.bubble.bot { align-self: flex-start; background: var(--raised); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
 .bubble.bot .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; white-space: normal; }
 .chips { align-self: flex-end; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .chip b { color: var(--text); font-weight: 600; }
 details.detail { align-self: flex-start; max-width: 92%; font-size: 13px; }
 details.detail summary { cursor: pointer; color: var(--accent); font-size: 12px; }
-details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 6px 0 0; padding: 8px 10px; background: #13161c; border: 1px solid var(--line); border-radius: 8px; }
+details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 6px 0 0; padding: 8px 10px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; }
 .badges { align-self: flex-start; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .badges[hidden] { display: none; }
 .decision { display: contents; }
-.badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #1c2130; border: 1px solid var(--line); color: var(--muted); }
-.badge.intent-question { color: #93c5fd; border-color: #2c4366; }
-.badge.intent-task { color: #c4b5fd; border-color: #44396b; }
-.badge.intent-clarify { color: var(--warn); border-color: #5c4a1c; }
-.badge.intent-answer { color: var(--ok); border-color: #1f4d33; }
+.badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--sunken); border: 1px solid var(--line); color: var(--muted); }
+.badge.intent-question { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 35%, transparent); }
+.badge.intent-task { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 35%, transparent); }
+.badge.intent-clarify { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.badge.intent-answer { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
 .badge.bg { color: var(--accent); border-style: dashed; }
-.tag { font-size: 11px; padding: 1px 8px; border-radius: 4px; background: #3a1d1d; color: #fca5a5; }
+.tag { font-size: 11px; padding: 1px 8px; border-radius: 4px; background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err-text); }
 
-.job { align-self: stretch; margin-left: 18px; padding: 8px 12px; border: 1px dashed #3b4a6b; border-left: 3px solid var(--accent); border-radius: 8px; background: #151a24; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.job[data-state="done"] { border-style: solid; border-color: #1f4d33; border-left-color: var(--ok); }
-.job[data-state="failed"] { border-style: solid; border-color: #5b2424; border-left-color: var(--err); }
+.job { align-self: stretch; margin-left: 18px; padding: 8px 12px; border: 1px dashed var(--accent-line); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--accent-soft); display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.job[data-state="done"] { border-style: solid; border-color: color-mix(in srgb, var(--ok) 35%, transparent); border-left-color: var(--ok); }
+.job[data-state="failed"] { border-style: solid; border-color: color-mix(in srgb, var(--err) 35%, transparent); border-left-color: var(--err); }
 .job-head { font-size: 12px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
 .job[data-state="done"] .job-head { color: var(--ok); }
 .job[data-state="failed"] .job-head { color: var(--err); }
@@ -82,12 +87,14 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 .job[hidden] { display: none; }
 .job [hidden] { display: none; }
 /* A task's marker in the conversation: click to expand its thread (the .job panel right after it). */
-.job-marker { align-self: flex-start; margin-left: 18px; max-width: calc(100% - 18px); display: inline-flex; align-items: center; gap: 8px; padding: 3px 10px 3px 8px; border: 1px solid #3b4a6b; border-radius: 999px; background: #151a24; color: var(--accent); font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
+.job-marker { align-self: flex-start; margin-left: 18px; max-width: calc(100% - 18px); display: inline-flex; align-items: center; gap: 8px; padding: 3px 10px 3px 8px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
 .job-marker::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.job-marker[data-state="running"]::before { animation: pulse 1.4s ease-in-out infinite; }
-.job-marker[aria-expanded="true"] { background: #1c2331; }
-.job-marker[data-state="done"] { border-color: #1f4d33; color: var(--ok); }
-.job-marker[data-state="failed"] { border-color: #5b2424; color: var(--err); }
+.job-marker[data-state="running"]::before { background: var(--st-working-fill); animation: beat var(--st-beat) ease-in-out infinite; }
+.job-marker[aria-expanded="true"] { background: var(--hover); }
+.job-marker[data-state="done"] { border-color: color-mix(in srgb, var(--ok) 35%, transparent); color: var(--ok); }
+.job-marker[data-state="done"]::before { background: var(--st-done-fill); }
+.job-marker[data-state="failed"] { border-color: color-mix(in srgb, var(--err) 35%, transparent); color: var(--err); }
+.job-marker[data-state="failed"]::before { background: var(--st-failed-fill); }
 .job-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .job-marker-q { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-marker-status { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -105,7 +112,7 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 .hang { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 12px; color: var(--muted); }
 .hang[hidden] { display: none; }
 .hang input { width: 4.5em; padding: 3px 6px; font-size: 12px; }
-.meter { display: block; width: 100%; height: 92px; border: 1px solid var(--line); border-radius: 8px; background: #10141c; cursor: ns-resize; touch-action: none; }
+.meter { display: block; width: 100%; height: 92px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); cursor: ns-resize; touch-action: none; }
 .meter[hidden] { display: none; }
 .meter.live { border-color: var(--err); }
 .meter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -114,11 +121,11 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 .info-icon { width: 15px; height: 15px; padding: 0; border: 1px solid var(--muted); border-radius: 50%; background: transparent; color: var(--muted); font: italic 600 10px/13px Georgia, serif; text-align: center; cursor: help; }
 .info-icon:hover, .info-icon:focus-visible { color: var(--text); border-color: var(--text); }
 /* Placed against the row, not the icon, so it stays inside the narrow sidebar. */
-.info-tip { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 4px 14px rgb(0 0 0 / 0.18); font-size: 11px; line-height: 1.4; color: var(--text); opacity: 0; visibility: hidden; transition: opacity 0.12s, visibility 0.12s; pointer-events: none; }
+.info-tip { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 4px 14px var(--shadow); font-size: 11px; line-height: 1.4; color: var(--text); opacity: 0; visibility: hidden; transition: opacity 0.12s, visibility 0.12s; pointer-events: none; }
 .info:hover .info-tip, .info:focus-within .info-tip { opacity: 1; visibility: visible; }
 .ptt-big { flex: 1; padding: 14px; font-size: 15px; font-weight: 600; border-radius: 10px; user-select: none; touch-action: none; }
-.ptt-big.live { background: #7f1d1d; border-color: var(--err); }
-.stop { padding: 14px 16px; font-weight: 600; border-radius: 10px; border-color: #7f1d1d; color: #fca5a5; }
+.ptt-big.live { background: var(--err-soft); border-color: var(--err); }
+.stop { padding: 14px 16px; font-weight: 600; border-radius: 10px; border-color: color-mix(in srgb, var(--err) 50%, transparent); color: var(--err-text); }
 .stop[hidden] { display: none; }
 .ptt-big:disabled { opacity: 0.5; cursor: not-allowed; }
 .status { font-size: 12px; color: var(--muted); min-height: 1.2em; margin: 0; }
@@ -129,54 +136,58 @@ details.prompts { align-self: stretch; font-size: 12px; }
 details.prompts > summary { cursor: pointer; color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; }
 details.prompts > summary:hover { color: var(--accent); }
 .pcalls { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-details.pcall { border: 1px solid var(--line); border-radius: 8px; background: #13161c; padding: 6px 10px; }
+details.pcall { border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); padding: 6px 10px; }
 details.pcall > summary { cursor: pointer; font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--text); }
 .pmeta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; font: 11px ui-monospace, monospace; color: var(--muted); overflow-wrap: anywhere; }
 .pcopy { margin-left: auto; font-size: 11px; padding: 2px 8px; }
 details.psys { margin: 4px 0; }
 details.psys > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: var(--muted); }
 .pmsg { margin: 6px 0; border-left: 2px solid var(--line); padding-left: 8px; }
-.pmsg.role-user { border-left-color: #3b5b8f; }
-.pmsg.role-assistant { border-left-color: #2f6b4b; }
-.pmsg.role-system { border-left-color: #6b5a2f; }
+.pmsg.role-user { border-left-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+.pmsg.role-assistant { border-left-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.pmsg.role-system { border-left-color: color-mix(in srgb, var(--warn) 50%, transparent); }
 .pmsg-head { font: 10.5px ui-monospace, monospace; color: var(--muted); text-transform: none; margin-bottom: 2px; }
-details.pcall pre, details.psys pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.45 ui-monospace, monospace; color: #cfd6e4; max-height: 320px; overflow: auto; }
+details.pcall pre, details.psys pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.45 ui-monospace, monospace; color: var(--code); max-height: 320px; overflow: auto; }
 
 /* Language tag, annotated transcript and cursor-rest chips */
-.bubble.user .lang { display: inline-block; margin-left: 8px; padding: 0 5px; border-radius: 4px; font: 600 10px/15px ui-monospace, monospace; text-transform: uppercase; color: #c7d2fe; background: #1c2334; border: 1px solid #3b4a6b; vertical-align: 1px; font-style: normal; }
+.bubble.user .lang { display: inline-block; margin-left: 8px; padding: 0 5px; border-radius: 4px; font: 600 10px/15px ui-monospace, monospace; text-transform: uppercase; color: var(--indigo); background: var(--accent-soft); border: 1px solid var(--accent-line); vertical-align: 1px; font-style: normal; }
 .annot { align-self: flex-end; max-width: 92%; font: 11.5px/1.4 ui-monospace, monospace; color: var(--muted); text-align: right; overflow-wrap: anywhere; }
 .annot[hidden] { display: none; }
-.chip.rest { border-style: dashed; border-color: #9d3f72; }
-.chip.rest b { color: #f472b6; }
-.chip.rest .whole { color: #f9a8d4; }
+.chip.rest { border-style: dashed; border-color: color-mix(in srgb, var(--pink) 55%, transparent); }
+.chip.rest b { color: var(--pink); }
+.chip.rest .whole { color: var(--pink-soft); }
 
 /* Responses under each call */
 .pbadge { color: var(--ok); }
 details.pcall.err .pbadge { color: var(--err); }
 .presps { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; border-top: 1px dashed var(--line); padding-top: 6px; }
-details.presp > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: #9fd8b5; }
+details.presp > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: var(--ok); }
 details.presp.err > summary { color: var(--err); }
-details.presp pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.4 ui-monospace, monospace; color: #cfd6e4; max-height: 360px; overflow: auto; background: #0f1218; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+details.presp pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.4 ui-monospace, monospace; color: var(--code); max-height: 360px; overflow: auto; background: var(--sunken); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
 
 /* Cost per turn */
 .costbox { align-self: stretch; }
-details.cost > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: #e5c07b; }
+details.cost > summary { cursor: pointer; font: 11px ui-monospace, monospace; color: var(--cost); }
 table.ctable { width: 100%; border-collapse: collapse; margin-top: 4px; font: 11px ui-monospace, monospace; }
 table.ctable td, table.ctable th { padding: 2px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 table.ctable .cdetail { color: var(--muted); }
-table.ctable .cusd { text-align: right; white-space: nowrap; color: #e5c07b; }
+table.ctable .cusd { text-align: right; white-space: nowrap; color: var(--cost); }
 table.ctable tr.cgroup th { color: var(--muted); font-weight: 600; padding-top: 6px; }
 table.ctable tr.ctotal td { font-weight: 700; border-bottom: 0; }
 
 table.ctable .cusd.saved { color: var(--ok); }
 
-.session-cost { font: 11px ui-monospace, monospace; color: #e5c07b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.session-cost { font: 11px ui-monospace, monospace; color: var(--cost); min-width: 0; overflow-wrap: anywhere; }
 .session-cost[hidden] { display: none; }
 .session-mem { font: 11px ui-monospace, monospace; color: var(--muted); white-space: nowrap; cursor: help; }
 .session-mem[hidden] { display: none; }
 /* Sidebar RAM / Cost checkboxes unticked */
 .hide-ram :is(.session-mem, .thread-mem, .thread-mem-all),
 .hide-cost :is(.session-cost, .costbox, .thread-page-cost, .cost-text) { display: none !important; }
+/* Debugging details unticked: errors, "interrupted"/"stopped" tags and a queued turn's Remove stay. */
+.hide-debug :is(.annot, .chips, .decision, .bubble.user .lang, .meta > span:not(.err), details.prompts, details.detail),
+.hide-debug .badges:not(:has(.tag)),
+.hide-debug .meta:not(:has(.err, button)) { display: none !important; }
 
 /* Project folder (Electron only): name as a button, full path after it */
 .project { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; min-width: 0; }
@@ -209,33 +220,33 @@ table.ctable .cusd.saved { color: var(--ok); }
 .thread-row { display: flex; align-items: center; gap: 2px; }
 .thread-row .thread-item { flex: 1; min-width: 0; }
 .thread-del { flex: none; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
-.thread-del:hover { background: #1c2331; color: var(--err); }
+.thread-del:hover { background: var(--hover); color: var(--err); }
 .thread-del:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.thread-item:hover { background: #1c2331; border-color: var(--line); }
+.thread-item:hover { background: var(--hover); border-color: var(--line); }
 .thread-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.thread-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #6366f1; }
-.thread-item[data-state="running"] .thread-dot { background: transparent; border: 2px solid #6366f1; border-top-color: transparent; width: 10px; height: 10px; box-sizing: border-box; animation: spin 0.9s linear infinite; }
-.thread-item[data-state="idle"] .thread-dot, .thread-item[data-state="pending"] .thread-dot { background: var(--ok); }
-.thread-item[data-state="failed"] .thread-dot { background: var(--err); }
-.thread-item[data-state="queued"] .thread-dot { background: #a78bfa; opacity: .55; }
+.thread-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--st-working-fill); }
+.thread-item[data-state="running"] .thread-dot { animation: beat var(--st-beat) ease-in-out infinite; }
+.thread-item[data-state="idle"] .thread-dot, .thread-item[data-state="pending"] .thread-dot { background: var(--st-done-fill); }
+.thread-item[data-asking] .thread-dot { background: var(--st-asking-fill); }
+.thread-item[data-asking] .thread-state { color: var(--st-asking); }
+.thread-item[data-state="failed"] .thread-dot { background: var(--st-failed-fill); }
+.thread-item[data-state="queued"] .thread-dot { background: var(--st-queued-fill); opacity: .55; }
 .thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .thread-state { flex: none; font-size: 11px; color: var(--muted); }
 .thread-cost { font-variant-numeric: tabular-nums; cursor: help; }
 .thread-item[data-state="failed"] .thread-state { color: var(--err); }
-@keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .thread-item[data-state="running"] .thread-dot { animation: none; border-style: dashed; border-top-color: #6366f1; }
+  .thread-item[data-state="running"] .thread-dot { animation: none; }
 }
-.turn.say .bubble.bot.reply { border-color: #5c4a1c; }
 .bubble.bot button.who.link { display: block; padding: 0; margin-bottom: 2px; border: 0; background: transparent; font-size: 11px; color: var(--accent); cursor: pointer; text-align: left; white-space: normal; }
 .bubble.bot button.who.link:hover { text-decoration: underline; }
 
 /* Queued feedback (Instant off): recorded, not sent yet. */
-.turn.queued .bubble.user { background: transparent; border: 1px dashed #3b4a6b; color: var(--muted); }
+.turn.queued .bubble.user { background: transparent; border: 1px dashed var(--accent-line); color: var(--muted); }
 .turn.queued .meta { align-self: flex-end; }
 .queued-remove { padding: 0; border: 0; background: transparent; font-size: 11px; color: var(--muted); cursor: pointer; }
 .queued-remove:hover { color: var(--accent); text-decoration: underline; }
 /* A comment typed or dictated in comment mode (web/cursor/commentOverlay.ts): its own bubble, marked as typed. */
-.turn.comment .bubble.user { border-left: 3px solid #6366f1; }
-.turn.comment:not(.queued) .bubble.user::before { content: "Comment"; display: block; font: 600 10px/14px ui-sans-serif, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; color: #a5b4fc; font-style: normal; }
+.turn.comment .bubble.user { border-left: 3px solid var(--accent); }
+.turn.comment:not(.queued) .bubble.user::before { content: "Comment"; display: block; font: 600 10px/14px ui-sans-serif, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; color: var(--indigo); font-style: normal; }

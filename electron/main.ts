@@ -4,7 +4,7 @@
 // (or webServer.ts) proxies /api and /ws to it. The server only starts once a
 // project folder is chosen, and it gets the browser pane's URL with every page change (it goes into each turn's context).
 import {
-  app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, safeStorage, screen, shell, systemPreferences, utilityProcess,
+  app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, nativeTheme, safeStorage, screen, shell, systemPreferences, utilityProcess,
   type IpcMainEvent, type IpcMainInvokeEvent, type UtilityProcess, type WebContents,
 } from "electron";
 import type { ViteDevServer } from "vite";
@@ -13,13 +13,15 @@ import { readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { CookieReadError, readBrowserCookies, toElectronCookie, type BrowserId, type ElectronCookie } from "./cookies.ts";
+import { CookieReadError, chromeSafeStoragePassword, readBrowserCookies, toElectronCookie, type BrowserId, type ElectronCookie } from "./cookies.ts";
 import { applyEnv, ENV_FIELDS, SECRET_KEYS, sanitizeEnv } from "./settings.ts";
 import { keychainService, openEnv, sealEnv, type Cipher } from "./secrets.ts";
 import { bundlePath, readBundleId, tildify, uninstallPaths } from "./uninstall.ts";
 import { startWebServer } from "./webServer.ts";
+import { LEGACY_NAMES, legacySecrets, moveLegacyDir } from "./rename.ts";
 import { loginShellPath, mergePath } from "./shellPath.ts";
 import { chromeKeychainAccess, fullDiskAccess, fullDiskRow, keychainRow, microphoneRow, type PermissionRow } from "./permissions.ts";
+import { THEME } from "../shared/theme.ts";
 
 const TOOLBAR_HEIGHT = 44;
 const SIDEBAR_WIDTH = 480;
@@ -32,9 +34,9 @@ const DIVIDER_WIDTH = 7;
 const COLLAPSED_BAR_WIDTH = 56;
 const HOME_PAGE = "https://duckduckgo.com/";
 const ROOT = join(__dirname, "..");
-const APP_NAME = "Voice Latency Lab";
+const APP_NAME = "Vizzo";
 // Electron names the settings folder after package.json's name, which `npm run dev` uses too: the packaged app keeps
-// its own (~/Library/Application Support/Voice Latency Lab), so the two never share settings and its Uninstall
+// its own (~/Library/Application Support/Vizzo), so the two never share settings and its Uninstall
 // only deletes its own. Set before anything reads userData.
 // Its name too: safeStorage names the Keychain entry that encrypts the API keys after it ("<name> Safe Storage"),
 // so the packaged app's (and its Uninstall's) is its own, not the dev app's.
@@ -42,6 +44,10 @@ if (app.isPackaged) {
   app.setName(APP_NAME);
   app.setPath("userData", join(app.getPath("appData"), APP_NAME));
 }
+/** What this app was called before it was Vizzo (electron/rename.ts): its settings folder and Keychain entry move over. */
+const LEGACY_NAME = app.isPackaged ? LEGACY_NAMES.packaged : LEGACY_NAMES.dev;
+moveLegacyDir(join(app.getPath("appData"), LEGACY_NAME), app.getPath("userData"));
+if (!app.isPackaged) moveLegacyDir(join(homedir(), ".config", LEGACY_NAMES.config), join(homedir(), ".config", "vizzo"));
 /**
  * The files child processes run (scripts/, tools/, dist-native/) and the server reads (server/prompts/). Packaged,
  * they're unpacked next to the asar (package.json build.asarUnpack): bash, Python and the Swift helpers can't read in it.
@@ -86,6 +92,8 @@ let turnFrom: number | null = null;
 
 interface Settings {
   projectDir?: string; sidebarWidth?: number; sidebarHidden?: boolean; lastUrl?: string;
+  /** Where the Settings window was last left (it opens there again). */
+  settingsBounds?: { x: number; y: number; width: number; height: number };
   /** Settings' readable values (voice IDs…); the API keys are in `secrets`, encrypted (electron/secrets.ts). */
   env?: Record<string, string>;
   secrets?: Record<string, string>;
@@ -130,6 +138,13 @@ function cipher(): Cipher | null {
 function storedEnv(): { values: Record<string, string>; unreadable: string[] } {
   const s = readSettings();
   const opened = openEnv(s, SECRET_KEYS, cipher());
+  // Saved before the rename, under the old name's Keychain password: decrypt with that, save under the new one.
+  const legacy = opened.unreadable.length ? legacySecrets(s, opened.unreadable, SECRET_KEYS, LEGACY_NAME) : {};
+  if (Object.keys(legacy).length) {
+    Object.assign(opened.env, legacy);
+    opened.unreadable = opened.unreadable.filter((key) => !(key in legacy));
+    opened.plaintext.push(...Object.keys(legacy));
+  }
   // Saved before encryption: encrypt them now (the plain copies go).
   if (opened.plaintext.length) {
     try { saveEnv(opened.env); } catch (err) { console.error(err); }
@@ -157,12 +172,21 @@ function openSettings() {
     settingsWin.focus();
     return;
   }
+  // Resizable; it opens at the size and place it was left, if that's still on a screen.
+  const saved = readSettings().settingsBounds;
+  const onScreen = saved && screen.getAllDisplays().some(({ workArea: a }) =>
+    saved.x < a.x + a.width && saved.x + saved.width > a.x && saved.y < a.y + a.height && saved.y + saved.height > a.y);
   settingsWin = new BrowserWindow({
-    width: 640,
-    height: 760,
+    ...(onScreen ? saved : { width: 920, height: 760 }),
+    minWidth: 560,
+    minHeight: 400,
+    resizable: true,
     title: "Settings",
     webPreferences: { preload: join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true },
   });
+  const keepBounds = () => { if (settingsWin && !settingsWin.isDestroyed()) saveSettings({ settingsBounds: settingsWin.getNormalBounds() }); };
+  settingsWin.on("resized", keepBounds);
+  settingsWin.on("moved", keepBounds);
   settingsWin.on("closed", () => { settingsWin = null; });
   // A Vite page (web/settings.html), like the chat: it shares the chat's settings code and asks the server for voices and models.
   const w = settingsWin;
@@ -218,7 +242,7 @@ function startServer(port: number): Promise<void> {
         APP_ROOT: FILES_ROOT + "/",
         SPEECH_DATA_DIR: SPEECH_DIR,
         // Packaged: its turn logs and its saved LLM / speech selections in its own folder (not the repo's, nor
-        // ~/.config/realtime-voice, which `npm run dev` uses).
+        // ~/.config/vizzo, which `npm run dev` uses).
         ...(app.isPackaged ? {
           RESULTS_DIR: process.env.RESULTS_DIR ?? join(app.getPath("userData"), "results"),
           LLM_SELECTION_FILE: process.env.LLM_SELECTION_FILE ?? join(app.getPath("userData"), "llm-selection.json"),
@@ -419,14 +443,22 @@ function holdCommentKey(input: Electron.Input) {
   }
 }
 
+/** The toolbar's --chrome (shared/theme.ts) for the system theme. */
+const windowBackground = () => THEME[nativeTheme.shouldUseDarkColors ? "dark" : "light"].chrome;
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1440,
     height: 900,
     title: APP_NAME,
     titleBarStyle: "hiddenInset",
+    backgroundColor: windowBackground(),
   });
+  // Behind the views (seen while resizing): the shell's bar colour, light or dark with the system.
+  const onTheme = () => win?.setBackgroundColor(windowBackground());
+  nativeTheme.on("updated", onTheme);
   win.on("closed", () => {
+    nativeTheme.off("updated", onTheme);
     if (drag) clearInterval(drag.timer);
     settingsWin?.close();
     win = null; toolbar = null; folderBar = null; browser = null; sidebar = null; divider = null; tooltip = null; tooltipPending = null; drag = null;
@@ -483,6 +515,13 @@ function createWindow() {
     });
   }
   for (const view of [toolbar, sidebar, browser]) view.webContents.on("before-input-event", (_e, input) => holdCommentKey(input));
+  // Esc stops the voice wherever focus is (three in a row ask to stop its task too): the sidebar handles its own Esc,
+  // the browser pane's and the toolbar's are relayed (the key still reaches the page, so its own Esc works as before).
+  for (const view of [toolbar, browser]) {
+    view.webContents.on("before-input-event", (_e, input) => {
+      if (input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat) sidebar?.webContents.send("escape");
+    });
+  }
   // The key can come up in another app: a held mode ends when the window loses focus.
   win.on("blur", () => { if (commentHeld) setCommentMode(false, true); });
 
@@ -633,6 +672,12 @@ function registerIpc() {
   ipcMain.handle("settings:allow-microphone", async (e) => {
     if (!fromSettings(e)) return [];
     await systemPreferences.askForMediaAccess("microphone");
+    return permissionStatuses();
+  });
+  // Reading Chrome's Safe Storage password is what shows the macOS keychain prompt; a refusal just re-checks.
+  ipcMain.handle("settings:allow-keychain", async (e) => {
+    if (!fromSettings(e)) return [];
+    await chromeSafeStoragePassword().catch(() => undefined);
     return permissionStatuses();
   });
   ipcMain.handle("settings:open-privacy", (e, pane: unknown) => {

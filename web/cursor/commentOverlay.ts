@@ -17,22 +17,22 @@ const GAP = 10;
 export const COMMENT_CSS = `
 /* No z-index on the layer: the hover outline goes under the thread layer (z-index 1, its bubbles and markers), the
    pin and bubble over it. */
-.cm-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: #e6e8ee; }
-.cm-hover { position: absolute; box-sizing: border-box; border: 2px solid #6366f1; border-radius: 4px; background: rgba(99,102,241,.08); pointer-events: none; z-index: 0; }
-.cm-hover-tag { position: absolute; left: -2px; bottom: 100%; margin-bottom: 2px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/16px ui-sans-serif, system-ui, sans-serif; padding: 0 6px; border-radius: 3px; background: #6366f1; color: #fff; }
+.cm-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: var(--ui-text); }
+.cm-hover { position: absolute; box-sizing: border-box; border: 2px solid var(--ui-accent); border-radius: 4px; background: color-mix(in srgb, var(--ui-accent) 8%, transparent); pointer-events: none; z-index: 0; }
+.cm-hover-tag { position: absolute; left: -2px; bottom: 100%; margin-bottom: 2px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/16px ui-sans-serif, system-ui, sans-serif; padding: 0 6px; border-radius: 3px; background: var(--ui-accent-fill); color: var(--ui-on-accent); }
 .cm-pin, .cm-bubble { z-index: 2; }
-.cm-pin { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border-radius: 50% 50% 50% 0; border: 2px solid #fff; background: #6366f1; box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 1px 4px rgba(0,0,0,.35); pointer-events: none; }
-.cm-bubble { position: absolute; width: ${BUBBLE_WIDTH}px; box-sizing: border-box; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: #171a21; border: 1px solid #2a2f3a; border-radius: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.45); pointer-events: auto; text-align: left; cursor: default; }
+.cm-pin { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border-radius: 50% 50% 50% 0; border: 2px solid #fff; background: var(--ui-accent-fill); box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 1px 4px rgba(0,0,0,.35); pointer-events: none; }
+.cm-bubble { position: absolute; width: ${BUBBLE_WIDTH}px; box-sizing: border-box; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 14px; box-shadow: 0 8px 28px var(--ui-shadow); pointer-events: auto; text-align: left; cursor: default; }
 .cm-bubble.nudge { animation: cm-nudge .35s ease-in-out; }
 .cm-head { display: flex; align-items: center; gap: 6px; padding: 0 0 0 4px; }
-.cm-title { flex: 1; min-width: 0; font-size: 12px; color: #8a93a6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cm-title b { color: #e6e8ee; font-weight: 600; }
-.cm-close { flex: none; width: 22px; height: 22px; padding: 0; font: 15px/20px ui-sans-serif, system-ui, sans-serif; color: #8a93a6; background: transparent; border: 0; border-radius: 50%; cursor: pointer; }
-.cm-close:hover { color: #e6e8ee; background: #222733; }
-.cm-close:focus-visible { outline: 2px solid #6ea8fe; outline-offset: 1px; }
+.cm-title { flex: 1; min-width: 0; font-size: 12px; color: var(--ui-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cm-title b { color: var(--ui-text); font-weight: 600; }
+.cm-close { flex: none; width: 22px; height: 22px; padding: 0; font: 15px/20px ui-sans-serif, system-ui, sans-serif; color: var(--ui-muted); background: transparent; border: 0; border-radius: 50%; cursor: pointer; }
+.cm-close:hover { color: var(--ui-text); background: var(--ui-hover); }
+.cm-close:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
 .cm-queued { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow: auto; }
-.cm-queued-label { font-size: 11px; color: #c4b5fd; padding: 0 4px; }
-.cm-queued-msg { align-self: flex-end; max-width: 90%; padding: 4px 10px; border-radius: 12px 12px 4px 12px; background: rgba(167,139,250,.14); border: 1px dashed #5b4b99; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cm-queued-label { font-size: 11px; color: var(--ui-violet); padding: 0 4px; }
+.cm-queued-msg { align-self: flex-end; max-width: 90%; padding: 4px 10px; border-radius: 12px 12px 4px 12px; background: color-mix(in srgb, var(--ui-violet) 14%, transparent); border: 1px dashed color-mix(in srgb, var(--ui-violet) 50%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; }
 @keyframes cm-nudge { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
 @media (prefers-reduced-motion: reduce) {
   .cm-bubble.nudge { animation: none; }
@@ -272,7 +272,7 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     title.append("Comment on ", h("b", undefined, name));
     const close = h("button", "cm-close", "×");
     close.type = "button";
-    close.title = "Close (Esc when empty)";
+    close.dataset.tip = "Close (Esc when empty)";
     close.setAttribute("aria-label", "Close");
     close.addEventListener("pointerdown", (e) => e.preventDefault());
     close.onclick = () => closeDraft();

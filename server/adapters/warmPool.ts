@@ -6,7 +6,7 @@
 // without a pool (a turn sent with another config) starts one on the spot, so only its first request is cold.
 // Element threads take their agents here too (`takeThreadAgent`): kept across requests, never back in a pool.
 // A fast tier on a model API (llmApi.ts) has nothing to warm: its roles get no pool.
-import { isHarness, LLM_PROVIDER_LABELS, type HarnessId, type LlmChoice, type LlmTier } from "../../shared/config.ts";
+import { cleanToggles, isHarness, LLM_PROVIDER_LABELS, type HarnessId, type LlmChoice, type LlmTier } from "../../shared/config.ts";
 import type { CliRole } from "./claudeCli.ts";
 import { AGENT_FACTORIES, KEEPS_POOLED, stopSharedServers, type AgentFactory, type AgentSpec, type HarnessResult, type WarmAgent } from "./harnesses.ts";
 
@@ -35,14 +35,16 @@ export function agentSpec(role: CliRole, choice: LlmChoice): AgentSpec {
   const harness = choice.provider;
   if (!isHarness(harness)) throw new Error(`${LLM_PROVIDER_LABELS[harness]} is a model API, not a harness: it can't run the ${role}`);
   const { system, project } = specSource(role, harness);
+  const toggles = cleanToggles(harness, choice.toggles);
   return {
     role, harness, model: choice.model,
     ...(choice.level ? { level: choice.level } : {}), ...(choice.speed === "fast" ? { speed: "fast" as const } : {}),
+    ...(toggles ? { toggles } : {}),
     system, ...(role === "solver" && project ? { project } : {}),
   };
 }
 
-const keyOf = (s: AgentSpec): string => JSON.stringify([s.role, s.harness, s.model, s.level ?? "", s.speed ?? "", s.project ?? "", s.system]);
+const keyOf = (s: AgentSpec): string => JSON.stringify([s.role, s.harness, s.model, s.level ?? "", s.speed ?? "", s.toggles ?? {}, s.project ?? "", s.system]);
 
 class Pool {
   private idle: WarmAgent[] = [];
@@ -133,10 +135,14 @@ export function configureWarm(selection: Record<LlmTier, LlmChoice>): void {
   if (started.length) log(`[agents] warming: ${started.join(", ")}`);
 }
 
-/** One request on a warm agent for `role` with `choice` (a pool is started for it if there isn't one). */
+/**
+ * One request on a warm agent for `role` with `choice` (a pool is started for it if there isn't one). `signal`
+ * aborted: the agent is killed and this rejects at once.
+ */
 export async function harnessRequest(
-  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number,
+  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal,
 ): Promise<HarnessResult> {
+  signal?.throwIfAborted();
   hookExit();
   const spec = agentSpec(role, choice);
   const key = keyOf(spec);
@@ -148,9 +154,18 @@ export async function harnessRequest(
   const agent = pool.take();
   const h = spec.harness;
   inflight.set(h, (inflight.get(h) ?? 0) + 1);
+  let onAbort: (() => void) | null = null;
   try {
-    return await agent.request(user, onText, timeoutMs);
+    const request = agent.request(user, signal ? (d) => { if (!signal.aborted) onText?.(d); } : onText, timeoutMs);
+    if (!signal) return await request;
+    request.catch(() => {}); // aborted: nobody waits for it any more
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => { agent.kill(); reject(signal.reason ?? new Error("aborted")); };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    return await Promise.race([request, aborted]);
   } finally {
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
     inflight.set(h, (inflight.get(h) ?? 1) - 1);
   }
 }

@@ -119,7 +119,7 @@ export interface LlmChoice { provider: LlmProvider; model: string; level?: strin
  * across harnesses; each harness lists only the ones it can switch (server/adapters/harnesses.ts maps them to its
  * flags, config or environment).
  */
-export type HarnessToggleId = "shell" | "web" | "subagents" | "images" | "browser" | "mcp" | "skills" | "hooks" | "plugins" | "instructions";
+export type HarnessToggleId = "shell" | "web" | "subagents" | "images" | "mcp" | "skills" | "hooks" | "plugins" | "instructions";
 /** A tier's switches as chosen; an id left out is at its default. */
 export type HarnessToggles = Partial<Record<HarnessToggleId, boolean>>;
 export interface HarnessToggle { id: HarnessToggleId; label: string; hint: string; default: boolean }
@@ -151,7 +151,7 @@ export const HARNESS_TOGGLES: Record<HarnessId, HarnessToggle[]> = {
     toggle("web", "Web", "web_search and web_fetch"),
     toggle("subagents", "Subagents", "spawn_subagent"),
     toggle("mcp", "MCP servers", "Your MCP servers (Grok's and Claude's/Cursor's), reached through search_tool/use_tool"),
-    toggle("skills", "Skills", "~/.grok/skills and Claude's/Cursor's skills (~/.agents/skills always load)"),
+    toggle("skills", "Skills", "~/.grok/skills and Claude's/Cursor's skills (Grok's bundled skills, ~/.agents/skills and Claude plugins' skills always load)"),
     toggle("hooks", "Hooks", "~/.grok/hooks and Claude's/Cursor's hooks"),
     toggle("plugins", "Plugins", "Your enabled Grok plugins"),
     toggle("instructions", "Rules", "Claude's/Cursor's rules and CLAUDE.md files"),
@@ -171,10 +171,9 @@ export const HARNESS_TOGGLES: Record<HarnessId, HarnessToggle[]> = {
     toggle("instructions", "AGENTS.md", "AGENTS.md and CLAUDE.md files"),
   ],
   omp: [
-    toggle("shell", "Shell", "bash and python"),
-    toggle("web", "Web", "web_search and fetch"),
+    toggle("shell", "Shell", "bash and eval (Python, JS)"),
+    toggle("web", "Web search", "web_search"),
     toggle("subagents", "Subagents", "The task tool"),
-    toggle("browser", "Browser", "The browser tool"),
     toggle("skills", "Skills", "Skills discovery"),
     toggle("plugins", "Extensions", "Your extensions (~/.omp/agent/extensions): hooks and custom tools"),
     toggle("instructions", "Rules", "Rules discovery"),
@@ -246,6 +245,8 @@ export interface RunConfig {
   backgroundLongTasks: boolean;
   /** Estimate (seconds) above which a task counts as long. */
   longTaskSeconds: number;
+  /** How long (minutes) a solver run (a task, a background job, a thread's run) may take before it is stopped. */
+  taskTimeoutMinutes: number;
   /**
    * Element threads (docs/PLAN-threads.md): route each turn to a per-element thread with its own persistent harness
    * session instead of one conversation. Needs `memory`.
@@ -279,6 +280,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   fillers: false,
   backgroundLongTasks: false,
   longTaskSeconds: 20,
+  taskTimeoutMinutes: 15,
   threads: false,
   language: "en",
   llm: { fast: { provider: "claude-code", model: "claude-haiku-5-5", level: "low" }, smart: { provider: "claude-code", model: "claude-opus-5-5", level: "medium" } },
@@ -296,6 +298,15 @@ export function llmOf(config: Partial<RunConfig>): Record<LlmTier, LlmChoice> {
     fast: llm.fast && isLlmProvider(llm.fast.provider) ? llm.fast : DEFAULT_CONFIG.llm.fast,
     smart: llm.smart && isHarness(llm.smart.provider) ? llm.smart : DEFAULT_CONFIG.llm.smart,
   };
+}
+
+/** The solver time limit (Settings → Models → Turns): whole minutes in this range. */
+export const TASK_TIMEOUT_MIN = 1;
+export const TASK_TIMEOUT_MAX = 240;
+export const validTaskTimeout = (m: unknown): m is number => Number.isInteger(m) && (m as number) >= TASK_TIMEOUT_MIN && (m as number) <= TASK_TIMEOUT_MAX;
+/** The config's solver time limit in ms (a config without a valid one gets the default). */
+export function taskTimeoutMs(config: Partial<RunConfig>): number {
+  return (validTaskTimeout(config.taskTimeoutMinutes) ? config.taskTimeoutMinutes : DEFAULT_CONFIG.taskTimeoutMinutes) * 60_000;
 }
 
 export const MODELS = {

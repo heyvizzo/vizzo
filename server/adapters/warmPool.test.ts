@@ -65,8 +65,44 @@ describe("re-warming on a new selection", () => {
     expect(warmStatus().map((p) => `${p.role}:${p.harness}`).sort()).toEqual(["fillers:codex", "router:codex", "solver:claude-code"]);
   });
 
+  it("a changed toggle re-warms the tier; one set back to its default doesn't", () => {
+    configureWarm(CLAUDE);
+    const solver = made.find((a) => a.spec.role === "solver")!;
+    configureWarm({ ...CLAUDE, smart: { ...CLAUDE.smart, toggles: { shell: false, web: false } } });
+    expect(solver.killed).toBe(false);
+    configureWarm({ ...CLAUDE, smart: { ...CLAUDE.smart, toggles: { shell: true } } });
+    expect(solver.killed).toBe(true);
+    expect(made.at(-1)!.spec).toMatchObject({ role: "solver", toggles: { shell: true } });
+  });
+
   it("Grok keeps no agents waiting (it can't be started ahead)", () => {
     configureWarm({ fast: { provider: "grok", model: "grok-4.7-build-fast" }, smart: CLAUDE.smart });
     expect(made.filter((a) => a.spec.harness === "grok")).toHaveLength(0);
+  });
+});
+
+describe("aborting a request", () => {
+  /** An agent whose request never finishes on its own (a long solver run). */
+  class HangingAgent implements WarmAgent {
+    killed = false;
+    constructor(readonly spec: AgentSpec) { hanging.push(this); }
+    alive() { return !this.killed; }
+    ready() { return true; }
+    request(): Promise<HarnessResult> { return new Promise(() => {}); }
+    kill() { this.killed = true; }
+  }
+  let hanging: HangingAgent[] = [];
+  beforeEach(() => { hanging = []; setAgentFactory((s) => new HangingAgent(s)); });
+
+  it("rejects at once and kills the agent; an already aborted signal never takes one", async () => {
+    const abort = new AbortController();
+    const p = harnessRequest("solver", CLAUDE.smart, "edit it", undefined, 60_000, abort.signal);
+    const used = hanging.find((a) => a.spec.role === "solver")!;
+    abort.abort(new Error("stopped by the user"));
+    await expect(p).rejects.toThrow("stopped by the user");
+    expect(used.killed).toBe(true);
+    const before = hanging.length;
+    await expect(harnessRequest("solver", CLAUDE.smart, "again", undefined, 60_000, abort.signal)).rejects.toThrow("stopped by the user");
+    expect(hanging.length).toBe(before);
   });
 });

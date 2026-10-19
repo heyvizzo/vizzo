@@ -2,7 +2,7 @@
 // Picking another in Settings (POST /api/speech/selection) kills the old engine's helper and starts the new one; the
 // selection is saved so the next start loads the same models before the first turn. The chat sidebar sends it too
 // when it loads, in case the file is missing or out of date. GET /api/speech/engines: their state and RAM.
-// File: $SPEECH_SELECTION_FILE, default ~/.config/realtime-voice/speech-selection.json.
+// File: $SPEECH_SELECTION_FILE, default ~/.config/vizzo/speech-selection.json.
 // LOCAL_TTS=0 / LOCAL_STT=0 keep them from starting ahead of a turn (a turn still starts the one it needs).
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -14,7 +14,7 @@ import { LOCAL_STT_ENGINES, localSttStates, startLocalStt, stopLocalStt, type Lo
 
 export interface SpeechSelection { tts: TtsModel; stt: SttModel }
 
-const file = (): string => process.env.SPEECH_SELECTION_FILE ?? join(homedir(), ".config", "realtime-voice", "speech-selection.json");
+const file = (): string => process.env.SPEECH_SELECTION_FILE ?? join(homedir(), ".config", "vizzo", "speech-selection.json");
 
 const enabled = (kind: "tts" | "stt"): boolean =>
   process.platform === "darwin" && process.env.FAKE_VENDORS !== "1" && process.env[kind === "tts" ? "LOCAL_TTS" : "LOCAL_STT"] !== "0";

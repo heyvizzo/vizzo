@@ -12,6 +12,8 @@ import type { TurnContext, TurnResult } from "./types.ts";
 export const DEFAULT_TURN_TIMEOUT_MS = 60_000;
 /** PCM16 mono 24 kHz. */
 const BYTES_PER_MS = 48;
+/** A segment with less than this left to play isn't cut off: it ends on its own (SegmentOutput.cut). */
+export const CUT_TAIL_MS = 350;
 
 export type CleanupReason = "done" | "cancel" | "error";
 
@@ -60,6 +62,7 @@ export class SegmentOutput {
       this.ctx.send({ type: "audio.segment", turnId: this.ctx.turnId, segment: w.label, state: "start" });
     }
     this.playEnd = Math.max(this.playEnd, performance.now()) + pcm.length / BYTES_PER_MS;
+    w.playEnd = this.playEnd;
     this.ctx.sendAudio(pcm);
   }
   /** @internal */ ended(w: Writer): void {
@@ -73,12 +76,34 @@ export class SegmentOutput {
   endAll(): void {
     for (const w of [...this.queue]) w.end();
   }
+
+  /**
+   * Cut a segment off: what it hasn't sent yet is dropped, and if the user is hearing it (some of it went out and
+   * more than CUT_TAIL_MS of it is left to play, or it's still coming in) the client is told to stop playing it
+   * (`audio.cut`). Returns whether it was cut off audibly. One that never started is just dropped; one that's about
+   * to end is left to end.
+   */
+  cut(w: SegmentWriter): boolean {
+    const writer = w as Writer;
+    const now = performance.now();
+    const heard = writer.started && (!writer.isEnded || writer.playEnd - now > CUT_TAIL_MS);
+    if (writer.started && !heard) return false;
+    if (heard) {
+      this.ctx.send({ type: "audio.cut", turnId: this.ctx.turnId, segment: writer.label });
+      // Nothing after it was sent yet (later segments wait for it to end): the client is quiet from now.
+      this.playEnd = now;
+    }
+    writer.drop();
+    return heard;
+  }
 }
 
 class Writer implements SegmentWriter {
   started = false;
+  /** When its audio sent so far finishes playing (SegmentOutput.playEnd after its last chunk). */
+  playEnd = 0;
   private pending: Buffer[] = [];
-  private isEnded = false;
+  isEnded = false;
   hasAudio = false;
   constructor(readonly label: Segment, private out: SegmentOutput) {}
   push(pcm: Buffer): void {
@@ -91,6 +116,11 @@ class Writer implements SegmentWriter {
     if (this.isEnded) return;
     this.isEnded = true;
     if (this.out.isHead(this)) this.out.ended(this);
+  }
+  /** Cut off: drop what wasn't sent, and end it (the next segment goes on). */
+  drop(): void {
+    this.pending = [];
+    this.end();
   }
   drain(): void {
     for (const b of this.pending.splice(0)) this.out.emit(this, b);

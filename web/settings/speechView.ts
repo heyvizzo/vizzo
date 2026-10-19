@@ -7,7 +7,7 @@ import type { SttModel, TtsModel } from "../../shared/config.ts";
 import type { EngineState, InstallState } from "../../shared/protocol.ts";
 import { fishVoice, type Settings } from "../chat/settings.ts";
 import { fmtBytes } from "../chat/logic.ts";
-import { STT_ROWS, TTS_ROWS, canSelect, installView, rowNotes, voiceNotes, type ModelRow, type SpeechKind } from "./speechModels.ts";
+import { STT_ROWS, TTS_ROWS, canSelect, installView, rowNotes, voiceNotes, type ModelRow, type RowNote, type SpeechKind } from "./speechModels.ts";
 
 export interface SpeechDeps {
   settings: Settings;
@@ -20,7 +20,12 @@ export interface SpeechDeps {
   keyLabel(key: string): string;
   /** Move the focus to an API key's field. */
   focusKey(key: string): void;
+  /** After the rows were updated (an engine state came in, a model was picked…): the Dashboard redraws. */
+  onRender?(): void;
 }
+
+/** The picked model and what its row says, for the Dashboard. */
+export interface SpeechStatus { row: ModelRow; notes: RowNote[]; voice?: string }
 
 /** GET /api/tts/voices. Piper: `installed: false` for a catalog voice that downloads when picked. */
 type VoiceOption = { id: string; label: string; default?: boolean; installed?: boolean; bytes?: number };
@@ -38,6 +43,8 @@ interface RowEls {
   fill(): void;
   /** The last Install / Uninstall request's error, shown until the next one. */
   failed?: string;
+  /** What the notes said at the last update. */
+  shown: RowNote[];
 }
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] => {
@@ -57,7 +64,7 @@ function clamp(v: number, lo: number, hi: number, fallback: number): number {
   return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : fallback;
 }
 
-export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTMLElement>): { render(): void } {
+export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTMLElement>): { render(): void; status(kind: SpeechKind): SpeechStatus | undefined } {
   const { settings } = deps;
   let engines: EngineState[] = [];
   let installs: InstallState[] | undefined;
@@ -165,7 +172,7 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
     const notes = el("div", "model-notes");
     main.append(name, el("p", "hint", row.desc), notes);
     item.append(radio, main);
-    const r: RowEls = { row, el: item, radio, notes, envInputs: new Map(), fill: () => {} };
+    const r: RowEls = { row, el: item, radio, notes, envInputs: new Map(), fill: () => {}, shown: [] };
     const fields = params(r);
     if (fields.length) {
       const box = el("div", "model-params");
@@ -201,6 +208,7 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
     }, deps.keyLabel);
     if (r.failed) notes.unshift({ tone: "error", text: r.failed });
     notes.push(...voiceNotes(install, (v) => voices[row.id]?.find((o) => o.id === v)?.label ?? v));
+    r.shown = notes;
     r.notes.replaceChildren(...notes.map((n) => {
       const line = el(n.focus ? "button" : "p", `model-note ${n.tone}`);
       if (n.tone === "loading") line.append(el("span", "spin"));
@@ -262,6 +270,7 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
 
   function render(): void {
     for (const r of rows) update(r);
+    deps.onRender?.();
   }
 
   function downloadVoice(r: RowEls, voice: string): void {
@@ -362,6 +371,12 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
     render(): void {
       for (const r of rows) r.fill();
       render();
+    },
+    status(kind): SpeechStatus | undefined {
+      const r = rows.find((x) => x.row.kind === kind && x.row.id === selectedId(kind));
+      if (!r) return undefined;
+      const voice = r.voice ? voices[r.row.id]?.find((v) => v.id === currentVoice(r.row.id))?.label : undefined;
+      return { row: r.row, notes: r.shown, ...(voice ? { voice } : {}) };
     },
   };
 }

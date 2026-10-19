@@ -1,8 +1,9 @@
 {
-  "name": "realtime-voice-latency-lab",
-  "version": "0.1.0",
+  "name": "vizzo",
+  "version": "0.1.1",
   "description": "Talk to a coding agent about the page you are looking at.",
-  "author": "J",
+  "author": { "name": "Vizzo", "email": "hello@heyvizzo.com", "url": "https://heyvizzo.com" },
+  "homepage": "https://heyvizzo.com",
   "private": true,
   "main": "dist-electron/main.cjs",
   "type": "module",
@@ -14,9 +15,10 @@
     "dev:server": "tsx watch server/cli.ts",
     "dev:fake": "FAKE_VENDORS=1 npm run dev",
     "build": "npm run build:electron",
-    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/page-preload.ts --bundle --platform=node --format=cjs --external:electron --external:vite --outdir=dist-electron --out-extension:.js=.cjs && esbuild electron/server-entry.ts --bundle --platform=node --format=esm --external:vite --outfile=dist-electron/server.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" && mkdir -p dist-electron/shell && cp electron/shell/*.html dist-electron/shell/",
+    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/page-preload.ts --bundle --platform=node --format=cjs --external:electron --external:vite --outdir=dist-electron --out-extension:.js=.cjs && esbuild electron/server-entry.ts --bundle --platform=node --format=esm --external:vite --outfile=dist-electron/server.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" && mkdir -p dist-electron/shell && cp electron/shell/*.html dist-electron/shell/ && tsx scripts/theme-css.ts dist-electron/shell/theme.css",
     "build:native": "bash scripts/build-native.sh",
     "dist": "vite build && npm run build:electron && npm run build:native && electron-builder --mac dmg --arm64",
+    "release": "bash scripts/release.sh",
     "app": "npm run dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -28,13 +30,13 @@
     "bench:harness": "tsx scripts/bench-harness.ts",
     "bench:tts": "tsx scripts/bench-tts.ts",
     "setup:local-tts": "bash scripts/setup-local-tts.sh",
-    "setup:local-stt": "bash scripts/setup-local-stt.sh"
+    "setup:local-stt": "bash scripts/setup-local-stt.sh",
+    "icon": "bash scripts/build-icon.sh"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
     "@types/node": "^26.6.5",
     "@types/ws": "^8.18.2",
-    "@yogesharc/thinking-orbs": "^0.1.2",
     "concurrently": "^10.0.6",
     "electron": "^44.7.1",
     "electron-builder": "^26.15.3",
@@ -46,8 +48,10 @@
     "ws": "^8.22.0"
   },
   "build": {
-    "appId": "com.dpaunoiu.voicelatencylab",
-    "productName": "Voice Latency Lab",
+    "appId": "com.heyvizzo.vizzo",
+    "productName": "Vizzo",
+    "copyright": "Copyright © 2026 Vizzo",
+    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -83,17 +87,18 @@
           ]
         }
       ],
-      "icon": "build/icon.icns",
+      "icon": "build/vizzo.icon",
       "category": "public.app-category.developer-tools",
       "identity": "-",
       "hardenedRuntime": false,
       "minimumSystemVersion": "13.0",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Voice Latency Lab listens while you talk to it.",
+        "NSMicrophoneUsageDescription": "Vizzo listens while you talk to it.",
         "NSSpeechRecognitionUsageDescription": "On-device transcription with Apple SpeechTranscriber."
       }
     },
     "dmg": {
+      "icon": "build/icon.icns",
       "title": "${productName}",
       "contents": [
         {

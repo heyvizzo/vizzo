@@ -17,26 +17,26 @@ const ICON_SEND = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="
 const ICON_ADD = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
 
 export const INLINE_FORM_CSS = `
-.if-form { display: flex; align-items: flex-end; gap: 2px; padding: 3px 3px 3px 10px; background: #13161c; border: 1px solid #2a2f3a; border-radius: 18px; }
-.if-form:focus-within { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.25); }
-.if-form.rec { border-color: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.2); }
-.if-field { flex: 1; min-width: 0; height: 28px; max-height: ${MAX_FIELD_PX}px; box-sizing: border-box; margin: 0; padding: 5px 0; resize: none; overflow-y: auto; font: inherit; line-height: 18px; color: #e6e8ee; background: transparent; border: 0; outline: none; }
-.if-field::placeholder { color: #6b7385; }
-.if-form button.if-btn { flex: none; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; border: 0; background: transparent; color: #8a93a6; cursor: pointer; }
-.if-form button.if-btn:hover:not(:disabled) { color: #e6e8ee; background: #222733; }
-.if-form button.if-btn:focus-visible { outline: 2px solid #6ea8fe; outline-offset: 1px; }
+.if-form { display: flex; align-items: flex-end; gap: 2px; padding: 3px 3px 3px 10px; background: var(--ui-sunken); border: 1px solid var(--ui-line); border-radius: 18px; }
+.if-form:focus-within { border-color: var(--ui-accent); box-shadow: 0 0 0 3px var(--ui-focus-ring); }
+.if-form.rec { border-color: var(--ui-err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-err) 20%, transparent); }
+.if-field { flex: 1; min-width: 0; height: 28px; max-height: ${MAX_FIELD_PX}px; box-sizing: border-box; margin: 0; padding: 5px 0; resize: none; overflow-y: auto; font: inherit; line-height: 18px; color: var(--ui-text); background: transparent; border: 0; outline: none; }
+.if-field::placeholder { color: var(--ui-placeholder); }
+.if-form button.if-btn { flex: none; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; border: 0; background: transparent; color: var(--ui-muted); cursor: pointer; }
+.if-form button.if-btn:hover:not(:disabled) { color: var(--ui-text); background: var(--ui-hover); }
+.if-form button.if-btn:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
 .if-form button.if-btn:disabled { opacity: .4; cursor: default; }
-.if-form button.if-rec.on { color: #fff; background: #ef4444; animation: if-pulse 1.2s ease-in-out infinite; }
-.if-form.listening { border-color: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.2); }
+.if-form button.if-rec.on { color: var(--ui-on-accent); background: var(--ui-err); animation: if-pulse 1.2s ease-in-out infinite; }
+.if-form.listening { border-color: var(--ui-err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-err) 20%, transparent); }
 .if-form.listening .if-field { cursor: default; }
-.if-form.listening .if-field::placeholder { color: #fca5a5; font-style: italic; }
-.if-form button.if-rec.listen { color: #fff; background: #ef4444; cursor: default; animation: if-pulse 1.2s ease-in-out infinite; }
+.if-form.listening .if-field::placeholder { color: var(--ui-err-text); font-style: italic; }
+.if-form button.if-rec.listen { color: var(--ui-on-accent); background: var(--ui-err); cursor: default; animation: if-pulse 1.2s ease-in-out infinite; }
 .if-form button.if-rec.listen svg { animation: if-beat 1.2s ease-in-out infinite; }
-.if-form button.if-send { color: #fff; background: #4f46e5; }
-.if-form button.if-send:hover:not(:disabled) { color: #fff; background: #6366f1; }
-.if-form button.if-send:disabled { color: #8a93a6; background: #222733; }
-.if-partial { font-size: 12px; color: #8a93a6; font-style: italic; overflow-wrap: anywhere; padding: 0 10px; }
-@keyframes if-pulse { 50% { box-shadow: 0 0 0 4px rgba(239,68,68,.25); } }
+.if-form button.if-send { color: var(--ui-on-accent); background: var(--ui-accent-gradient); }
+.if-form button.if-send:hover:not(:disabled) { color: var(--ui-on-accent); background: var(--ui-accent-gradient-hover); }
+.if-form button.if-send:disabled { color: var(--ui-muted); background: var(--ui-hover); }
+.if-partial { font-size: 12px; color: var(--ui-muted); font-style: italic; overflow-wrap: anywhere; padding: 0 10px; }
+@keyframes if-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-err) 25%, transparent); } }
 @keyframes if-beat { 50% { transform: scale(1.18); } }
 @media (prefers-reduced-motion: reduce) { .if-form button.if-rec.on, .if-form button.if-rec.listen, .if-form button.if-rec.listen svg { animation: none; } }`;
 
@@ -180,11 +180,11 @@ export function createFormHub(opts: FormHubOpts): FormHub {
         rec.classList.toggle("listen", listening);
         field.disabled = listening;
         field.placeholder = listening ? "Listening…" : o.placeholder;
-        rec.title = listening ? "Listening…" : recording ? "Stop dictating" : "Dictate into the field (or hold Shift)";
+        rec.dataset.tip = listening ? "Listening…" : recording ? "Stop dictating" : "Dictate into the field (or hold Shift)";
         rec.setAttribute("aria-label", listening ? "Listening" : recording ? "Stop dictating" : "Dictate");
         rec.setAttribute("aria-pressed", String(recording || listening));
         send.innerHTML = state.instant ? ICON_SEND : ICON_ADD;
-        send.title = state.instant ? "Send now (Enter)" : "Add to the list; send the list with the arrow next to the address bar (Enter)";
+        send.dataset.tip = state.instant ? "Send now (Enter)" : "Add to the list; send the list with the arrow next to the address bar (Enter)";
         send.setAttribute("aria-label", state.instant ? "Send" : "Add to the list");
         send.disabled = empty || listening;
         // The placeholder says it on an empty field; text in it would hide that.

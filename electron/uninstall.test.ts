@@ -4,7 +4,7 @@ import { bundlePath, tildify, uninstallPaths, type UninstallEnv } from "./uninst
 const H = "/Users/me";
 const base: UninstallEnv = {
   home: H,
-  userData: `${H}/Library/Application Support/realtime-voice-latency-lab`,
+  userData: `${H}/Library/Application Support/vizzo`,
   root: `${H}/Sites/realtime-voice`,
   speechRoot: `${H}/Sites/realtime-voice`,
   exe: `${H}/Sites/realtime-voice/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron`,
@@ -19,16 +19,16 @@ describe("uninstallPaths", () => {
       `${H}/Sites/realtime-voice/.models`,
       `${H}/Sites/realtime-voice/.venv-tts`,
       `${H}/Sites/realtime-voice/.venv-stt`,
-      `${H}/Library/Application Support/realtime-voice-latency-lab`,
-      `${H}/.config/realtime-voice`,
-      "/var/folders/x/T/realtime-voice-agents",
+      `${H}/Library/Application Support/vizzo`,
+      `${H}/.config/vizzo`,
+      "/var/folders/x/T/vizzo-agents",
     ]);
   });
 
   it("packaged: the .app bundle (covering what's inside it) and the Library files named after its bundle id", () => {
-    const app = "/Applications/Voice Latency Lab.app";
+    const app = "/Applications/Vizzo.app";
     const paths = uninstallPaths({
-      ...base, packaged: true, exe: `${app}/Contents/MacOS/Voice Latency Lab`,
+      ...base, packaged: true, exe: `${app}/Contents/MacOS/Vizzo`,
       root: `${app}/Contents/Resources/app`, speechRoot: `${base.userData}/speech`, bundleId: "lab.voice",
     });
     expect(paths[0]).toBe(app);
@@ -38,13 +38,13 @@ describe("uninstallPaths", () => {
     // The models live in userData when packaged: deleting userData covers them.
     expect(paths.some((p) => p.includes("/speech/"))).toBe(false);
     // Its selections are in userData too: what `npm run dev` keeps elsewhere stays.
-    expect(paths).not.toContain(`${H}/.config/realtime-voice`);
-    expect(paths).not.toContain("/var/folders/x/T/realtime-voice-agents");
+    expect(paths).not.toContain(`${H}/.config/vizzo`);
+    expect(paths).not.toContain("/var/folders/x/T/vizzo-agents");
   });
 
   it("lists only what exists, and never home, /, or the root itself", () => {
-    const only = new Set([`${H}/.config/realtime-voice`]);
-    expect(uninstallPaths({ ...base, exists: (p) => only.has(p) })).toEqual([`${H}/.config/realtime-voice`]);
+    const only = new Set([`${H}/.config/vizzo`]);
+    expect(uninstallPaths({ ...base, exists: (p) => only.has(p) })).toEqual([`${H}/.config/vizzo`]);
     expect(uninstallPaths({ ...base, userData: `${H}/`, tmp: "/" })).not.toContain(H);
   });
 });

@@ -9,13 +9,15 @@
 // Element threads (harnessThread.ts) keep one agent across requests instead (`keep`): claude-code's process stays
 // open, codex's thread (not ephemeral) takes more turns, opencode's session more messages, pi/omp more prompts.
 // Every harness runs in yolo mode (no approval prompts: nobody is there to answer them). The router and the
-// progress lines get no tools and an empty folder; the solver gets the project folder with file tools.
+// progress lines get an empty folder; the solver gets the project folder with file tools. Anything more (shell,
+// web, subagents, MCP servers, skills, hooks, plugins, instruction files) is off unless the tier's toggles turn it
+// on (shared/config.ts HARNESS_TOGGLES); each harness below maps them to its own flags, config or environment.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize, relative } from "node:path";
-import { LLM_PROVIDER_LABELS, type HarnessId, type LlmSpeed } from "../../shared/config.ts";
+import { HARNESS_TOGGLES, LLM_PROVIDER_LABELS, toggleOn, type HarnessId, type HarnessToggleId, type HarnessToggles, type LlmSpeed } from "../../shared/config.ts";
 import { priceOf, tokenCost } from "../prices.ts";
 import { CLAUDE_BASE_ARGS, CliAgent, EMPTY_CWD, runStreamJson, type CliRole } from "./claudeCli.ts";
 
@@ -48,6 +50,8 @@ export interface AgentSpec {
   model: string;
   level?: string;
   speed?: LlmSpeed;
+  /** What it loads besides its file tools; left out = every toggle at its default. */
+  toggles?: HarnessToggles;
   system: string;
   /** The solver's project folder, worked in with file tools. Omitted: an empty folder, no tools. */
   project?: string;
@@ -106,6 +110,9 @@ const binOrThrow = (id: HarnessId): string => {
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+const on = (spec: AgentSpec, id: HarnessToggleId): boolean => toggleOn(spec.harness, spec.toggles, id);
+/** The toggles on, by label (prompt inspector). */
+const onLabels = (spec: AgentSpec): string => HARNESS_TOGGLES[spec.harness].filter((t) => on(spec, t.id)).map((t) => t.label).join(", ") || "none";
 const cwdOf = (spec: AgentSpec): string => { const d = spec.project ?? EMPTY_CWD; mkdirSync(d, { recursive: true }); return d; };
 
 function llmUsage(t: { input: number; output: number; cacheRead?: number; cacheWrite?: number }, cost: LlmUsage["llmCost"]): LlmUsage {
@@ -213,25 +220,59 @@ export function rpcEditedFiles(ev: Record<string, unknown>): string[] {
 const CLAUDE_FILE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"];
 const CLAUDE_DENY = ["Read(.env*)", "Edit(.env*)"];
 
-export function claudeArgs(spec: AgentSpec): string[] {
+/** The toggles that need Claude Code's customizations loaded (no --safe-mode). */
+const CLAUDE_SETUP: HarnessToggleId[] = ["mcp", "skills", "hooks", "plugins", "instructions"];
+const claudeCustom = (spec: AgentSpec): boolean => CLAUDE_SETUP.some((id) => on(spec, id));
+
+/** The plugins enabled in ~/.claude/settings.json (turned off one by one when plugins are off but not everything is). */
+function claudePlugins(): string[] {
+  try {
+    const s = JSON.parse(readFileSync(join(homedir(), ".claude", "settings.json"), "utf8")) as { enabledPlugins?: Record<string, boolean> };
+    return Object.entries(s.enabledPlugins ?? {}).filter(([, v]) => v).map(([k]) => k);
+  } catch { return []; }
+}
+
+export function claudeArgs(spec: AgentSpec, plugins: () => string[] = claudePlugins): string[] {
+  const tools = [
+    ...(spec.project ? CLAUDE_FILE_TOOLS : []), ...(on(spec, "shell") ? ["Bash"] : []),
+    ...(on(spec, "web") ? ["WebSearch", "WebFetch"] : []), ...(on(spec, "subagents") ? ["Agent"] : []),
+  ];
+  // Nothing of the setup on: --safe-mode drops all of it (CLAUDE.md, skills, plugins, hooks, MCP and the rest).
+  // Some of it on: it all loads, and each part that's off is turned off on its own.
+  const custom = claudeCustom(spec);
+  const settings = {
+    // Opus fast mode. Needs usage credits on the account; without them Claude Code serves standard speed.
+    ...(spec.speed === "fast" ? { fastMode: true } : {}),
+    ...(custom && !on(spec, "hooks") ? { disableAllHooks: true } : {}),
+    ...(custom && !on(spec, "plugins") ? { enabledPlugins: Object.fromEntries(plugins().map((p) => [p, false])) } : {}),
+  };
   return [
     ...CLAUDE_BASE_ARGS,
-    "--tools", ...(spec.project ? CLAUDE_FILE_TOOLS : [""]),
+    ...(custom ? [] : ["--safe-mode"]),
+    ...(on(spec, "mcp") ? [] : ["--strict-mcp-config"]),
+    // --safe-mode still loads the bundled skills.
+    ...(on(spec, "skills") ? [] : ["--disable-slash-commands"]),
+    "--tools", ...(tools.length ? tools : [""]),
     "--dangerously-skip-permissions",
     ...(spec.project ? ["--disallowedTools", ...CLAUDE_DENY] : []),
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.level ? ["--effort", spec.level] : []),
-    // Opus fast mode. Needs usage credits on the account; without them Claude Code serves standard speed.
-    ...(spec.speed === "fast" ? ["--settings", JSON.stringify({ fastMode: true })] : []),
+    ...(Object.keys(settings).length ? ["--settings", JSON.stringify(settings)] : []),
     "--system-prompt", spec.system,
   ];
+}
+
+/** CLAUDE.md files and auto memory off while the rest of the setup loads. */
+export function claudeEnv(spec: AgentSpec): NodeJS.ProcessEnv {
+  if (!claudeCustom(spec) || on(spec, "instructions")) return process.env;
+  return { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" };
 }
 
 class ClaudeAgent implements WarmAgent {
   private cli: CliAgent;
   private used = false;
   constructor(private spec: AgentSpec, private kept = false) {
-    this.cli = new CliAgent(spec.role, binOrThrow("claude-code"), claudeArgs(spec), cwdOf(spec));
+    this.cli = new CliAgent(spec.role, binOrThrow("claude-code"), claudeArgs(spec), cwdOf(spec), claudeEnv(spec));
   }
   alive(): boolean { return (this.kept || !this.used) && !this.cli.exited; }
   // claude -p prints nothing until it gets the message: count it as booted after a typical start-up.
@@ -256,7 +297,7 @@ class ClaudeAgent implements WarmAgent {
 
 // ── Grok (cold) ──────────────────────────────────────────────────────────────
 
-/** Grok's built-in tools: all off for the router; the solver keeps the file tools. */
+/** Grok's built-in tools: the solver has the file tools, the toggles add more; the rest are disallowed. */
 const GROK_TOOLS = [
   "run_terminal_command", "read_file", "search_replace", "list_dir", "grep", "kill_command_or_subagent", "todo_write",
   "get_command_or_subagent_output", "spawn_subagent", "scheduler_create", "scheduler_delete", "scheduler_list", "monitor",
@@ -264,17 +305,83 @@ const GROK_TOOLS = [
   "web_search", "web_fetch", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write",
 ];
 const GROK_FILE_TOOLS = ["read_file", "search_replace", "list_dir", "grep", "write"];
+/** The tools each toggle adds (MCP tools are reached through search_tool/use_tool). */
+const GROK_TOGGLE_TOOLS: Partial<Record<HarnessToggleId, string[]>> = {
+  shell: ["run_terminal_command", "kill_command_or_subagent", "get_command_or_subagent_output"],
+  web: ["web_search", "web_fetch"],
+  subagents: ["spawn_subagent", "kill_command_or_subagent", "get_command_or_subagent_output"],
+  mcp: ["search_tool", "use_tool"],
+};
 
-function grokArgs(spec: AgentSpec, user: string): string[] {
+export function grokArgs(spec: AgentSpec, user: string): string[] {
+  const allowed = new Set([
+    ...(spec.project ? GROK_FILE_TOOLS : []),
+    ...Object.entries(GROK_TOGGLE_TOOLS).flatMap(([id, tools]) => (on(spec, id as HarnessToggleId) ? tools : [])),
+  ]);
   return [
     "-p", user, "--output-format", "streaming-messages-json", "--include-partial-messages",
     ...(spec.model ? ["-m", spec.model] : []), ...(spec.level ? ["--reasoning-effort", spec.level] : []),
-    "--always-approve", "--disable-web-search", "--no-subagents", "--no-plan",
+    "--always-approve", ...(on(spec, "web") ? [] : ["--disable-web-search"]), ...(on(spec, "subagents") ? [] : ["--no-subagents"]), "--no-plan",
     // With tools, --rules appends to Grok's own prompt (which explains them); without, ours replaces it.
-    ...(spec.project
-      ? ["--rules", spec.system, "--cwd", spec.project, "--max-turns", "40", `--disallowed-tools=${GROK_TOOLS.filter((t) => !GROK_FILE_TOOLS.includes(t)).join(",")}`]
-      : ["--system-prompt-override", spec.system, "--max-turns", "1", `--disallowed-tools=${GROK_TOOLS.join(",")}`]),
+    ...(allowed.size
+      ? ["--rules", spec.system, ...(spec.project ? ["--cwd", spec.project] : []), "--max-turns", "40"]
+      : ["--system-prompt-override", spec.system, "--max-turns", "1"]),
+    `--disallowed-tools=${GROK_TOOLS.filter((t) => !allowed.has(t)).join(",")}`,
   ];
+}
+
+/** Grok's scans of Claude's and Cursor's setup (GROK_<VENDOR>_<CELL>_ENABLED), per toggle. */
+const GROK_COMPAT: Partial<Record<HarnessToggleId, string[]>> = { skills: ["SKILLS"], hooks: ["HOOKS"], mcp: ["MCPS"], instructions: ["RULES", "AGENTS"] };
+/** What of ~/.grok the toggles keep in a Grok home of our own (the rest is left out). */
+const GROK_HOME_PARTS: Partial<Record<HarnessToggleId, string>> = { skills: "skills", hooks: "hooks", plugins: "installed-plugins" };
+
+/**
+ * Grok's environment. `grok -p` ignores config overlays (GROK_CONFIG), so whatever of ~/.grok is off comes from a
+ * Grok home of our own: the login linked in, the parts that are on linked in, and config.toml copied without its
+ * [plugins] / [mcp_servers] tables when those are off. Claude's and Cursor's setup is turned off per part.
+ */
+export function grokEnv(spec: AgentSpec, homes = join(homedir(), ".config", "vizzo", "grok-home")): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [id, cells] of Object.entries(GROK_COMPAT)) {
+    if (on(spec, id as HarnessToggleId)) continue;
+    for (const vendor of ["CLAUDE", "CURSOR"]) for (const cell of cells) env[`GROK_${vendor}_${cell}_ENABLED`] = "0";
+  }
+  const own = (["skills", "hooks", "plugins", "mcp"] as const).filter((id) => on(spec, id));
+  if (own.length < 4) env.GROK_HOME = join(homes, own.join("-") || "none");
+  return env;
+}
+
+/** Make the Grok home `env` names (if any) for `spec`: see grokEnv. */
+export function prepareGrokHome(spec: AgentSpec, env: NodeJS.ProcessEnv, realHome = process.env.GROK_HOME ?? join(homedir(), ".grok")): NodeJS.ProcessEnv {
+  const home = env.GROK_HOME;
+  if (!home || home === process.env.GROK_HOME) return env;
+  try {
+    mkdirSync(home, { recursive: true });
+    for (const [id, part] of [["auth", "auth.json"], ...Object.entries(GROK_HOME_PARTS)] as [string, string][]) {
+      const link = join(home, part);
+      rmSync(link, { force: true, recursive: false });
+      if ((id === "auth" || on(spec, id as HarnessToggleId)) && existsSync(join(realHome, part))) symlinkSync(join(realHome, part), link);
+    }
+    const drop = [...(on(spec, "plugins") ? [] : ["plugins"]), ...(on(spec, "mcp") ? [] : ["mcp_servers"])];
+    let config = "";
+    try { config = readFileSync(join(realHome, "config.toml"), "utf8"); } catch { /* none */ }
+    writeFileSync(join(home, "config.toml"), withoutTomlTables(config, drop));
+  } catch (e) {
+    console.error(`[grok] couldn't set up ${home}: ${e instanceof Error ? e.message : String(e)}`);
+    const { GROK_HOME: _h, ...rest } = env;
+    return rest;
+  }
+  return env;
+}
+
+/** `toml` without the tables named (`[name]`, `[name.x]`, `[[name…]]`) and their keys. */
+export function withoutTomlTables(toml: string, names: string[]): string {
+  let skip = false;
+  return toml.split("\n").filter((line) => {
+    const m = /^\s*\[\[?\s*([A-Za-z0-9_-]+)/.exec(line);
+    if (m) skip = names.includes(m[1]!);
+    return !skip;
+  }).join("\n");
 }
 
 class GrokAgent implements WarmAgent {
@@ -288,7 +395,7 @@ class GrokAgent implements WarmAgent {
     const res = await runStreamJson(`grok ${this.spec.role}`, binOrThrow("grok"), grokArgs(this.spec, user), cwdOf(this.spec), {
       onText,
       onEvent: (ev) => { if (ev.type === "system" && ev.subtype === "init") apiKeySource = String(ev.apiKeySource ?? ""); },
-    }, timeoutMs);
+    }, timeoutMs, prepareGrokHome(this.spec, grokEnv(this.spec)));
     const u = (res.usage ?? {}) as Record<string, unknown>;
     const t = { input: num(u.input_tokens), output: num(u.output_tokens), cacheRead: num(u.cache_read_input_tokens), cacheWrite: num(u.cache_creation_input_tokens) };
     const model = res.model ?? (this.spec.model || "grok default");
@@ -304,22 +411,35 @@ class GrokAgent implements WarmAgent {
 
 // ── Pi and OhMyPi (RPC mode) ─────────────────────────────────────────────────
 
+/** Each harness's file tools (the solver's) and the tools a toggle adds. */
+const RPC_TOOLS: Record<"pi" | "omp", { files: string[]; toggles: Partial<Record<HarnessToggleId, string[]>> }> = {
+  pi: { files: ["read", "edit", "write", "grep", "find", "ls"], toggles: { shell: ["bash"] } },
+  omp: {
+    files: ["read", "edit", "write", "grep", "glob", "find"],
+    // omp 18 refuses `python`, `fetch` and `browser` in --tools (eval runs python; read fetches URLs).
+    toggles: { shell: ["bash", "eval"], web: ["web_search"], subagents: ["task"] },
+  },
+};
+
 export function rpcArgs(spec: AgentSpec): string[] {
+  const t = RPC_TOOLS[spec.harness === "omp" ? "omp" : "pi"];
+  const tools = [...(spec.project ? t.files : []), ...Object.entries(t.toggles).flatMap(([id, x]) => (on(spec, id as HarnessToggleId) ? x : []))];
   const common = [
-    "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+    "--mode", "rpc", "--no-session",
+    ...(on(spec, "plugins") ? [] : ["--no-extensions"]), ...(on(spec, "skills") ? [] : ["--no-skills"]),
     ...(spec.model ? ["--model", spec.model] : []), ...(spec.level ? ["--thinking", spec.level] : []),
     "--system-prompt", spec.system,
   ];
   if (spec.harness === "omp") {
     return [
-      ...common, "--no-rules", "--no-lsp", "--approval-mode=yolo",
+      ...common, ...(on(spec, "instructions") ? [] : ["--no-rules"]), "--no-lsp", "--approval-mode=yolo",
       // OpenAI's priority tier; on Anthropic models omp sends Opus fast mode (speed: fast + its beta) instead.
       ...(spec.speed === "fast" ? ["--service-tier", "priority"] : []),
-      ...(spec.project ? ["--tools=read,edit,write,grep,glob,find"] : ["--no-tools"]),
+      ...(tools.length ? [`--tools=${tools.join(",")}`] : ["--no-tools"]),
     ];
   }
   // Pi has no approval prompts: it runs whatever its tools do.
-  return [...common, "--no-context-files", ...(spec.project ? ["--tools", "read,edit,write,grep,find,ls"] : ["--no-tools"])];
+  return [...common, ...(on(spec, "instructions") ? [] : ["--no-context-files"]), ...(tools.length ? ["--tools", tools.join(",")] : ["--no-tools"])];
 }
 
 class RpcAgent implements WarmAgent {
@@ -434,11 +554,13 @@ class CodexServer {
   private stderr = "";
   exited = false;
   readonly ready: Promise<void>;
+  /** The MCP servers in the user's config: a thread with MCP off turns each one off (an empty table merges). */
+  readonly mcpServers: Promise<string[]>;
 
   private constructor() {
     mkdirSync(EMPTY_CWD, { recursive: true });
-    // No MCP servers: a broken one is retried for every thread.
-    this.proc = spawn(binOrThrow("codex"), ["app-server", "-c", "mcp_servers={}"], { cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    // What a thread loads is set per thread (codexConfig): the server starts with the user's config.
+    this.proc = spawn(binOrThrow("codex"), ["app-server"], { cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: process.env });
     jsonLines(this.proc, (m) => this.onMessage(m));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
     this.proc.on("close", (code) => {
@@ -449,9 +571,12 @@ class CodexServer {
       for (const n of this.threads.values()) n("server/exited", { message: err.message });
     });
     this.proc.on("error", (e) => { this.exited = true; this.stderr += String(e); });
-    this.ready = this.call("initialize", { clientInfo: { name: "realtime-voice", title: null, version: "1" }, capabilities: null })
+    this.ready = this.call("initialize", { clientInfo: { name: "vizzo", title: null, version: "1" }, capabilities: null })
       .then(() => { this.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized" }) + "\n"); });
     this.ready.catch(() => {});
+    this.mcpServers = this.ready.then(() => this.call("config/read", { includeLayers: false }))
+      .then((r) => Object.keys((r as { config?: { mcp_servers?: Record<string, unknown> } }).config?.mcp_servers ?? {}))
+      .catch(() => []);
   }
 
   private onMessage(m: Record<string, unknown>): void {
@@ -486,6 +611,27 @@ class CodexServer {
   listen(threadId: string, fn: Notify | null): void { if (fn) this.threads.set(threadId, fn); else this.threads.delete(threadId); }
 }
 
+/**
+ * A thread's config overrides: each toggle that's off turns its part off; one that's on leaves the user's config
+ * as it is. `mcpServers`: the servers to turn off when MCP is.
+ */
+export function codexConfig(spec: AgentSpec, mcpServers: string[]): Record<string, unknown> {
+  const features: Record<string, boolean> = {};
+  const off = (id: HarnessToggleId, ...names: string[]): void => { if (!on(spec, id)) for (const n of names) features[n] = false; };
+  off("shell", "shell_tool", "unified_exec");
+  off("subagents", "multi_agent", "multi_agent_v2");
+  off("images", "image_generation");
+  off("hooks", "hooks");
+  off("plugins", "plugins", "apps", "browser_use", "computer_use", "in_app_browser");
+  return {
+    ...(Object.keys(features).length ? { features } : {}),
+    ...(on(spec, "web") ? {} : { web_search: "disabled" }),
+    ...(on(spec, "mcp") || !mcpServers.length ? {} : { mcp_servers: Object.fromEntries(mcpServers.map((n) => [n, { enabled: false }])) }),
+    ...(on(spec, "skills") ? {} : { skills: { include_instructions: false, bundled: { enabled: false } } }),
+    ...(on(spec, "instructions") ? {} : { project_doc_max_bytes: 0 }),
+  };
+}
+
 class CodexAgent implements WarmAgent {
   private server = CodexServer.get();
   private thread: Promise<string>;
@@ -496,8 +642,9 @@ class CodexAgent implements WarmAgent {
 
   /** `kept`: an element thread's (not ephemeral: it takes turn after turn). Pooled agents can't become one. */
   constructor(private spec: AgentSpec, private kept = false) {
-    this.thread = this.server.ready.then(() => this.server.call("thread/start", {
+    this.thread = this.server.mcpServers.then((mcp) => this.server.call("thread/start", {
       ...(spec.model ? { model: spec.model } : {}),
+      config: codexConfig(spec, mcp),
       ...(spec.speed === "fast" ? { serviceTier: "priority" } : {}),
       cwd: cwdOf(spec), approvalPolicy: "never", sandbox: "danger-full-access", ephemeral: !kept,
       // The router's prompt replaces Codex's own; the solver keeps Codex's (it explains the tools) with ours added.
@@ -576,6 +723,22 @@ class CodexAgent implements WarmAgent {
 /** opencode's built-in tools (GET /experimental/tool/ids). `question` waits for a person: always off. */
 const OPENCODE_TOOLS = ["invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "websearch", "skill", "apply_patch"];
 const OPENCODE_FILE_TOOLS = ["read", "glob", "grep", "edit", "write", "apply_patch"];
+const OPENCODE_TOGGLE_TOOLS: Partial<Record<HarnessToggleId, string[]>> = { shell: ["bash"], web: ["webfetch", "websearch"], subagents: ["task"], skills: ["skill"] };
+const opencodeTools = (spec: AgentSpec): string[] => [
+  ...(spec.project ? OPENCODE_FILE_TOOLS : []),
+  ...Object.entries(OPENCODE_TOGGLE_TOOLS).flatMap(([id, tools]) => (on(spec, id as HarnessToggleId) ? tools : [])),
+];
+/** What a server loads is set when it starts: one server per such setup (plugins off = --pure). */
+interface OpencodeSetup { pure: boolean; env: Record<string, string> }
+export function opencodeSetup(spec: AgentSpec): OpencodeSetup {
+  return {
+    pure: !on(spec, "plugins"),
+    env: {
+      ...(on(spec, "skills") ? {} : { OPENCODE_DISABLE_EXTERNAL_SKILLS: "true", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "true" }),
+      ...(on(spec, "instructions") ? {} : { OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: "true" }),
+    },
+  };
+}
 /** Yolo: allow everything opencode would otherwise ask about. */
 const OPENCODE_CONFIG = JSON.stringify({
   permission: { edit: "allow", bash: "allow", webfetch: "allow", external_directory: "allow", doom_loop: "allow" },
@@ -584,17 +747,19 @@ const OPENCODE_CONFIG = JSON.stringify({
 type SessionListener = (type: string, props: Record<string, unknown>) => void;
 
 class OpencodeServer {
-  private static current: OpencodeServer | null = null;
-  static get(): OpencodeServer {
-    if (!OpencodeServer.current || OpencodeServer.current.exited) OpencodeServer.current = new OpencodeServer();
-    return OpencodeServer.current;
+  private static servers = new Map<string, OpencodeServer>();
+  static get(setup: OpencodeSetup): OpencodeServer {
+    const key = JSON.stringify(setup);
+    let s = OpencodeServer.servers.get(key);
+    if (!s || s.exited) OpencodeServer.servers.set(key, (s = new OpencodeServer(setup)));
+    return s;
   }
   static stop(): void {
-    const s = OpencodeServer.current;
-    if (!s) return;
-    for (const a of s.streams.values()) a.abort();
-    s.proc?.kill("SIGTERM");
-    OpencodeServer.current = null;
+    for (const s of OpencodeServer.servers.values()) {
+      for (const a of s.streams.values()) a.abort();
+      s.proc?.kill("SIGTERM");
+    }
+    OpencodeServer.servers.clear();
   }
 
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -604,11 +769,11 @@ class OpencodeServer {
   private streams = new Map<string, AbortController>();
   private sessions = new Map<string, SessionListener>();
 
-  private constructor() {
+  private constructor(setup: OpencodeSetup) {
     mkdirSync(EMPTY_CWD, { recursive: true });
     this.url = freePort().then((port) => new Promise<string>((resolve, reject) => {
-      const proc = spawn(binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
-        cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG },
+      const proc = spawn(binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port), ...(setup.pure ? ["--pure"] : [])], {
+        cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG },
       });
       this.proc = proc;
       const onOut = (d: Buffer) => {
@@ -676,7 +841,7 @@ function freePort(): Promise<number> {
 }
 
 class OpencodeAgent implements WarmAgent {
-  private server = OpencodeServer.get();
+  private server: OpencodeServer;
   private dir: string;
   private session: Promise<string>;
   private sessionId: string | null = null;
@@ -685,6 +850,7 @@ class OpencodeAgent implements WarmAgent {
   private killed = false;
 
   constructor(private spec: AgentSpec, private kept = false) {
+    this.server = OpencodeServer.get(opencodeSetup(spec));
     this.dir = cwdOf(spec);
     this.session = this.server.watch(this.dir)
       .then(() => this.server.api("/session", this.dir, { method: "POST", body: {} }))
@@ -703,7 +869,7 @@ class OpencodeAgent implements WarmAgent {
     const sid = await this.session;
     const files = new FilesTouched(this.spec.project);
     const slash = this.spec.model.indexOf("/");
-    const allowed = this.spec.project ? OPENCODE_FILE_TOOLS : [];
+    const allowed = opencodeTools(this.spec);
     // Text parts stream as deltas keyed by part id; reasoning parts are skipped. A delta that comes before
     // its part's type is known is held until then.
     const partType = new Map<string, string>();
@@ -789,17 +955,22 @@ export function stopSharedServers(inUse: Set<HarnessId>): void {
   if (!inUse.has("opencode")) OpencodeServer.stop();
 }
 
+/** The variables `env` sets on top of the server's own (prompt inspector). */
+const envOf = (env: NodeJS.ProcessEnv): string[] => Object.entries(env).filter(([k, v]) => process.env[k] !== v).map(([k, v]) => `${k}=${v}`);
 const elide = (args: string[]): string[] => args.map((a) => (a.length > 60 ? "…" : /\s/.test(a) ? JSON.stringify(a) : a));
 
 /** How an agent runs, for the prompt inspector. */
 export function describeAgent(spec: AgentSpec): string {
   switch (spec.harness) {
-    case "claude-code": return ["claude", ...elide(claudeArgs(spec))].join(" ");
-    case "grok": return ["grok", ...elide(grokArgs(spec, "…"))].join(" ");
+    case "claude-code": return [...envOf(claudeEnv(spec)), "claude", ...elide(claudeArgs(spec))].join(" ");
+    case "grok": return [...envOf(grokEnv(spec)), "grok", ...elide(grokArgs(spec, "…"))].join(" ");
     case "pi": case "omp": return [spec.harness, ...elide(rpcArgs(spec))].join(" ");
     case "codex":
-      return `codex app-server · thread/start { model: ${spec.model || "default"}${spec.speed === "fast" ? ", serviceTier: priority" : ""}, sandbox: danger-full-access, approvalPolicy: never, ${spec.project ? "developerInstructions" : "baseInstructions"} } → turn/start { effort: ${spec.level ?? "default"} }`;
-    case "opencode":
-      return `opencode serve · POST /session/:id/message { model: ${spec.model || "default"}, variant: ${spec.level ?? "default"}, system, tools: ${spec.project ? OPENCODE_FILE_TOOLS.join(",") : "none"} } · permissions: allow all`;
+      return `codex app-server · thread/start { model: ${spec.model || "default"}${spec.speed === "fast" ? ", serviceTier: priority" : ""}, sandbox: danger-full-access, approvalPolicy: never, ${spec.project ? "developerInstructions" : "baseInstructions"}, config: ${JSON.stringify(codexConfig(spec, ["…"]))} } → turn/start { effort: ${spec.level ?? "default"} } · on: ${onLabels(spec)}`;
+    case "opencode": {
+      const setup = opencodeSetup(spec);
+      const env = Object.keys(setup.env).map((k) => `${k}=true `).join("");
+      return `${env}opencode serve${setup.pure ? " --pure" : ""} · POST /session/:id/message { model: ${spec.model || "default"}, variant: ${spec.level ?? "default"}, system, tools: ${opencodeTools(spec).join(",") || "none"} } · permissions: allow all`;
+    }
   }
 }

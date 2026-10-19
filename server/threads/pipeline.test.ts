@@ -165,6 +165,19 @@ describe("pipeline (B) with element threads", () => {
     await until(() => s.events.some((e) => e.type === "job" && e.job.state === "done"));
   });
 
+  it("a thread's panel is open: the turn goes to it, whatever the router or the cursor say", async () => {
+    const open = store.create(RED, "the red button", "task");
+    const other = store.create({ ...RED, selector: "#blue" }, "the blue button", "task");
+    pointed.anchor = { ...RED, selector: "#blue" };
+    const s = setup({ target: { kind: "thread", threadId: other.threadId, relation: "followup" }, intent: "question", estimateS: 3 });
+    s.ctx.pinnedThread = open.threadId;
+    await run(s);
+    expect(s.routed[0]!.threads!.map((t) => t.threadId)).toEqual([open.threadId]);
+    expect(s.decision()?.threadId).toBe(open.threadId);
+    expect(store.info(open.threadId)!.messages.some((m) => m.role === "user")).toBe(true);
+    expect(store.info(other.threadId)!.messages).toEqual([]);
+  });
+
   it("threads off: no briefs to the router, no threads", async () => {
     const s = setup({ estimateS: 8 });
     s.ctx.config = { ...s.ctx.config, threads: false };

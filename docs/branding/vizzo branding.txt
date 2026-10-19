@@ -1,0 +1,6 @@
+Branding colors
+
+Logo gradients: 
+
+V letter logo top #01FCFB -> bottom #249861 (average #1CD29F)
+Background top #7881FF -> bottom #001993 (average #3549C4)

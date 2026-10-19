@@ -4,33 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Browser</title>
+  <link rel="stylesheet" href="theme.css" />
   <style>
-    :root {
-      --bar: #f4f4f5;
-      --field: #ffffff;
-      --line: #d4d4d8;
-      --text: #18181b;
-      --muted: #71717a;
-      --accent: #2563eb;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) {
-        --bar: #27272a;
-        --field: #18181b;
-        --line: #3f3f46;
-        --text: #f4f4f5;
-        --muted: #a1a1aa;
-        --accent: #60a5fa;
-      }
-    }
-    :root[data-theme="dark"] {
-      --bar: #27272a;
-      --field: #18181b;
-      --line: #3f3f46;
-      --text: #f4f4f5;
-      --muted: #a1a1aa;
-      --accent: #60a5fa;
-    }
+    /* Colours: theme.css, from shared/theme.ts (scripts/theme-css.ts). */
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .toolbar {
@@ -40,7 +16,7 @@
       gap: 6px;
       padding: 0 10px 0 78px; /* room for the macOS traffic lights (hiddenInset title bar) */
       border-bottom: 1px solid var(--line);
-      background: var(--bar);
+      background: var(--chrome);
       -webkit-app-region: drag;
     }
     .toolbar > * { -webkit-app-region: no-drag; }
@@ -79,9 +55,9 @@
     .mic { position: relative; flex: none; width: 30px; height: 30px; display: grid; place-items: center; }
     #mic-meter { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 6px; opacity: 0.55; pointer-events: none; }
     #mic { position: relative; color: var(--text); }
-    #mic.live { color: #dc2626; }
+    #mic.live { color: var(--err); }
     /* Red dot: Always listen is on (or a turn is recording). */
-    #mic-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: #dc2626; pointer-events: none; }
+    #mic-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--err); pointer-events: none; }
     /* Feedback queue: Instant on runs each turn right away; off queues them until Send. */
     #instant[aria-pressed="false"] { color: var(--muted); }
     #send-queue { width: auto; min-width: 30px; padding: 0 8px; gap: 4px; display: flex; align-items: center; font: inherit; font-variant-numeric: tabular-nums; }
@@ -218,9 +194,9 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
       const css = getComputedStyle(document.documentElement);
-      const accent = css.getPropertyValue("--accent").trim() || "#2563eb";
+      const accent = css.getPropertyValue("--accent").trim() || "#3549c4";
       const hot = mic && mic.live;
-      const color = hot ? "#dc2626" : accent;
+      const color = hot ? css.getPropertyValue("--err").trim() || "#dc2626" : accent;
       const y = (rms) => h - 2 - dbPos(rms) * (h - 4);
       if (mic && typeof mic.threshold === "number") {
         ctx.strokeStyle = color;

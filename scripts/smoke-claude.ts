@@ -2,7 +2,7 @@
 // Runs the router on several transcripts (pointing, no pointing, auto mode, a two-turn follow-up)
 // and prints the decision, the spoken `say` and the delegated question; then fillers for the first two
 // cases and one the solver run on the change request (task intent).
-// Uses the tiers the Chat page last picked (~/.config/realtime-voice/llm-selection.json; Claude Code by default).
+// Uses the tiers the Chat page last picked (~/.config/vizzo/llm-selection.json; Claude Code by default).
 import { loadDesktopEnv } from "../electron/settings.ts";
 import { performance } from "node:perf_hooks";
 import type { RouterMode } from "../shared/config.ts";

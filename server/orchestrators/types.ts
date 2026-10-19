@@ -45,6 +45,8 @@ export interface TurnContext {
   pageUrl?: () => string | null;
   /** A typed comment (turn.start `text`): the turn's words, with no audio to transcribe. */
   typedText?: string;
+  /** The thread whose panel was open when the turn started: the turn goes to it, not where the router would send it. */
+  pinnedThread?: string;
   /** Clicks and highlighted text the client reported for this turn (turn.context). */
   pageEvents?: () => PageEvents;
   /** T7 addition: state that outlives the turn (one per browser connection). */

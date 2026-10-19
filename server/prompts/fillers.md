@@ -11,4 +11,10 @@ Rules:
 - No promises about timing ("almost done", "one more second"), no greetings, no apologies, no questions to the user.
 - Vary the wording: don't start every line the same way.
 
-Write the lines in English unless the request says the user spoke another language; then write them in that language (e.g. Romanian).
+Also write the `cut_in`: what you say when the colleague's answer arrives while you're in the middle of one of these lines. That line is broken off mid-sentence, you say the cut_in, and the answer is read out right after it. It's how a person sounds when they stop talking because the result just came in, handing over to it:
+- 3 to 8 words, one short spoken sentence, ending so that the answer can follow as the next sentence.
+- It has to fit after any of the lines, broken off anywhere.
+- Never say what the answer is, and never claim the change worked or failed: the answer says that.
+- For a question, e.g. "Oh, wait, here it is." / "Hang on, I've got that grid's answer now." For a task, e.g. "Oh, okay, that edit's back." / "Wait, the change just came back."
+
+Write the lines in English unless the request says the user spoke another language; then write them, and the cut_in, in that language (e.g. Romanian).

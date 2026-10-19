@@ -1,8 +1,11 @@
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
+import { themeCss } from "./shared/theme.ts";
 
 export default defineConfig({
   root: "web",
+  // The colours (shared/theme.ts) as the first thing in every page's <head>, so nothing paints before them.
+  plugins: [{ name: "theme", transformIndexHtml: () => [{ tag: "style", attrs: { id: "theme" }, children: themeCss(), injectTo: "head-prepend" }] }],
   server: {
     port: 5173,
     proxy: {

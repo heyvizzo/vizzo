@@ -13,11 +13,13 @@ export interface PermissionRow {
   id: "microphone" | "full-disk" | "chrome-keychain";
   name: string;
   ok: boolean;
+  /** Nice to have: the Dashboard doesn't count it as a problem when it is off. */
+  optional?: boolean;
   /** Short status next to the dot. */
   summary: string;
   /** What to do when it is off, or what it unlocks when it is on. */
   instruction: string;
-  action?: { id: "allow-microphone" | "open-microphone" | "open-full-disk"; label: string };
+  action?: { id: "allow-microphone" | "open-microphone" | "open-full-disk" | "allow-keychain"; label: string };
 }
 
 export type Access = "ok" | "denied" | "missing";
@@ -120,6 +122,7 @@ export function keychainRow(access: Access): PermissionRow {
       id: "chrome-keychain",
       name: "Chrome keychain",
       ok: false,
+      optional: true,
       summary: "Not found",
       instruction: "Open Chrome once so it creates the “Chrome Safe Storage” password. Then use Import from Chrome under Browser cookies above and choose Always Allow.",
     };
@@ -128,8 +131,10 @@ export function keychainRow(access: Access): PermissionRow {
     id: "chrome-keychain",
     name: "Chrome keychain",
     ok: false,
+    optional: true,
     summary: "Not allowed yet",
-    instruction: "Use Import from Chrome under Browser cookies above. When macOS asks to use the “Chrome Safe Storage” password, choose Always Allow.",
+    instruction: "When macOS asks to use the “Chrome Safe Storage” password, choose Always Allow.",
+    action: { id: "allow-keychain", label: "Allow keychain access" },
   };
 }
 

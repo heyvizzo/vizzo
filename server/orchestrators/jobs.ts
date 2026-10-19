@@ -1,8 +1,9 @@
 // Background jobs (chat mode, RunConfig.backgroundLongTasks): a long task's the solver run continues after its
 // turn ends. When it finishes, the client gets a `job` update, the result joins the conversation, and it's
-// spoken as a notice once no turn is active, with the turn's TTS engine.
+// spoken as a notice once no turn is active, with the turn's TTS engine. The user can stop one (stopJob): its
+// solver is killed and nothing is announced.
 import { randomUUID } from "node:crypto";
-import { isLocalTts, llmOf, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
+import { isLocalTts, llmOf, taskTimeoutMs, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
 import { llmCostItem, PRICES } from "../cost.ts";
 import { getConversation, type ChatTurn } from "../conversation.ts";
@@ -30,17 +31,42 @@ class JobRegistry {
   /** Notices are spoken one at a time, in completion order. */
   notices: Promise<void> = Promise.resolve();
   readonly jobs = new Map<string, JobInfo>();
+  /** Running jobs' aborts (stopJob). */
+  readonly aborts = new Map<string, AbortController>();
 }
 
 function registry(conn: ConnectionCache): JobRegistry {
   let r = conn.get<JobRegistry>(KEY);
-  if (!r) conn.set<JobRegistry>(KEY, (r = new JobRegistry()), (v) => { v.cancelled = true; });
+  if (!r) {
+    conn.set<JobRegistry>(KEY, (r = new JobRegistry()), (v) => {
+      v.cancelled = true;
+      for (const a of v.aborts.values()) a.abort(new Error("conversation reset"));
+    });
+  }
   return r;
 }
 
 /** Forget every job on this connection (conversation reset / disconnect): results are dropped, not spoken. */
 export function cancelJobs(conn: ConnectionCache): void {
   conn.delete(KEY);
+}
+
+/**
+ * The user stopped a running job: its solver is killed, it's marked stopped (the client gets the update) and the
+ * conversation notes it. False if it isn't running (already finished, or unknown).
+ */
+export function stopJob(conn: ConnectionCache, channel: ConnectionChannel, jobId: string): boolean {
+  const reg = conn.get<JobRegistry>(KEY);
+  const job = reg?.jobs.get(jobId);
+  if (!reg || !job || job.state !== "running") return false;
+  Object.assign(job, { state: "stopped" });
+  reg.aborts.get(jobId)?.abort(new Error("stopped by the user"));
+  reg.aborts.delete(jobId);
+  channel.send({ type: "job", job: { ...job } });
+  getConversation(conn).push({
+    turnId: job.jobId, approach: job.approach, user: `(Background task stopped by the user: ${job.question})`, assistant: "", detail: "",
+  });
+  return true;
 }
 
 /** First paragraph without the SPOKEN: prefix, for answers where the SPOKEN line never fired. */
@@ -62,17 +88,22 @@ export function startJob(
   const t0 = performance.now();
   let spoken = "";
   let text = "";
+  const abort = new AbortController();
+  reg.aborts.set(job.jobId, abort);
+  // Stopped (stopJob): what the solver says after that is dropped.
+  const live = () => !reg.cancelled && job.state === "running";
 
   deps.solveTask({
+    signal: abort.signal, timeoutMs: taskTimeoutMs(spec.config),
     mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.solverFast,
     history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language, llm: llmOf(spec.config).smart,
     voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
     ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId)(),
     onSpokenLine: (l) => { spoken = l.trim(); },
     onDelta: (d) => { text += d; },
-  }).then(
+  }).finally(() => reg.aborts.delete(job.jobId)).then(
     (r) => {
-      if (reg.cancelled) return;
+      if (!live()) return;
       text = r.text || text;
       const item = llmCostItem(spec.config, "smart", r.usage, "Background solver");
       Object.assign(job, {
@@ -97,7 +128,7 @@ export function startJob(
         .catch((e) => console.warn("[jobs] notice failed", e));
     },
     (e) => {
-      if (reg.cancelled) return;
+      if (!live()) return;
       Object.assign(job, { state: "failed", error: e instanceof Error ? e.message : String(e), elapsedMs: Math.round(performance.now() - t0) });
       channel.send({ type: "job", job: { ...job } });
     },

@@ -125,7 +125,10 @@ export type RouteTurn = (opts: RouteTurnOpts) => Promise<{
   usage: unknown;
 }>;
 
-/** Short spoken progress lines for the wait on a short task (the router, called in parallel with the solver). */
+/**
+ * Short spoken progress lines for the wait on a short task (the router, called in parallel with the solver), and the
+ * cut-in: what's said instead when the answer arrives mid-line and the line is broken off ("Oh, wait, here it is.").
+ */
 export type GenerateFillers = (opts: {
   transcript: string; question: string; intent: Intent; pointing: PointingTarget[];
   /** The language the user spoke: lines are written in it. */
@@ -137,7 +140,7 @@ export type GenerateFillers = (opts: {
   onResponse?: (r: LlmResponse) => void;
   /** Harness or API + model (RunConfig.llm's tier). Omitted: the Anthropic Messages API with the default model. */
   llm?: LlmChoice;
-}) => Promise<{ lines: string[]; usage: unknown }>;
+}) => Promise<{ lines: string[]; cutIn?: string; usage: unknown }>;
 
 export interface SolveTaskOpts {
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
@@ -161,6 +164,10 @@ export interface SolveTaskOpts {
   onSpokenLine: (line: string) => void;
   /** Full answer stream. */
   onDelta: (d: string) => void;
+  /** Aborted: the harness agent is killed and the call rejects (a background job the user stopped). */
+  signal?: AbortSignal;
+  /** The run is stopped after this long (RunConfig.taskTimeoutMinutes). Omitted: ROLE_TIMEOUT_MS.solver. */
+  timeoutMs?: number;
 }
 export type SolveTask = (opts: SolveTaskOpts) => Promise<{ text: string; usage: unknown }>;
 

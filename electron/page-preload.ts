@@ -16,7 +16,8 @@ import { createPageContextRecorder } from "../web/cursor/pageContext.ts";
 import { findPath, renderOverlay } from "../web/cursor/overlay.ts";
 import { reactInfo } from "../web/cursor/reactInfo.ts";
 import { Sampler } from "../web/cursor/sampler.ts";
-import { shiftPageEvents, shiftSamples, type PageCmd, type PageCommentAction, type PageEventsMsg, type PageOrbAction, type PageThreadAction } from "../web/cursor/pageBridge.ts";
+import { shiftPageEvents, shiftSamples, type PageCmd, type PageCommentAction, type PageConfirmAction, type PageEventsMsg, type PageOrbAction, type PagePanelAction, type PageThreadAction } from "../web/cursor/pageBridge.ts";
+import { UI_THEME_CSS } from "../web/cursor/colors.ts";
 import { THREAD_CSS, createThreadOverlay } from "../web/cursor/threadOverlay.ts";
 import { COMMENT_CSS, createCommentOverlay } from "../web/cursor/commentOverlay.ts";
 import { INLINE_FORM_CSS, createFormHub, type FormHub } from "../web/cursor/inlineForm.ts";
@@ -108,7 +109,7 @@ function init(): void {
   host.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647;";
   const shadow = host.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
-  style.textContent = OVERLAY_CSS + THREAD_CSS + COMMENT_CSS + INLINE_FORM_CSS;
+  style.textContent = UI_THEME_CSS + OVERLAY_CSS + THREAD_CSS + COMMENT_CSS + INLINE_FORM_CSS;
   const layer = document.createElement("div");
   layer.className = "layer";
   const threadLayer = document.createElement("div");
@@ -148,7 +149,7 @@ function init(): void {
       const s = [...sampler.samples].reverse().find((x) => x.elementPath);
       return s ? { x: s.x + s.scrollX, y: s.y + s.scrollY } : null;
     },
-    send: (action: PageThreadAction | PageOrbAction) => ipcRenderer.send("page:thread", action),
+    send: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction) => ipcRenderer.send("page:thread", action),
     sampleAt: (x, y) => sampler.sampleAt(x, y),
     forms: hub,
   });
@@ -204,13 +205,14 @@ function init(): void {
         outlines = cmd.outlines;
         draw();
         comments.setAlwaysHover(cmd.hover);
+        threads.setDetails(cmd.details);
         break;
       case "threads":
         threads.setThreads(cmd.threads);
         comments.refresh(); // what's queued on its element
         break;
       case "bubble":
-        threads.bubble(cmd.say, cmd.ended);
+        threads.bubble(cmd.say, cmd.ended, cmd.confirm);
         break;
       case "orb":
         threads.setOrb(cmd.state, cmd.pos);

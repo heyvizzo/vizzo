@@ -36,11 +36,14 @@ contextBridge.exposeInMainWorld("shell", {
     save: (values: unknown) => ipcRenderer.invoke("settings:save", values),
     refresh: () => ipcRenderer.invoke("settings:refresh"),
     allowMicrophone: () => ipcRenderer.invoke("settings:allow-microphone"),
+    allowKeychain: () => ipcRenderer.invoke("settings:allow-keychain"),
     openPrivacy: (pane: string) => ipcRenderer.invoke("settings:open-privacy", pane),
   },
   onState: (cb: (state: unknown) => void) => ipcRenderer.on("nav-state", (_e, state) => cb(state)),
   onFocusAddress: (cb: () => void) => ipcRenderer.on("focus-address", () => cb()),
   onPtt: (cb: (down: boolean) => void) => ipcRenderer.on("ptt", (_e, down) => cb(down === true)),
+  /** Esc in the browser pane or the toolbar (main relays it): stop speaking, and a burst of three asks to stop its task. */
+  onEscape: (cb: () => void) => ipcRenderer.on("escape", () => cb()),
   /**
    * The top bars (shell/index.html, folder.html): Shift is push-to-talk there too, except in the address field. A
    * clicked button would otherwise keep the keyboard, so it lets go on Shift, and main gives the keyboard to the sidebar

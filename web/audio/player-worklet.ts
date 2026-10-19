@@ -2,7 +2,8 @@
 // segment instance id. Reports the context frame of the first non-silent sample rendered for each id.
 // Runs in AudioWorkletGlobalScope; loaded via `?worker&url` (see context.ts). Kept dependency-free.
 //
-// Messages in:  {type:"push", id, samples: Float32Array} | {type:"reset"}
+// Messages in:  {type:"push", id, samples: Float32Array} | {type:"reset"} | {type:"drop", ids}  (cut off: fade out
+//               what's playing of those segment instances and drop the rest of them)
 // Messages out: {type:"played", id, frame}   — frame = context frame index of that sample
 
 declare const currentFrame: number;
@@ -13,6 +14,9 @@ declare function registerProcessor(name: string, ctor: new () => AudioWorkletPro
 
 /** Keep in sync with SILENCE_THRESHOLD in dsp.ts (not imported to keep this worklet standalone). */
 const THRESHOLD = 1 / 1000;
+/** A cut-off segment fades out over this many seconds (no click). */
+const FADE_S = 0.025;
+declare const sampleRate: number;
 
 interface Chunk { id: number; samples: Float32Array; pos: number }
 
@@ -22,15 +26,31 @@ class PlayerProcessor extends AudioWorkletProcessor {
 
   constructor() {
     super();
-    this.port.onmessage = (e: MessageEvent<{ type: "push"; id: number; samples: Float32Array } | { type: "reset" }>) => {
+    this.port.onmessage = (e: MessageEvent<{ type: "push"; id: number; samples: Float32Array } | { type: "reset" } | { type: "drop"; ids: number[] }>) => {
       const m = e.data;
       if (m.type === "push") {
         if (m.samples.length) this.queue.push({ id: m.id, samples: m.samples, pos: 0 });
+      } else if (m.type === "drop") {
+        this.drop(new Set(m.ids));
       } else {
         this.queue = [];
         this.reported.clear();
       }
     };
+  }
+
+  /** Drop those instances' audio; if one is playing, a short fade of what's next of it stands in for the rest. */
+  private drop(ids: Set<number>): void {
+    const head = this.queue[0];
+    let fade: Chunk | null = null;
+    if (head && ids.has(head.id) && head.pos > 0) {
+      const n = Math.min(Math.round(FADE_S * sampleRate), head.samples.length - head.pos);
+      const samples = head.samples.slice(head.pos, head.pos + n);
+      for (let k = 0; k < n; k++) samples[k]! *= 1 - k / n;
+      fade = { id: -1, samples, pos: 0 }; // -1: never reported as played
+    }
+    this.queue = this.queue.filter((c) => !ids.has(c.id));
+    if (fade) this.queue.unshift(fade);
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {

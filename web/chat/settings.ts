@@ -1,19 +1,24 @@
 // The chat's settings, kept in the app's settings file (electron/main.ts `chat`). Two windows edit them: the Settings
 // window (web/settings/main.ts) owns PANEL_KEYS, the chat sidebar (web/chat/main.ts) SIDEBAR_KEYS. Each saves only
 // its own keys; main merges them into the file and passes the result to the sidebar.
-import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, llmOf, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type SpeechLanguage, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
+import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, llmOf, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type SpeechLanguage, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
 import type { OrbPos } from "../cursor/pageBridge.ts";
 import { clampHangMs, VAD_HANG_MS } from "../audio/vad.ts";
 import { DEFAULT_LISTEN_RMS, clampThreshold } from "./meter.ts";
 
 const STORE_KEY = "chat.settings.v1";
-export const LONG_TASK_CHOICES = [10, 20, 30, 60];
+/** The long-task threshold (Settings → Models → Turns): whole seconds in this range. */
+export const LONG_TASK_MIN = 5;
+export const LONG_TASK_MAX = 600;
+export const validLongTask = (s: unknown): s is number => Number.isInteger(s) && (s as number) >= LONG_TASK_MIN && (s as number) <= LONG_TASK_MAX;
 export const LANGUAGES: { id: SpeechLanguage; label: string }[] = [
   { id: "auto", label: "Auto (en/ro)" }, { id: "en", label: "English" }, { id: "ro", label: "Română" },
 ];
 
 export interface Settings {
   routerMode: RouterMode; ttsModel: TtsModel; sttModel: SttModel; longTaskSeconds: number; language: SpeechLanguage;
+  /** How long (minutes) a task or a thread's run may take before it is stopped. */
+  taskTimeoutMinutes: number;
   /** Harness or API + model per tier (fast: router and progress lines; smart: hard questions and tasks). */
   llm: Record<LlmTier, LlmChoice>;
   /** The choice last used with each harness, per tier (restored when switching back to that harness). */
@@ -38,14 +43,16 @@ export interface Settings {
   showRam: boolean;
   /** Show costs and savings (header total, per turn, per task, per thread). */
   showCost: boolean;
+  /** Show each turn's debugging details (decision badges, pointing chips, timings, prompts & responses). */
+  showDebug: boolean;
   /** Where the conversation orb was dragged to on the page (fractions of the viewport); null: bottom center. */
   orbPos: OrbPos | null;
 }
 
 /** What the Settings window changes. */
 export const PANEL_KEYS = [
-  "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "language", "llm", "llmModels", "ttsVoices", "ttsStyle",
-  "debugOutlines", "hoverOutline", "showRam", "showCost",
+  "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "language", "llm", "llmModels", "ttsVoices", "ttsStyle",
+  "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
 export const SIDEBAR_KEYS = ["alwaysListen", "listenThreshold", "listenHangMs", "instant", "orbPos"] as const satisfies readonly (keyof Settings)[];
@@ -63,12 +70,14 @@ export interface ChatSettingsBridge {
 export function normalizeSettings(saved: unknown): Settings {
   const settings: Settings = {
     routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, sttModel: DEFAULT_CONFIG.sttModel, longTaskSeconds: 20,
+    taskTimeoutMinutes: DEFAULT_CONFIG.taskTimeoutMinutes,
     language: "auto", llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
-    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: true, showCost: true, orbPos: null,
+    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: true, showCost: true, showDebug: true, orbPos: null,
   };
   if (saved && typeof saved === "object") Object.assign(settings, saved);
   settings.ttsStyle = { ...DEFAULT_TTS_STYLE, ...settings.ttsStyle };
-  if (!LONG_TASK_CHOICES.includes(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
+  if (!validLongTask(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
+  if (!validTaskTimeout(settings.taskTimeoutMinutes)) settings.taskTimeoutMinutes = DEFAULT_CONFIG.taskTimeoutMinutes;
   if (!LANGUAGES.some((l) => l.id === settings.language)) settings.language = "auto";
   // Saved before tiers (claudeBackend) or naming a removed API provider: the defaults. The server's saved
   // selection (GET /api/llm/selection) replaces this.
@@ -86,6 +95,7 @@ export function normalizeSettings(saved: unknown): Settings {
   settings.hoverOutline = settings.hoverOutline === true;
   settings.showRam = settings.showRam !== false;
   settings.showCost = settings.showCost !== false;
+  settings.showDebug = settings.showDebug !== false;
   const o = settings.orbPos;
   settings.orbPos = o && Number.isFinite(o.x) && Number.isFinite(o.y) ? { x: Math.min(1, Math.max(0, o.x)), y: Math.min(1, Math.max(0, o.y)) } : null;
   settings.listenThreshold = clampThreshold(settings.listenThreshold);

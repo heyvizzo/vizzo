@@ -6,7 +6,7 @@
 //
 // Reconcile: every run's time window and edited files are kept. When a run finishes and another thread's run that
 // overlapped it in time touched a same file, the later-finishing thread gets ONE system follow-up naming the files.
-import type { RunConfig } from "../../shared/config.ts";
+import { taskTimeoutMs, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, PointingTarget, ServerMsg } from "../../shared/protocol.ts";
 import type { ThreadInfo } from "../../shared/threads.ts";
 import type { Mark } from "../clock.ts";
@@ -20,8 +20,6 @@ import { ttsSpeaker } from "./floor.ts";
 import { failureText, finishedLine, finishMode, reconcileText, reminderText } from "./policy.ts";
 import { threadStore, type ThreadRecord, type ThreadRunState, type ThreadStore } from "./store.ts";
 
-/** Per-request harness timeout (a thread's run may take a while). */
-export const THREAD_RUN_TIMEOUT_MS = 15 * 60_000;
 const SUMMARY_MAX = 160;
 const noMark: Mark = () => {};
 
@@ -57,7 +55,7 @@ interface Queued { spec: RunSpec; resolve: (r: RunResult | null) => void; reject
 
 class ThreadRunner implements ThreadRunState {
   private queue: Queued[] = [];
-  private current: { q: Queued; abortedBy: "correction" | "stop" | null } | null = null;
+  private current: { q: Queued; abortedBy: "correction" | "stop" | "user" | null } | null = null;
   private stopped = false;
   /** The current run's own message: the replay stops before it (it's sent as the request itself). */
   private replayCut: string | null = null;
@@ -85,6 +83,27 @@ class ThreadRunner implements ThreadRunState {
       this.rec.handle?.abort();
     }
     return this.enqueue({ ...spec, kind: "correction" }, true);
+  }
+
+  /**
+   * The user stopped the thread's work (task.stop): the current run is aborted and its queued follow-ups dropped. The
+   * thread and its session stay for what comes next. False when nothing was running.
+   */
+  cancel(): boolean {
+    const cur = this.current;
+    const dropped = this.queue.filter((q) => q.spec.kind !== "reconcile");
+    if (!dropped.length && (!cur || cur.q.spec.kind === "reconcile")) return false;
+    this.queue = this.queue.filter((q) => !dropped.includes(q));
+    for (const q of dropped) q.resolve(null);
+    if (cur) {
+      cur.abortedBy = "user";
+      try { this.rec.handle?.abort(); } catch { /* ignore */ }
+    }
+    this.store.addMessage(this.threadId, { turnId: null, role: "system", kind: "stopped", text: "Stopped by you before it finished. What it already changed stays." }, (t) => {
+      t.state = "idle";
+      t.awaitingReply = false;
+    });
+    return true;
   }
 
   stop(): void {
@@ -129,7 +148,7 @@ class ThreadRunner implements ThreadRunState {
     try {
       const r = await this.deps.solveInThread!({
         thread: rec.handle, kind, mark: spec.inline?.mark ?? noMark, question: spec.question, pointing: spec.pointing ?? [],
-        pageContext: spec.pageContext, language: spec.language, intent: spec.intent,
+        pageContext: spec.pageContext, language: spec.language, intent: spec.intent, timeoutMs: taskTimeoutMs(spec.config),
         voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
         ...trace(),
         onSpokenLine: (l) => { spoken = l.trim(); spec.inline?.onSpokenLine(l); },
@@ -287,6 +306,12 @@ export function submitRun(threadId: string, spec: RunSpec, deps: ThreadDeps, sto
 export function correctRun(threadId: string, spec: RunSpec, deps: ThreadDeps, store = threadStore()): Promise<RunResult | null> {
   const r = runnerOf(store, threadId, deps);
   return r ? r.correct(spec) : Promise.resolve(null);
+}
+
+/** The user stopped the thread's work (task.stop). False when it wasn't working. */
+export function cancelRun(threadId: string, store = threadStore()): boolean {
+  const run = store.get(threadId)?.run;
+  return run instanceof ThreadRunner && run.cancel();
 }
 
 /** The thread has a run in flight. */

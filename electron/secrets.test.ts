@@ -73,7 +73,7 @@ describe("keychainCipher", () => {
   });
 
   it("names the entry the way Electron does", () => {
-    expect(keychainService("Voice Latency Lab")).toEqual({ service: "Voice Latency Lab Safe Storage", account: "Voice Latency Lab Key" });
+    expect(keychainService("Vizzo")).toEqual({ service: "Vizzo Safe Storage", account: "Vizzo Key" });
   });
 });
 

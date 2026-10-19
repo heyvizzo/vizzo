@@ -13,6 +13,8 @@ export interface Player {
   endSegment(segment: Segment): void;
   /** Called once per segment with the performance.now() time its first non-silent sample was played. */
   onPlayed: ((segment: Segment, tPlayed: number) => void) | null;
+  /** Stop playing this segment (its current instance) now, with a short fade; the rest of it is dropped. */
+  cut(segment: Segment): void;
   /** Drop queued audio (cancel / new turn). */
   reset(): void;
 }
@@ -61,6 +63,12 @@ export async function createPlayer(): Promise<Player> {
     endSegment(segment) {
       if (current?.segment !== segment) return;
       post(resampler.flush());
+      resampler = new Resampler(RATE, ctx.sampleRate);
+    },
+    cut(segment) {
+      if (current?.segment !== segment) return;
+      node.port.postMessage({ type: "drop", ids: [current.id] });
+      pending.delete(current.id);
       resampler = new Resampler(RATE, ctx.sampleRate);
     },
     reset() {

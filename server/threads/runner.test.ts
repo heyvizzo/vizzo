@@ -4,7 +4,7 @@ import type { ServerMsg } from "../../shared/protocol.ts";
 import type { ThreadAnchor } from "../../shared/threads.ts";
 import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING, type FakeScenario } from "../orchestrators/fakes.ts";
 import { Floor } from "./floor.ts";
-import { correctRun, replayText, submitRun, type RunSpec } from "./runner.ts";
+import { cancelRun, correctRun, replayText, submitRun, type RunSpec } from "./runner.ts";
 import { resetThreadStore, type ThreadStore } from "./store.ts";
 
 export const anchor = (selector: string): ThreadAnchor => ({
@@ -71,6 +71,29 @@ describe("thread runner", () => {
     expect(d.log.threadSends[1]!.question).toMatch(/^actually make it green[\s\S]*"make it red"/);
     expect(r?.spoken).toMatch(/^Done: actually make it green/);
     expect(store.info(t.threadId)!.messages.filter((m) => m.kind === "result")).toHaveLength(1);
+  });
+
+  it("stopped by the user: the run is aborted, its follow-ups dropped, nothing announced; the thread takes the next one", async () => {
+    const d = deps({ threadRunMs: 60 });
+    subscribe();
+    const t = store.create(anchor("#red"), "the red button", "task");
+    const p1 = submitRun(t.threadId, spec("make it red"), d);
+    const p2 = submitRun(t.threadId, spec("and round it", "followup"), d);
+    await until(() => d.log.threadSends.length === 1);
+    expect(cancelRun(t.threadId)).toBe(true);
+    expect(await p1).toBeNull();
+    expect(await p2).toBeNull();
+    expect(d.log.threadAborts).toEqual(["thread#1"]);
+    const info = store.info(t.threadId)!;
+    expect(info.state).toBe("idle");
+    expect(info.messages.at(-1)).toMatchObject({ role: "system", kind: "stopped" });
+    expect(info.messages.some((m) => m.kind === "result")).toBe(false);
+    expect(says()).toEqual([]);
+    expect(cancelRun(t.threadId)).toBe(false); // nothing running now
+    // Same session, next request.
+    const r = await submitRun(t.threadId, spec("make it blue"), d);
+    expect(r?.spoken).toMatch(/^Done: make it blue/);
+    expect(d.log.threadSends.map((s) => s.threadId)).toEqual(["thread#1", "thread#1"]);
   });
 
   it("reconcile: overlapping runs that touched a same file → one follow-up on the later-finishing thread", async () => {

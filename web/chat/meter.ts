@@ -2,6 +2,8 @@
 // the user drags to set the minimum that starts a turn. The line and the gate share one
 // linear RMS value; the graph is drawn in dB so quiet speech is still movable.
 
+import { THEME, withAlpha } from "../../shared/theme.ts";
+
 /** Bottom and top of the drawn scale, dBFS. */
 export const METER_FLOOR_DB = -60;
 export const METER_CEIL_DB = 0;
@@ -89,11 +91,12 @@ export function mountLevelMeter(canvas: HTMLCanvasElement, opts: {
     const css = getComputedStyle(document.documentElement);
     const pick = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
     return {
-      accent: pick("--accent", "#6ea8fe"),
-      warn: pick("--warn", "#fbbf24"),
-      err: pick("--err", "#f87171"),
-      muted: pick("--muted", "#8a93a6"),
-      line: pick("--line", "#2a2f3a"),
+      accent: pick("--accent", THEME.dark.accent),
+      warn: pick("--warn", THEME.dark.warn),
+      err: pick("--err", THEME.dark.err),
+      muted: pick("--muted", THEME.dark.muted),
+      line: pick("--line", THEME.dark.line),
+      panel: pick("--panel", THEME.dark.panel),
     };
   };
 
@@ -123,7 +126,7 @@ export function mountLevelMeter(canvas: HTMLCanvasElement, opts: {
     const lineY = yOf(threshold, plotTop, plotH);
     const mark = live ? c.err : c.warn;
 
-    ctx.fillStyle = "rgba(248, 113, 113, 0.10)";
+    ctx.fillStyle = withAlpha(c.err, 0.1);
     ctx.fillRect(plotL, plotTop, plotW, Math.max(0, lineY - plotTop));
 
     ctx.strokeStyle = c.line;
@@ -162,8 +165,8 @@ export function mountLevelMeter(canvas: HTMLCanvasElement, opts: {
       ctx.lineTo(firstX, plotTop + plotH);
       ctx.closePath();
       const g = ctx.createLinearGradient(0, plotTop, 0, plotTop + plotH);
-      g.addColorStop(0, over ? "rgba(248, 113, 113, 0.45)" : "rgba(110, 168, 254, 0.40)");
-      g.addColorStop(1, "rgba(110, 168, 254, 0)");
+      g.addColorStop(0, over ? withAlpha(c.err, 0.45) : withAlpha(c.accent, 0.4));
+      g.addColorStop(1, withAlpha(c.accent, 0));
       ctx.fillStyle = g;
       ctx.fill();
       ctx.beginPath();
@@ -200,7 +203,7 @@ export function mountLevelMeter(canvas: HTMLCanvasElement, opts: {
     const hh = 18;
     const hx = plotL + plotW + 6;
     const hy = Math.min(cssH - hh - 2, Math.max(2, lineY - hh / 2));
-    ctx.fillStyle = "#171b24";
+    ctx.fillStyle = c.panel;
     ctx.strokeStyle = mark;
     ctx.lineWidth = 1;
     ctx.beginPath();

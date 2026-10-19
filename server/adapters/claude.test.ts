@@ -300,6 +300,9 @@ describe("routeTurn", () => {
     expect(validateRouterInput({ intent: "task", estimate_seconds: "45", say: " ok ", question: " q " })).toEqual({ intent: "task", estimateS: 45, say: "ok", question: "q" });
     expect(validateRouterInput({ intent: "question", estimate_seconds: -3, say: "", question: "q" })?.estimateS).toBeNull();
     expect(validateRouterInput({ intent: "clarify", say: "" })).toBeNull();
+    // Silence: a clarify with nothing to say and nothing to ask, in every mode.
+    expect(validateRouterInput({ intent: "clarify", say: "", question: "" }, "forced")).toEqual({ intent: "clarify", estimateS: null, say: "", question: "" });
+    expect(validateRouterInput({ intent: "answer", say: "", question: "" })).toBeNull();
     expect(validateRouterInput({ intent: "answer", say: "hi" }, "forced")).toBeNull();
     expect(validateRouterInput({ intent: "nope", say: "hi" })).toBeNull();
     expect(validateRouterInput(null)).toBeNull();

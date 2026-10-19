@@ -12,7 +12,7 @@ Read `PRD.md` first. This doc defines the **contracts** that parallel workers bu
 - **Dev:** `npm run dev` runs the server (port 8787) and Vite (port 5173) together. Vite proxies `/ws` and `/api` to the server.
 
 ```
-realtime-voice/
+vizzo/
 ├─ docs/                      # this folder
 ├─ shared/
 │  ├─ protocol.ts             # browser↔server message types (§3)
@@ -295,7 +295,7 @@ Approaches A (`realtime`, OpenAI Realtime speech-to-speech) and C (`hybrid`, Rea
 - **Segments.** `audio.segment start` goes out right before a segment's first audio byte and `end` after its last; segments are serialized (later audio is held until the earlier segment ends); a segment that never gets audio sends nothing, so the Session never waits for an `audio.played` that can't come.
 - **Labelling.** Forced mode: the router's speech is the `ack`. Auto mode: the first delta's `kind` decides (`ack` if it called `ask_solver`, `answer` if it answered directly). The pre-warmed first TTS socket is opened as "ack"; its `*.ttsFirstByte` mark is renamed to the final label. The ack socket is flushed on `onSpokenEnd` (or when the router returns). The answer socket opens when the solver is requested (warm) or when the spoken line is ready (cold). Rare auto-mode "text, then tool call" turns are flagged `turn.end.meta.labelConflict`.
 - **Cold (`prewarm: false`).** Sockets open on release (Scribe) or when first needed (TTS), so setup is inside the measured latency; `llm.request.meta.cold = true` (also on `turn.end`).
-- **Errors / cancel.** Any adapter failure → `error {source: scribe|tts|router|solver|timeout}` and `done` resolves with `error` set. Overall turn timeout 60 s from `turn.start`. `cancel()` closes every socket opened for the turn.
+- **Errors / cancel.** Any adapter failure → `error {source: scribe|tts|router|solver|timeout}` and `done` resolves with `error` set. Overall turn timeout 60 s from `turn.start`. A solver run (background job, thread run, or the turn's own solve) is stopped after `RunConfig.taskTimeoutMinutes` (Settings → Models → Turns, default 15 min). `cancel()` closes every socket opened for the turn.
 - **Headless check.** `npm run smoke:e2e` (real keys; SKIPs without them) and `npm run smoke:e2e -- --fake` (fake adapters over the real `/ws`) print a RunRecord with marks relative to release.
 
 **Chat mode (`RunConfig.memory`, the `/chat.html` page).** The Session appends each finished turn (`{user, assistant, detail}`) to a per-connection conversation log (`server/conversation.ts`); `conversation.reset` clears it. The pipeline sends the log to the router and the solver as prior messages. Benchmark runs keep `memory: false`.

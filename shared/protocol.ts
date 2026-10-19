@@ -26,7 +26,8 @@ export interface JobInfo {
   estimateS: number | null;
   /** The language the user spoke (the result is written and spoken in it). */
   language?: string;
-  state: "running" | "done" | "failed";
+  /** stopped: the user stopped it (task.stop) before it finished. */
+  state: "running" | "done" | "failed" | "stopped";
   /** The solver's SPOKEN line, when done. */
   spoken?: string;
   /** The solver's full answer, when done. */
@@ -301,7 +302,8 @@ export type ClientMsg =
    * pageUrl: the browser page the turn was recorded on (a queued turn sent later); otherwise the pane's current page.
    * text: a typed comment (shared/comment.ts): the turn's words, instead of transcribing audio.
    */
-  | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string; pageUrl?: string; text?: string }
+  /** threadId: the thread whose panel is open on the page; the turn goes to it instead of being routed. */
+  | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string; pageUrl?: string; text?: string; threadId?: string }
   | { type: "cursor.samples"; turnId: string; samples: CursorSample[] }
   /** tAudioStart: client time of the first captured audio sample (ARCHITECTURE §6). */
   | { type: "turn.audioStart"; turnId: string; tAudioStart: number }
@@ -320,7 +322,15 @@ export type ClientMsg =
   /** Element threads: delete one (stops its run, closes its harness session, removes it; edits stay in the code). */
   | { type: "thread.delete"; threadId: string }
   /** Element threads: the user opened a thread's panel (it becomes the focused thread; its result counts as told). */
-  | { type: "thread.focus"; threadId: string };
+  | { type: "thread.focus"; threadId: string }
+  /**
+   * Stop a task that's still working (Esc three times, then Yes): a background job, or an element thread's current
+   * run (the thread stays; its queued follow-ups are dropped). What it already changed in the project stays.
+   */
+  | { type: "task.stop"; task: TaskRef };
+
+/** A task still working after its turn: a background job (central conversation) or an element thread's run. */
+export type TaskRef = { kind: "job"; jobId: string } | { kind: "thread"; threadId: string };
 
 // ── server → client ──────────────────────────────
 export type ServerMsg =
@@ -334,6 +344,8 @@ export type ServerMsg =
   | { type: "voice.text"; turnId: string; delta: string; line?: true }
   | { type: "solver.text"; turnId: string; delta: string }
   | { type: "audio.segment"; turnId: string; segment: Segment; state: "start" | "end" }
+  /** Stop playing this segment now (a filler cut off because the answer is here): drop what's queued of it. */
+  | { type: "audio.cut"; turnId: string; segment: Segment }
   | { type: "turn.done"; turnId: string; run: RunRecord }
   /** The voice layer's decision for this turn, as soon as it's known. background: the solver runs as a job. */
   | { type: "decision"; turnId: string; intent: RouteIntent; estimateS: number | null; background: boolean;

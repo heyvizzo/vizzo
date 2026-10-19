@@ -13,7 +13,8 @@ import { appendRun } from "./results.ts";
 import { computeCost, costItems } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
 import { getConversation } from "./conversation.ts";
-import { cancelJobs } from "./orchestrators/jobs.ts";
+import { cancelJobs, stopJob } from "./orchestrators/jobs.ts";
+import { cancelRun } from "./threads/runner.ts";
 import type { ConnectionChannel } from "./orchestrators/types.ts";
 import { isMarkedSegment } from "../shared/marks.ts";
 import { Floor } from "./threads/floor.ts";
@@ -174,7 +175,7 @@ export class Session {
         this.floor.turnStarted(); // …or over a thread's line
         threadStore().touch(this.threadSub); // this connection speaks thread results from now on
         return this.startTurn(msg.turnId, msg.config, msg.tPress, msg.fixtureId, typeof msg.pageUrl === "string" ? msg.pageUrl : undefined,
-          typeof msg.text === "string" && msg.text.trim() ? msg.text : undefined);
+          typeof msg.text === "string" && msg.text.trim() ? msg.text : undefined, typeof msg.threadId === "string" && msg.threadId ? msg.threadId : undefined);
       case "cursor.samples":
         if (this.turn?.turnId === msg.turnId) this.turn.samples.push(...msg.samples);
         return;
@@ -241,10 +242,16 @@ export class Session {
       case "thread.focus":
         threadStore().focus(msg.threadId);
         return;
+      case "task.stop": {
+        const task = msg.task as { kind?: unknown; jobId?: unknown; threadId?: unknown } | undefined;
+        if (task?.kind === "job" && typeof task.jobId === "string") stopJob(this.connection, this.channel, task.jobId);
+        else if (task?.kind === "thread" && typeof task.threadId === "string") cancelRun(task.threadId);
+        return;
+      }
     }
   }
 
-  private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string): void {
+  private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string, pinnedThread?: string): void {
     this.turn?.handlers?.cancel();
     // Older clients send `claudeBackend` instead of `llm`.
     const config: RunConfig = { ...sent, llm: llmOf(sent) };
@@ -276,6 +283,8 @@ export class Session {
         send: (m) => {
           if (this.turn !== turn) return;
           if (m.type === "audio.segment" && m.state === "start") turn.segmentsSent.add(m.segment);
+          // Cut off (a progress line): it may never be reported as played, so it isn't waited for.
+          if (m.type === "audio.cut") turn.segmentsSent.delete(m.segment);
           if (m.type === "decision" && m.threadId) turn.threadId = m.threadId;
           this.send(m);
         },
@@ -284,6 +293,7 @@ export class Session {
         tAudioStart: () => turn.tAudioStart,
         ...(pageUrl ? { pageUrl: () => pageUrl } : {}),
         ...(typedText ? { typedText } : {}),
+        ...(pinnedThread ? { pinnedThread } : {}),
         pageEvents: () => turn.page,
         connection: this.connection,
         channel: this.channel,

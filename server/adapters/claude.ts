@@ -120,7 +120,7 @@ Reply with ONLY one JSON object (no code fences, no other text), keys in exactly
 const FILLERS_FORMAT = `
 
 ## Output format
-Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…", "…", "…"]}`;
+Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…", "…", "…"], "cut_in": "…"}`;
 
 /** Added to the solver's system prompt when it works in the project folder (Claude Code's tool names). */
 const PROJECT_NOTE = `Your working directory is the project you're answering about. Find the code behind the pointed elements with Glob, Grep and Read: start from the \`selector\` line (tag, ids, classes, text), then read the markup, CSS and script that render it, and the project's DECISIONS.md. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, make the change with Edit or Write, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`;
@@ -240,7 +240,10 @@ export function historyMessages(history: ChatTurn[], forSolver: boolean): ChatMe
   ]);
 }
 
-/** Validates the complete router JSON. question/task need a question; clarify/answer need something to say. */
+/**
+ * Validates the complete router JSON. question/task need a question; clarify/answer need something to say,
+ * except a silent clarify (empty `say` and `question`): the transcript only described silence, so no reply.
+ */
 export function validateRouterInput(v: unknown, mode: RouterMode = "auto"): RouterInput | null {
   if (typeof v !== "object" || v === null) return null;
   const { intent, estimate_seconds, say, question } = v as Record<string, unknown>;
@@ -252,7 +255,7 @@ export function validateRouterInput(v: unknown, mode: RouterMode = "auto"): Rout
     if (typeof question !== "string" || !question.trim()) return null;
     return { intent: i, estimateS: parseEstimate(estimate_seconds), say: sayText, question: question.trim() };
   }
-  if (!sayText) return null;
+  if (!sayText && !(i === "clarify" && typeof question === "string" && !question.trim())) return null;
   return { intent: i, estimateS: null, say: sayText, question: "" };
 }
 
@@ -450,6 +453,7 @@ export function buildFillersParams(
 }
 
 const MAX_FILLERS = 3;
+const MAX_CUT_IN_CHARS = 100;
 
 export const generateFillers: GenerateFillers = async ({ transcript, question, intent, pointing, language, voiceCues, onPrompt, onResponse, llm }) => {
   const t0 = performance.now();
@@ -459,12 +463,14 @@ export const generateFillers: GenerateFillers = async ({ transcript, question, i
     onPrompt?.(harnessPromptInfo("fillers", choice, params));
     const res = await fastRequest("fillers", choice, params, undefined, ROLE_TIMEOUT_MS.fillers);
     onResponse?.(harnessResponseInfo("fillers", t0, res, choice));
-    let parsed: { lines?: unknown } | null = null;
+    let parsed: { lines?: unknown; cut_in?: unknown } | null = null;
     try { parsed = JSON.parse(extractJsonObject(res.text) ?? "null"); } catch { parsed = null; }
     const lines = (Array.isArray(parsed?.lines) ? parsed.lines : [])
       .filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean).slice(0, MAX_FILLERS);
     if (!lines.length) log(`[claude] progress lines (${choice.provider}): no usable lines in ${JSON.stringify(res.text.slice(0, 120))}`);
-    return { lines, usage: res.usage ?? null };
+    const cutIn = typeof parsed?.cut_in === "string" ? parsed.cut_in.trim() : "";
+    // A long one isn't a cut-in any more: the pipeline's own one is used instead.
+    return { lines, ...(cutIn && cutIn.length <= MAX_CUT_IN_CHARS ? { cutIn } : {}), usage: res.usage ?? null };
   } catch (err) {
     onResponse?.(errorResponseInfo("fillers", t0, err));
     log(`[claude] progress lines failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -496,7 +502,7 @@ export function buildSolverParams(
   };
 }
 
-export const solveTask: SolveTask = async ({ mark, question, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm }) => {
+export const solveTask: SolveTask = async ({ mark, question, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs }) => {
   const t0 = performance.now();
   const choice = choiceFor(llm, "solver");
   let text = "";
@@ -524,7 +530,7 @@ export const solveTask: SolveTask = async ({ mark, question, pointing, history, 
   const gate = choice.provider !== "claude-code" && projectDir() ? new NarrationGate(onText) : null;
   let res: HarnessResult;
   try {
-    res = await harnessRequest("solver", choice, flattenMessages(params), gate ? (d) => gate.feed(d) : onText, ROLE_TIMEOUT_MS.solver);
+    res = await harnessRequest("solver", choice, flattenMessages(params), gate ? (d) => gate.feed(d) : onText, timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal);
     gate?.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));
@@ -581,7 +587,7 @@ export function threadUserMessage(
 const threadChoice = (thread: { choice?: LlmChoice }): LlmChoice | undefined => thread.choice;
 
 export const solveInThread: SolveInThread = async ({
-  thread, kind, mark, question, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues,
+  thread, kind, mark, question, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs,
 }) => {
   const t0 = performance.now();
   const choice = threadChoice(thread);
@@ -619,7 +625,7 @@ export const solveInThread: SolveInThread = async ({
   const gate = choice?.provider !== "claude-code" && projectDir() ? new NarrationGate(onText) : null;
   let res: Awaited<ReturnType<typeof thread.send>>;
   try {
-    res = await thread.send(user, gate ? (d) => gate.feed(d) : onText, ROLE_TIMEOUT_MS.solver);
+    res = await thread.send(user, gate ? (d) => gate.feed(d) : onText, timeoutMs ?? ROLE_TIMEOUT_MS.solver);
     gate?.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));

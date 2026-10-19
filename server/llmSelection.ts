@@ -1,7 +1,7 @@
 // The tier choices the Chat page last picked (harness, model, level, speed per tier), saved so the next start
 // warms the same agents before the first turn. The page reads them back on load and sends every change
 // (POST /api/llm/selection), which re-warms: the other agents are killed and the chosen ones started.
-// File: $LLM_SELECTION_FILE, default ~/.config/realtime-voice/llm-selection.json.
+// File: $LLM_SELECTION_FILE, default ~/.config/vizzo/llm-selection.json.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,7 +10,7 @@ import { configureWarm } from "./adapters/warmPool.ts";
 
 export type Selection = Record<LlmTier, LlmChoice>;
 
-const file = (): string => process.env.LLM_SELECTION_FILE ?? join(homedir(), ".config", "realtime-voice", "llm-selection.json");
+const file = (): string => process.env.LLM_SELECTION_FILE ?? join(homedir(), ".config", "vizzo", "llm-selection.json");
 
 /** Warm agents are on unless WARM_AGENTS=0 (or the older CLAUDE_AGENTS=0), and never with fake vendors. */
 export const warmEnabled = (): boolean =>

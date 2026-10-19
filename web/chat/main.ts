@@ -9,7 +9,7 @@ import "./chat.css";
 import { connectWithStatus } from "../common.ts";
 import { languagesFor } from "../../shared/pointing.ts";
 import { DEFAULT_CONFIG, isLocalStt, llmOf, type RunConfig } from "../../shared/config.ts";
-import type { ClientMsg, CostItem, CursorRest, CursorSample, LlmPrompt, LlmResponse, PageEvents, JobInfo, MemorySnapshot, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, Word } from "../../shared/protocol.ts";
+import type { ClientMsg, CostItem, CursorRest, CursorSample, LlmPrompt, LlmResponse, PageEvents, JobInfo, MemorySnapshot, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, TaskRef, Word } from "../../shared/protocol.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
 import { displayTitle, normalizePageUrl, type ThreadAnchor, type ThreadInfo, type ThreadSay } from "../../shared/threads.ts";
 import { startCapture, warmCapture, type CaptureHandle } from "../audio/capture.ts";
@@ -17,9 +17,10 @@ import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
 import { bindPushToTalk, isPttKey, isTypingTarget } from "../audio/ptt.ts";
 import { mountAlwaysListen, type AlwaysListenHandle } from "./alwaysListen.ts";
-import { createRemotePage, isPageCommentAction, isPageOrbAction, isPageThreadAction, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type RemotePage } from "../cursor/pageBridge.ts";
+import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type RemotePage } from "../cursor/pageBridge.ts";
 import { typedSpanMs } from "../../shared/comment.ts";
 import { STATE_LABEL } from "../cursor/threadOverlay.ts";
+import { stateColorVars } from "../cursor/colors.ts";
 import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
 import { hasSpokenWords } from "../../shared/speech.ts";
 import { autoSpeechTooShort, VAD_HANG_MAX_MS, VAD_HANG_MIN_MS, VAD_PRE_ROLL_MS } from "../audio/vad.ts";
@@ -37,7 +38,7 @@ const TICK_MS = 250;
 const SHOWN_ALGORITHM = "dwellMode";
 /** The Electron app's preload (electron/preload.ts): push-to-talk and the browser pane, relayed from its process. */
 const shell = (window as { shell?: {
-  onPtt?: (cb: (down: boolean) => void) => void; page?: PageBridge; queue?: QueueBridge; mic?: MicBridge;
+  onPtt?: (cb: (down: boolean) => void) => void; onEscape?: (cb: () => void) => void; page?: PageBridge; queue?: QueueBridge; mic?: MicBridge;
   chatSettings?: ChatSettingsBridge;
   getProject?: () => Promise<string | null>; pickProject?: () => Promise<string | null>;
   onProject?: (cb: (dir: string | null) => void) => void;
@@ -121,6 +122,14 @@ app.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const messages = $("messages");
+// The state palette shared with the page's markers and orb (web/cursor/colors.ts), for chat.css's thread dots and pills:
+// the deeper set while the sidebar is light (it follows the system theme, web/public/style.css).
+const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+const applyStateColors = () => {
+  for (const [k, v] of Object.entries(stateColorVars(darkScheme.matches ? "dark" : "light"))) document.documentElement.style.setProperty(k, v);
+};
+applyStateColors();
+darkScheme.addEventListener("change", applyStateColors);
 
 function setStatus(text: string, isErr = false): void {
   const el = $("status");
@@ -147,12 +156,12 @@ shell?.chatSettings?.onChanged?.((json) => {
   const prev = { ...settings };
   Object.assign(settings, Object.fromEntries(PANEL_KEYS.map((key) => [key, next[key]])));
   if (settings.sttModel !== prev.sttModel) for (const q of queue) transcribeQueued(q); // an on-device model: transcribe what's queued
-  if (settings.debugOutlines !== prev.debugOutlines || settings.hoverOutline !== prev.hoverOutline) sendDebug();
+  if (settings.debugOutlines !== prev.debugOutlines || settings.hoverOutline !== prev.hoverOutline || settings.showDebug !== prev.showDebug) sendDebug();
   renderDisplay();
 });
 
 function sendDebug(): void {
-  bridge.send({ type: "debug", outlines: settings.debugOutlines, hover: settings.hoverOutline });
+  bridge.send({ type: "debug", outlines: settings.debugOutlines, hover: settings.hoverOutline, details: settings.showDebug });
 }
 
 function config(): RunConfig {
@@ -170,6 +179,7 @@ function config(): RunConfig {
     fillers: true,
     backgroundLongTasks: true,
     longTaskSeconds: settings.longTaskSeconds,
+    taskTimeoutMinutes: settings.taskTimeoutMinutes,
     language: settings.language,
     llm: settings.llm,
   };
@@ -209,8 +219,9 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   return e;
 }
 
-function addTurnView(turnId: string): TurnView {
-  $("empty").hidden = true;
+/** `shown` false: a turn kept out of the conversation (its thread's panel shows it); its view is built but not added. */
+function addTurnView(turnId: string, shown = true): TurnView {
+  if (shown) $("empty").hidden = true;
   const root = el("div", "turn");
   root.dataset.turn = turnId;
   const user = el("div", "bubble user pending", "listening…");
@@ -231,11 +242,21 @@ function addTurnView(turnId: string): TurnView {
   detail.append(el("summary", undefined, "The solver's detailed answer"), detailPre);
   const meta = el("div", "meta");
   root.append(user, annot, chips, badges, bot, detail, meta);
-  messages.append(root);
+  stampTime(root);
+  if (shown) messages.append(root);
   const v: TurnView = { root, user, annot, chips, badges, decision, bot, botText, detail, detailPre, meta };
   views.set(turnId, v);
-  scrollDown();
+  if (shown) scrollDown();
   return v;
+}
+
+/** When a message was sent ("14:05"; the full date and time on hover), at the top of its entry; set again on a resend. */
+function stampTime(root: HTMLElement, at = new Date()): void {
+  let t = root.querySelector<HTMLTimeElement>(":scope > time.stamp");
+  if (!t) { t = el("time", "stamp"); root.prepend(t); }
+  t.dateTime = at.toISOString();
+  t.textContent = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  t.title = at.toLocaleString();
 }
 
 function scrollDown(): void {
@@ -251,7 +272,7 @@ function renderDecision(v: TurnView, d: DecisionLike): void {
   v.badges.hidden = false;
 }
 
-/** Small state tag on a turn ("interrupted", "stopped"), once. */
+/** Small state tag on a turn ("interrupted"), once. */
 function addTag(v: TurnView, text: string): void {
   if (v.badges.querySelector(".tag")) return;
   v.badges.append(el("span", "tag", text));
@@ -397,7 +418,7 @@ function renderSessionCost(): void {
   const el2 = $("session-cost");
   const saved = savingsText(savingsOf(items));
   el2.hidden = billed === 0 && !saved;
-  el2.textContent = `spent ${fmtUsd(billed)}${saved ? ` · ${saved}` : ""}`;
+  el2.textContent = `Total spent: ${fmtUsd(billed)}${saved ? ` · ${saved}` : ""}`;
 }
 
 // ── background job cards ───────────────────────────
@@ -493,13 +514,15 @@ function createJobCard(info: JobInfo): JobCard {
   const costBox = el("div", "costbox");
   costBox.hidden = true;
   root.append(head, question, sub, spoken, detail, err, costBox);
+  stampTime(root, new Date(Date.now() - (info.elapsedMs ?? 0)));
   const card: JobCard = { info, tStart: performance.now() - (info.elapsedMs ?? 0), marker, costBox, root, head, question, sub, spoken, detail, detailPre, err };
   marker.addEventListener("click", () => {
     root.hidden = !root.hidden;
     marker.setAttribute("aria-expanded", String(!root.hidden));
   });
   // After the starting turn (and after any earlier markers and cards of that turn); else at the end.
-  let anchor: Element | null = views.get(info.turnId)?.root ?? null;
+  const turnRoot = views.get(info.turnId)?.root;
+  let anchor: Element | null = turnRoot?.isConnected ? turnRoot : null;
   while (anchor?.nextElementSibling instanceof HTMLElement && anchor.nextElementSibling.matches(`.job-marker[data-turn="${CSS.escape(info.turnId)}"], .job[data-turn="${CSS.escape(info.turnId)}"]`)) {
     anchor = anchor.nextElementSibling;
   }
@@ -521,6 +544,7 @@ function upsertJob(info: JobInfo): void {
   if (info.state === "running" && info.elapsedMs != null) c.tStart = performance.now() - info.elapsedMs;
   // Keep text we already have if a later update omits it.
   c.info = { ...c.info, ...info };
+  settleStopConfirm();
   renderJob(c);
   renderJobsPill();
   orbChanged();
@@ -531,8 +555,8 @@ function renderJob(c: JobCard): void {
   const j = c.info;
   c.root.dataset.state = j.state;
   c.marker.dataset.state = j.state;
-  const status = j.state === "running" ? `${fmtElapsed(performance.now() - c.tStart)}…` : j.state === "failed" ? "failed" : j.costUsd !== undefined ? fmtUsd(j.costUsd) : "";
-  const isCost = j.state !== "running" && j.state !== "failed" && j.costUsd !== undefined;
+  const status = j.state === "running" ? `${fmtElapsed(performance.now() - c.tStart)}…` : j.state === "failed" || j.state === "stopped" ? j.state : j.costUsd !== undefined ? fmtUsd(j.costUsd) : "";
+  const isCost = j.state === "done" && j.costUsd !== undefined;
   c.marker.replaceChildren(el("span", "job-marker-q", `${j.intent === "question" ? "Question" : "Task"}: ${markerLabel(j.question)}`), el("span", isCost ? "job-marker-status cost-text" : "job-marker-status", status));
   c.head.textContent = jobHeadline(j, performance.now() - c.tStart);
   c.question.textContent = j.question ? `“${j.question}”` : "";
@@ -639,7 +663,7 @@ function stopNotice(): void {
   if (!noticeJobId) return;
   stoppedNotices.add(noticeJobId);
   const say = pageSays.get(noticeJobId);
-  if (say) { bridge.send({ type: "bubble", say, ended: true }); pageSays.delete(noticeJobId); }
+  if (say) { pageBubble(say, true); pageSays.delete(noticeJobId); }
   noticeJobId = null;
   sock.send({ type: "speech.stop" });
 }
@@ -650,20 +674,27 @@ const threads = new Map<string, ThreadInfo>();
 let pageUrl: string | null = null;
 /** A thread picked in the list on another page: opened once that page is loaded (its panel sends thread.focus). */
 let pendingOpen: { threadId: string; pageUrl: string; until: number } | null = null;
+/** The thread whose panel is open on the page: a talk turn goes to it (not routed). */
+let panelThreadId: string | null = null;
 /** Thread lines shown as bubbles on the page, by `say:<sayId>` (ended when stopped). */
 const pageSays = new Map<string, ThreadSay>();
+/** The thread each line read out outside a turn is from, by `say:<sayId>` (null: the central conversation). */
+const sayThreads = new Map<string, string | null>();
 
 const onCurrentPage = (t: ThreadInfo | undefined): boolean => !!t && !!pageUrl && t.pageUrl === normalizePageUrl(pageUrl);
 
 function threadsChanged(): void {
+  settleStopConfirm();
   // Queued feedback shows as teal markers next to the real threads (web/chat/queue.ts queuedThreads).
   bridge.send({ type: "threads", threads: threadsOnPage([...threads.values(), ...queuedThreads()], pageUrl) });
   renderThreadList();
   renderSessionCost();
+  orbChanged(); // a thread started or stopped working
 }
 
 function onPageUrl(url: string): void {
   pageUrl = url;
+  panelThreadId = null; // a new document has no panel open
   sendDebug(); // a new document starts with outlines off
   threadsChanged();
   orbChanged(true);
@@ -698,10 +729,12 @@ if (shell?.getProject && shell.pickProject && shell.onProject) {
   void getProject().then((dir) => { if (!seenChange) show(dir); });
 }
 
-// RAM and cost figures stay rendered; turned off in Settings, they're hidden (chat.css: .hide-ram / .hide-cost).
+// RAM, cost and debugging details stay rendered; turned off in Settings, they're hidden (chat.css: .hide-ram /
+// .hide-cost / .hide-debug).
 function renderDisplay(): void {
   app.classList.toggle("hide-ram", !settings.showRam);
   app.classList.toggle("hide-cost", !settings.showCost);
+  app.classList.toggle("hide-debug", !settings.showDebug);
 }
 renderDisplay();
 
@@ -777,6 +810,7 @@ function renderThreadList(): void {
       const b = el("button", "thread-item");
       b.type = "button";
       b.dataset.state = t.state;
+      if (t.awaitingReply && (t.state === "idle" || t.state === "pending")) b.dataset.asking = "";
       b.title = [stripVoiceCues(t.summary), g.current ? "Open its panel on the page" : `Go to ${pageLabel(g.pageUrl)} and open its panel`].filter(Boolean).join("\n");
       const mem = el("span", "thread-mem");
       mem.dataset.thread = t.threadId;
@@ -810,7 +844,7 @@ function renderMemory(): void {
   if (!memory) return;
   const m = memory;
   const threadsBytes = Object.values(m.threads).reduce((n, b) => n + b, 0);
-  head.textContent = `RAM ${fmtBytes(m.totalBytes)}`;
+  head.textContent = `Total RAM used: ${fmtBytes(m.totalBytes)}`;
   const speechBytes = m.speechBytes ?? 0;
   head.title = [
     "RAM the app server uses now: its Node process and every process it started (physical footprint, GPU memory included)",
@@ -850,11 +884,12 @@ function threadsCost(list: Iterable<ThreadInfo>): { total: number; items: CostIt
  */
 function threadStatus(t: ThreadInfo): HTMLElement {
   const finished = t.state === "idle" || t.state === "pending";
-  if (t.costUsd === undefined) return el("span", "thread-state", STATE_LABEL[t.state]);
+  const asking = finished && t.awaitingReply;
+  if (t.costUsd === undefined) return el("span", "thread-state", asking ? "asking you" : STATE_LABEL[t.state]);
   const cost = el("span", "cost-text", finished ? fmtUsd(t.costUsd) : ` · ${fmtUsd(t.costUsd)} so far`);
   cost.title = costBreakdown(t.costItems ?? [], t.costUsd);
   const s = el("span", "thread-state thread-cost");
-  s.append(...(finished ? [] : [STATE_LABEL[t.state]]), cost);
+  s.append(...(asking ? ["asking you · "] : finished ? [] : [STATE_LABEL[t.state]]), cost);
   return s;
 }
 
@@ -864,14 +899,15 @@ function onThreadSay(msg: Extract<ServerMsg, { type: "thread.say" }>): void {
   const key = `say:${say.sayId}`;
   const t = say.threadId ? threads.get(say.threadId) : undefined;
   if (state === "start") {
+    sayThreads.set(key, say.threadId);
     // Central lines come from the orb, and stay in the conversation too (the orb's panel shows it).
-    if (onCurrentPage(t) || say.threadId === null) { bridge.send({ type: "bubble", say, ended: false }); pageSays.set(key, say); }
+    if (onCurrentPage(t) || say.threadId === null) { pageBubble(say, false); pageSays.set(key, say); }
     if (!onCurrentPage(t)) addSayBubble(say, t);
   } else if (pageSays.has(key)) {
     // Ended once its audio has drained.
     const ended = pageSays.get(key)!;
     pageSays.delete(key);
-    setTimeout(() => bridge.send({ type: "bubble", say: ended, ended: true }), playback.remainingMs(performance.now()));
+    setTimeout(() => pageBubble(ended, true), playback.remainingMs(performance.now()));
   }
   noticeAudio(key, state, t ? `Telling you about ${t.title}…` : "Speaking…");
 }
@@ -879,7 +915,7 @@ function onThreadSay(msg: Extract<ServerMsg, { type: "thread.say" }>): void {
 function addSayBubble(say: ThreadSay, t: ThreadInfo | undefined): void {
   $("empty").hidden = true;
   const root = el("div", "turn say");
-  const bot = el("div", `bubble bot${say.needsReply ? " reply" : ""}`);
+  const bot = el("div", "bubble bot");
   if (t) {
     const who = el("button", "who link", `${displayTitle(t.title)} · ${pageLabel(t.pageUrl)}`);
     who.type = "button";
@@ -889,6 +925,7 @@ function addSayBubble(say: ThreadSay, t: ThreadInfo | undefined): void {
   } else bot.append(el("span", "who", say.threadId ? "Thread" : "Conversation"));
   bot.append(stripVoiceCues(say.text));
   root.append(bot);
+  stampTime(root);
   messages.append(root);
   scrollDown();
 }
@@ -904,18 +941,23 @@ function sendTurnBubble(t: Turn, ended: boolean): void {
   const th = t.threadId ? threads.get(t.threadId) : undefined;
   if (th && !onCurrentPage(th)) return; // on another page: the turn's own bubble here shows it
   const say: ThreadSay = { sayId: `turn:${t.turnId}`, threadId: t.threadId ?? null, text: line, needsReply: replyNeedsReply(t.intent, line) };
-  if (!ended) { bridge.send({ type: "bubble", say, ended: false }); return; }
+  if (!ended) { pageBubble(say, false); return; }
   t.bubbleEnded = true;
   setTimeout(() => {
-    bridge.send({ type: "bubble", say, ended: true });
+    pageBubble(say, true);
     if (say.threadId === null && say.needsReply && turn === t) { centralAsking = true; orbChanged(); }
   }, playback.remainingMs(performance.now()));
 }
 
 bridge.onThreadAction?.((a) => {
+  if (isPageConfirmAction(a)) return answerStopConfirm(a.confirmId, a.yes);
   if (isPageOrbAction(a)) {
     settings.orbPos = a.pos;
     saveSettings();
+    return;
+  }
+  if (isPagePanelAction(a)) {
+    panelThreadId = a.threadId && !isQueuedId(a.threadId) ? a.threadId : null;
     return;
   }
   if (!isPageThreadAction(a)) return;
@@ -1000,22 +1042,27 @@ function refreshBusy(): void {
 }
 
 // ── the conversation orb ───────────────────────────
-// The orb on the page stands for the central conversation (web/cursor/threadOverlay.ts): it's listening while a turn
-// or a dictation is being recorded, working while a turn that went to no thread (or hasn't been routed yet) or a
-// background job is running, and asking once a central reply ended on a question for you, until the next turn. Its
-// panel shows the conversation as it is here.
+// The orb on the page stands for the central conversation (web/cursor/threadOverlay.ts), and sums up the markers too:
+// it's listening while a turn or a dictation is being recorded, speaking while any reply or thread line is being read
+// out, working while a turn that went to no thread (or hasn't been routed yet), a background job or any thread is
+// running, asking once a central reply ended on a question for you, and failed once a central turn
+// failed; those two last until the next turn. Its panel shows the conversation as it is here.
 
 let orbSent: string | null = null;
 /** The last central reply asked you something (a follow-up, or ended with "?"); cleared by the next turn. */
 let centralAsking = false;
+/** The last central turn failed (no reply, a dropped connection, the mic, a server error); cleared by the next turn. */
+let centralFailed = false;
 
 function orbState(): OrbState {
   const t = turn;
   const turnCentral = !!t && !t.finished && t.tRelease !== undefined && !t.rec && !t.threadId;
   const jobRunning = [...jobs.values()].some((c) => c.info.state === "running");
+  const threadRunning = [...threads.values()].some((th) => th.state === "running");
   if (isRecording()) return "listening";
-  if (turnCentral || jobRunning) return "running";
-  return centralAsking ? "asking" : "idle";
+  if (noticeJobId || playback.isPlaying(performance.now())) return "speaking";
+  if (turnCentral || jobRunning || threadRunning) return "running";
+  return centralFailed ? "failed" : centralAsking ? "asking" : "idle";
 }
 
 /** Sends the orb's state and position when they changed (`force`: a new document). */
@@ -1112,7 +1159,8 @@ function cancelTurn(t: Turn, reason: "interrupt" | "stop"): void {
     v.user.classList.remove("pending");
     if (t.tRelease === undefined || v.user.textContent === "listening…") v.user.textContent = "(cancelled)";
   }
-  addTag(v, reason === "interrupt" ? "interrupted" : "stopped");
+  // Stopped (Esc, the Stop button): no tag, the turn just ends there.
+  if (reason === "interrupt") addTag(v, "interrupted");
 }
 
 function press(how: "manual" | "vad" = "manual"): void {
@@ -1138,17 +1186,21 @@ function press(how: "manual" | "vad" = "manual"): void {
   const out: TurnOut = rec
     ? { send: (msg) => rec.push({ msg }), sendAudio: (pcm) => rec.push({ pcm: pcm.slice() }) }
     : { send: (msg) => sock.send(msg), sendAudio: (pcm) => sock.sendAudio(pcm) };
+  // With a thread's panel open, the turn is that thread's (live turns only: a queued one is new feedback). It shows in
+  // the panel, not in the conversation.
+  const pinned = !queued && panelThreadId && threads.has(panelThreadId) ? { threadId: panelThreadId } : {};
   const t: Turn = {
     out, rec, turnId, tPress: now, audioStarted: Promise.resolve(),
-    sentUpTo: now - PRE_ROLL_MS - 1, detailed: new Map(), view: addTurnView(turnId), voice: "", lineStart: 0, solver: "", segmentOpen: false, finished: false,
+    sentUpTo: now - PRE_ROLL_MS - 1, detailed: new Map(), view: addTurnView(turnId, !pinned.threadId), voice: "", lineStart: 0, solver: "", segmentOpen: false, finished: false,
   };
   turn = t;
   centralAsking = false;
+  centralFailed = false;
   lastTargets = [];
   lastRests = [];
   drawOverlay();
   // A queued turn records its page; its config is the sidebar's when it's sent.
-  out.send({ type: "turn.start", turnId, config: config(), tPress: now, ...(queued && pageUrl ? { pageUrl: normalizePageUrl(pageUrl) } : {}) });
+  out.send({ type: "turn.start", turnId, config: config(), tPress: now, ...(queued && pageUrl ? { pageUrl: normalizePageUrl(pageUrl) } : {}), ...pinned });
   pageSource.start(now - PRE_ROLL_MS);
   t.batchTimer = setInterval(() => flushSamples(t), BATCH_MS);
   $("ptt").classList.add("live");
@@ -1225,7 +1277,6 @@ async function release(auto = false): Promise<void> {
 function stopAll(): void {
   const now = performance.now();
   const wasPlaying = playback.isPlaying(now);
-  const turnAudible = wasPlaying && audioOwner === "turn";
   player?.reset();
   playback.reset();
   const t = turn;
@@ -1234,10 +1285,125 @@ function stopAll(): void {
   if (sending) stopSending();
   if (dictation) endDictation(dictation, undefined, true);
   if (t && !t.finished) cancelTurn(t, "stop");
-  else if (t && turnAudible) addTag(t.view, "stopped");
   stopNotice();
   if (t || hadNotice || wasPlaying || wasSending) setStatus(queue.length ? `Stopped. ${queuedText()}` : "Stopped.");
   refreshBusy();
+}
+
+// ── Esc: stop speaking; three in a row: stop its task too? ──
+// The first Esc stops the voice (stopAll). Two more right after it ask, in a bubble from the task's marker (the orb
+// for the central conversation): "Do you want to stop this task?" The task is the one whose speech the first Esc
+// stopped (a background job, or an element thread's run) if it's still working; otherwise, speaking or not, the
+// latest element thread that's still running. No is the default: unanswered, the bubble goes after STOP_CONFIRM_MS.
+// If the task finishes first, its result replaces the question.
+
+/** Esc presses at most this far apart make one burst. */
+const ESC_BURST_GAP_MS = 600;
+/** How long the question waits for a Yes (No's outline closes meanwhile). */
+const STOP_CONFIRM_MS = 10_000;
+
+/** A task that was speaking when Esc stopped it; `from`: the marker its bubbles come from (null: the orb). */
+interface SpokenTask { ref: TaskRef; from: string | null }
+let escBurst: { count: number; last: number; task: SpokenTask | null } | null = null;
+let stopConfirm: { confirmId: string; task: SpokenTask; timer: ReturnType<typeof setTimeout> } | null = null;
+
+/** `relayed`: pressed in the browser pane or the toolbar, where the page may use Esc itself: it only stops speech. */
+function onEscape(relayed: boolean): void {
+  const now = performance.now();
+  if (escBurst && now - escBurst.last <= ESC_BURST_GAP_MS) {
+    escBurst.count++;
+    escBurst.last = now;
+    if (escBurst.count === 3) {
+      const task = escBurst.task && taskRunning(escBurst.task.ref) ? escBurst.task : latestThreadTask();
+      if (task) askStopTask(task);
+    }
+    return;
+  }
+  const speaking = playback.isPlaying(now) || !!noticeJobId;
+  const task = speaking ? spokenTask() : null; // before stopAll: it clears what was playing
+  // Relayed and nothing speaking: the page may want this Esc, so nothing stops; it still starts a burst.
+  if (!relayed || speaking) stopAll();
+  escBurst = { count: 1, last: now, task };
+}
+
+/** The element thread most recently interacted with among those still running. */
+function latestThreadTask(): SpokenTask | null {
+  const running = [...threads.values()].filter((t) => t.state === "running");
+  const latest = running.sort((a, b) => b.lastInteractionAt - a.lastInteractionAt)[0];
+  return latest ? { ref: { kind: "thread", threadId: latest.threadId }, from: latest.threadId } : null;
+}
+
+/** The task behind what's being said now, if it's still working. */
+function spokenTask(): SpokenTask | null {
+  if (noticeJobId) {
+    // A thread's line read out on its own (a finished job's notice has no task left).
+    const threadId = sayThreads.get(noticeJobId);
+    return threadId && threads.get(threadId)?.state === "running" ? { ref: { kind: "thread", threadId }, from: threadId } : null;
+  }
+  const t = turn;
+  if (!t || audioOwner !== "turn") return null;
+  const job = [...jobs.values()].find((c) => c.info.turnId === t.turnId && c.info.state === "running");
+  if (job) return { ref: { kind: "job", jobId: job.info.jobId }, from: null };
+  const th = t.threadId ? threads.get(t.threadId) : undefined;
+  return th?.state === "running" ? { ref: { kind: "thread", threadId: th.threadId }, from: th.threadId } : null;
+}
+
+function taskRunning(ref: TaskRef): boolean {
+  return ref.kind === "job" ? jobs.get(ref.jobId)?.info.state === "running" : threads.get(ref.threadId)?.state === "running";
+}
+
+/** The question, in a bubble from the task's marker (from the orb when that's on another page). */
+function askStopTask(task: SpokenTask): void {
+  if (stopConfirm) clearTimeout(stopConfirm.timer);
+  const th = task.from ? threads.get(task.from) : undefined;
+  const from = th && !onCurrentPage(th) ? null : task.from;
+  const confirmId = `stop-${Date.now().toString(36)}`;
+  // The page's bubble times out on its own; this is for a page that's gone meanwhile (navigation).
+  const timer = setTimeout(() => { if (stopConfirm?.confirmId === confirmId) stopConfirm = null; }, STOP_CONFIRM_MS + 1000);
+  stopConfirm = { confirmId, task: { ...task, from }, timer };
+  const text = th && from === null ? `Do you want to stop the task on ${th.title}?` : "Do you want to stop this task?";
+  bridge.send({ type: "bubble", say: { sayId: `confirm:${confirmId}`, threadId: from, text, needsReply: true }, ended: false, confirm: { confirmId, ms: STOP_CONFIRM_MS } });
+  setStatus("Stop this task? Yes or No on the page.");
+}
+
+function answerStopConfirm(confirmId: string, yes: boolean): void {
+  const c = stopConfirm;
+  if (!c || c.confirmId !== confirmId) return;
+  clearTimeout(c.timer);
+  stopConfirm = null;
+  if (yes && taskRunning(c.task.ref)) {
+    sock.send({ type: "task.stop", task: c.task.ref });
+    setStatus("Stopping the task…");
+  } else if (!turnBusy()) setStatus(readyStatus());
+}
+
+/** The task finished while the question was up: its result takes the bubble's place. */
+function settleStopConfirm(): void {
+  const c = stopConfirm;
+  if (!c || taskRunning(c.task.ref)) return;
+  clearTimeout(c.timer);
+  stopConfirm = null;
+  const { ref } = c.task;
+  const job = ref.kind === "job" ? jobs.get(ref.jobId)?.info : undefined;
+  const th = ref.kind === "thread" ? threads.get(ref.threadId) : undefined;
+  const failed = job ? job.state === "failed" : th?.state === "failed";
+  const text = failed ? "That task failed." : job ? spokenOf(job.spoken ?? "") : th?.summary ?? "";
+  if (text) pageBubble({ sayId: `result:${c.confirmId}`, threadId: c.task.from, text, needsReply: false }, false);
+  if (!turnBusy()) setStatus(readyStatus());
+}
+
+/**
+ * A spoken line's bubble on the page. While a question is up on the same marker, an earlier line's end is dropped
+ * (it would bring that line's bubble back over the question), and a new line replaces the question: no answer then.
+ */
+function pageBubble(say: ThreadSay, ended: boolean): void {
+  const c = stopConfirm;
+  if (c && say.threadId === c.task.from) {
+    if (ended) return;
+    clearTimeout(c.timer);
+    stopConfirm = null;
+  }
+  bridge.send({ type: "bubble", say, ended });
 }
 
 function endTurn(t: Turn): void {
@@ -1271,6 +1437,7 @@ function failTurn(t: Turn, msg: string): void {
   if (t.view.user.classList.contains("pending")) t.view.user.textContent = "(cancelled)";
   t.view.meta.append(el("span", "err", msg));
   setStatus(msg, true);
+  if (!t.rec && !t.threadId) { centralFailed = true; orbChanged(); }
 }
 
 // ── comments ───────────────────────────────────────
@@ -1619,6 +1786,7 @@ function replay(q: Queued): Promise<void> {
   v.user.classList.add("pending");
   v.user.textContent = q.comment ?? "…";
   v.meta.replaceChildren();
+  stampTime(v.root);
   messages.append(v.root);
   views.set(q.turnId, v);
   cancelled.delete(q.turnId);
@@ -1633,6 +1801,7 @@ function replay(q: Queued): Promise<void> {
   const ended = new Promise<void>((resolve) => { t.onEnd = resolve; });
   turn = t;
   centralAsking = false;
+  centralFailed = false;
   lastTargets = [];
   lastRests = [];
   drawOverlay();
@@ -1743,8 +1912,14 @@ sock.on((msg: ServerMsg) => {
         player?.startSegment(msg.segment);
       } else player?.endSegment(msg.segment);
       break;
+    case "audio.cut":
+      // A progress line broken off because the answer is here: the answer's audio comes next.
+      player?.cut(msg.segment);
+      playback.cut(performance.now());
+      break;
     case "error":
       setStatus(`${msg.source}: ${msg.message}`, true);
+      if (!t.rec && !t.threadId) { centralFailed = true; orbChanged(); }
       break;
     case "turn.done": {
       const run = msg.run;
@@ -1898,8 +2073,9 @@ $("stop").onclick = () => stopAll();
 /** Same rule as ptt.ts: Esc in a text control belongs to the control. A checkbox does not. */
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || e.repeat || isTypingTarget(e.target)) return;
-  stopAll();
+  onEscape(false);
 });
+shell?.onEscape?.(() => onEscape(true));
 
 // The app grants the mic and allows audio without a click: ready to talk right away (the button comes back if that fails).
 // After `listen` exists, so a saved Always listen can attach the meter.
@@ -1916,6 +2092,7 @@ function clearConversation(): void {
   queueMicrotask(renderSessionCost);
   messages.querySelectorAll(".turn:not(.queued), .job, .job-marker, .note").forEach((n) => n.remove());
   centralAsking = false;
+  centralFailed = false;
   views.clear();
   for (const q of queue) views.set(q.turnId, q.view);
   calls.clear();
