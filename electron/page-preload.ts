@@ -1,6 +1,6 @@
 // Preload for the browser pane (the pages the user visits). The page runs in its own process, so everything the chat
 // needs from it is captured here and relayed by main.ts to the sidebar (web/cursor/pageBridge.ts):
-// - push-to-talk: Shift held on the page (not while typing) → ptt(true/false);
+// - push-to-talk: the talk key (Settings → Keyboard) held on the page (not while typing) → ptt(true/false);
 // - pointer samples (~60 Hz, sent in batches) and the turn's clicks and highlights, recorded between start and stop;
 // - the turn's pointing targets and cursor rests, drawn over the page;
 // - element threads: markers, the thread panel, bubbles and the provisional marker, and the conversation orb
@@ -11,16 +11,18 @@
 // before the page's own. The overlay lives in a closed shadow root, so the page's CSS can't touch it.
 import { ipcRenderer, webFrame } from "electron";
 import type { CursorSample, ReactInfo } from "../shared/protocol.ts";
-import { isPttKey, isTypingTarget } from "../web/audio/ptt.ts";
+import { createTalkKey, isPttKeyUp, isTypingTarget } from "../web/audio/ptt.ts";
+import { setHotkeys } from "../shared/hotkeys.ts";
 import { createPageContextRecorder } from "../web/cursor/pageContext.ts";
 import { findPath, renderOverlay } from "../web/cursor/overlay.ts";
 import { reactInfo } from "../web/cursor/reactInfo.ts";
 import { Sampler } from "../web/cursor/sampler.ts";
-import { shiftPageEvents, shiftSamples, type PageCmd, type PageCommentAction, type PageConfirmAction, type PageEventsMsg, type PageOrbAction, type PagePanelAction, type PageThreadAction } from "../web/cursor/pageBridge.ts";
+import { shiftPageEvents, shiftSamples, type PageCmd, type PageCommentAction, type PageConfirmAction, type PageEventsMsg, type PageHeldAction, type PageOrbAction, type PagePanelAction, type PageThreadAction } from "../web/cursor/pageBridge.ts";
 import { UI_THEME_CSS } from "../web/cursor/colors.ts";
 import { THREAD_CSS, createThreadOverlay } from "../web/cursor/threadOverlay.ts";
 import { COMMENT_CSS, createCommentOverlay } from "../web/cursor/commentOverlay.ts";
 import { INLINE_FORM_CSS, createFormHub, type FormHub } from "../web/cursor/inlineForm.ts";
+import { DRAWING_CSS, createDrawingOverlay } from "../web/cursor/drawingOverlay.ts";
 import { installTooltips } from "./tooltip.ts";
 
 const SAMPLE_BATCH_MS = 100;
@@ -37,24 +39,38 @@ const OVERLAY_CSS = `
 .ov-tag { position: absolute; left: -2px; top: -16px; font: 10px/14px ui-monospace, monospace; padding: 0 4px; border-radius: 3px; white-space: nowrap; }
 .ov-dot { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #000; box-sizing: border-box; }`;
 
+// Registered before the visited page's scripts: drawing controls must not trigger application handlers.
+let drawingInput: ((event: Event) => void) | null = null;
+for (const name of ["pointerdown","pointerup","pointermove","pointercancel","mousedown","mouseup","mousemove","click","dblclick","auxclick","contextmenu","wheel","keydown","keyup","beforeinput","input"])
+  window.addEventListener(name, e => drawingInput?.(e), { capture: true, passive: false });
+
 // ── push-to-talk ──
+
+// The keyboard shortcuts (Settings → Keyboard): main sends each change.
+setHotkeys(ipcRenderer.sendSync("hotkeys:get"));
+ipcRenderer.on("hotkeys", (_e, hk: unknown) => setHotkeys(hk));
 
 let held = false;
 const ptt = (down: boolean) => {
   if (held === down) return;
   held = down;
+  if (down) forms?.prepareDictation();
   ipcRenderer.send("ptt", down);
 };
 /** Set in init(). The bubbles' fields are inside the closed shadow root, so isTypingTarget can't see them: ask. */
 let forms: FormHub | null = null;
-window.addEventListener("keydown", (e) => {
-  if (!e.repeat && isPttKey(e) && !isTypingTarget(e.target) && !forms?.typing()) ptt(true);
-}, true);
-window.addEventListener("keyup", (e) => {
-  if (e.key === "Shift") ptt(false);
-}, true);
-window.addEventListener("blur", () => ptt(false));
-window.addEventListener("pagehide", () => ptt(false));
+const talk = createTalkKey(ptt);
+/** Keyboard focus allows the talk key: not in a text control, nor a bubble's field (that handles its own). */
+const talkAllowed = (target: EventTarget | null) => !isTypingTarget(target) && !forms?.typing();
+const talkUp = () => { forms?.releaseTalkKey(); talk.release(); ptt(false); };
+window.addEventListener("keydown", (e) => talk.keydown(e, talkAllowed(e.target)), true);
+const talkKeyUp = (e: KeyboardEvent) => { talk.keyup(e); if (isPttKeyUp(e)) forms?.releaseTalkKey(); };
+window.addEventListener("keyup", talkKeyUp, true);
+window.addEventListener("pointerdown", () => talk.pointerdown(), true);
+// On macOS Ctrl-click is a right-click: while Control talks, a click points at the page instead of opening the menu.
+window.addEventListener("contextmenu", (e) => { if (held && e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault(); }, true);
+window.addEventListener("blur", talkUp);
+window.addEventListener("pagehide", talkUp);
 
 // ── recording and overlay (once the document exists) ──
 
@@ -103,18 +119,28 @@ function init(): void {
     rec.start(tEpoch - ORIGIN);
   };
 
-  // Overlay: positioned in document coordinates, so it scrolls with the page. Its own elements are pointer-events:none
-  // except the thread markers, panel and bubbles.
+  // Clip overlay content to the viewport so stale/offscreen anchors cannot enlarge the page.
+  // The inner document layer follows scrolling; fixed controls still use the viewport.
   const host = document.createElement("div");
-  host.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647;";
+  host.style.cssText = "position:fixed;inset:0;overflow:clip;pointer-events:none;z-index:2147483647;";
   const shadow = host.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
-  style.textContent = UI_THEME_CSS + OVERLAY_CSS + THREAD_CSS + COMMENT_CSS + INLINE_FORM_CSS;
+  style.textContent = UI_THEME_CSS + OVERLAY_CSS + THREAD_CSS + COMMENT_CSS + INLINE_FORM_CSS + DRAWING_CSS;
   const layer = document.createElement("div");
   layer.className = "layer";
   const threadLayer = document.createElement("div");
   const commentLayer = document.createElement("div");
-  shadow.append(style, layer, threadLayer, commentLayer);
+  const drawingLayer = document.createElement("div");
+  const documentLayer = document.createElement("div");
+  documentLayer.style.cssText = "position:absolute;width:0;height:0;";
+  const followScroll = () => {
+    documentLayer.style.left = `${-scrollX}px`;
+    documentLayer.style.top = `${-scrollY}px`;
+  };
+  followScroll();
+  window.addEventListener("scroll", followScroll, { passive: true });
+  documentLayer.append(layer, threadLayer, commentLayer);
+  shadow.append(style, documentLayer, drawingLayer);
   const attach = () => { if (!host.isConnected) root.append(host); };
   // Tooltips for the overlay's buttons and for the page's own `title`s (native ones don't show in this view).
   installTooltips((el, x, y) => (el === host ? shadow.elementFromPoint(x, y) : null));
@@ -149,7 +175,7 @@ function init(): void {
       const s = [...sampler.samples].reverse().find((x) => x.elementPath);
       return s ? { x: s.x + s.scrollX, y: s.y + s.scrollY } : null;
     },
-    send: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction) => ipcRenderer.send("page:thread", action),
+    send: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction | PageHeldAction) => ipcRenderer.send("page:thread", action),
     sampleAt: (x, y) => sampler.sampleAt(x, y),
     forms: hub,
   });
@@ -162,6 +188,84 @@ function init(): void {
     queuedOn: (domPath) => threads.queuedOn(domPath),
     requestMode: (on) => ipcRenderer.send("comment:mode", on),
   });
+  let drawingCaptures = 0;
+  let drawingCaptureVisibility = "";
+  const drawing = createDrawingOverlay({
+    layer: drawingLayer, attach, forms: hub,
+    capture: async () => {
+      // Rapid toggles can overlap captures; restore the overlay after the last one finishes.
+      if (drawingCaptures++ === 0) {
+        drawingCaptureVisibility = host.style.visibility;
+        host.style.visibility = "hidden";
+      }
+      ipcRenderer.send("tooltip:hide");
+      try {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        const data = await ipcRenderer.invoke("page:drawing-capture");
+        if (typeof data !== "string" || !data.startsWith("data:image/")) throw new Error("Page capture unavailable");
+        return data;
+      } finally { if (--drawingCaptures === 0) host.style.visibility = drawingCaptureVisibility; }
+    },
+    snapshot: () => {
+      const captured = new Map<string, {sample: CursorSample; rect: DOMRect}>();
+      // Capture visible meaningful element centers before installing the opaque drawing surface.
+      for (const el of document.querySelectorAll("h1,h2,h3,h4,h5,h6,p,a,button,input,textarea,select,img,li,label,td,th,section,article,[role]")) {
+        if (captured.size >= 800) break;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) continue;
+        const x = (Math.max(0,r.left)+Math.min(innerWidth,r.right))/2;
+        const y = (Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2;
+        const hit = sampler.sampleAt(x,y);
+        if (hit?.sample.elementPath && !captured.has(hit.sample.elementPath)) captured.set(hit.sample.elementPath, {sample:{...hit.sample,t:hit.sample.t+ORIGIN},rect:hit.el.getBoundingClientRect()});
+      }
+      return [...captured.values()];
+    },
+    send: (text, sample, annotation) => ipcRenderer.send("page:comment", {type:"comment.send",text,sample,annotation}),
+    requestMode: (on) => ipcRenderer.send("drawing:mode",on),
+  });
+  drawingInput = (event) => {
+    if (!drawing.active()) return;
+    if (event.type === "pointerdown") talk.pointerdown(); // ⌘/Ctrl-click selects marks: not talking
+    // Canvas gestures own their pointer through release even if native capture has ended.
+    // Deliver the original event directly, before hit testing controls or making a shadow copy.
+    if (event instanceof PointerEvent && drawing.handlePointer(event)) return;
+    // The page sees the host, never the closed root's actual input. Redispatch only within that root.
+    const pointer = event instanceof MouseEvent;
+    const capturedStage = drawingLayer.querySelector<HTMLElement>(".draw-stage");
+    const captured = event instanceof PointerEvent && capturedStage?.hasPointerCapture(event.pointerId);
+    const target = captured ? capturedStage : pointer ? shadow.elementFromPoint(event.clientX,event.clientY) : shadow.activeElement;
+    const surface = drawingLayer.querySelector(".draw-overlay");
+    if (!surface) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (event instanceof KeyboardEvent && event.key === "Escape") ipcRenderer.send("drawing:mode",false);
+      return;
+    }
+    if (target && !surface.contains(target)) return;
+    if (pointer && !target) return;
+    event.stopImmediatePropagation();
+    if (event instanceof KeyboardEvent) {
+      if (event.type === "keyup") talkKeyUp(event);
+      else if (event.type === "keydown") talk.keydown(event, talkAllowed(target));
+    }
+    let copy: Event;
+    const common = { bubbles: true, cancelable: event.cancelable, composed: false };
+    if (event instanceof PointerEvent) copy = new PointerEvent(event.type, {...common, clientX:event.clientX,clientY:event.clientY,button:event.button,buttons:event.buttons,pointerId:event.pointerId,pointerType:event.pointerType,isPrimary:event.isPrimary,shiftKey:event.shiftKey,ctrlKey:event.ctrlKey,altKey:event.altKey,metaKey:event.metaKey});
+    else if (event instanceof WheelEvent) copy = new WheelEvent(event.type,{...common,clientX:event.clientX,clientY:event.clientY,deltaX:event.deltaX,deltaY:event.deltaY,deltaMode:event.deltaMode});
+    else if (event instanceof MouseEvent) copy = new MouseEvent(event.type,{...common,clientX:event.clientX,clientY:event.clientY,button:event.button,buttons:event.buttons,shiftKey:event.shiftKey,ctrlKey:event.ctrlKey,altKey:event.altKey,metaKey:event.metaKey});
+    else if (event instanceof KeyboardEvent) copy = new KeyboardEvent(event.type,{...common,key:event.key,code:event.code,repeat:event.repeat,shiftKey:event.shiftKey,ctrlKey:event.ctrlKey,altKey:event.altKey,metaKey:event.metaKey,isComposing:event.isComposing});
+    else if (event instanceof InputEvent) copy = new InputEvent(event.type,{...common,data:event.data,inputType:event.inputType,isComposing:event.isComposing});
+    else copy = new Event(event.type,common);
+    // When focus is still on the visited document, Escape and the talk key work from the drawing surface.
+    const destination = target ?? surface;
+    if (!destination.dispatchEvent(copy)) event.preventDefault();
+  };
+  ipcRenderer.on("page:drawing-mode", (_e, on: unknown) => { sampler.paused = on === true; if (on === true) comments.setMode(false); void drawing.setMode(on === true); });
+  document.addEventListener("vizzo:drawing-preview", (event) => {
+    const open = (event as CustomEvent<{open?: boolean}>).detail?.open === true;
+    ipcRenderer.send("page:drawing-preview",open);
+  });
+  ipcRenderer.on("page:drawing-clear", () => { sampler.paused = false; drawing.clear(); });
+  void ipcRenderer.invoke("drawing:get").then((on: unknown) => { sampler.paused = on === true; void drawing.setMode(on === true); });
   // Pointing at a marker, its bubble or its panel (or a comment bubble) means its element; the orb means nothing (it's
   // the page as a whole); the rest of the overlay is see-through.
   sampler.pick = (x, y) => {
@@ -171,7 +275,7 @@ function init(): void {
     if (inner && threads.isOrb(inner)) return null;
     return (inner && (threads.anchorFor(inner) ?? comments.anchorFor(inner))) ?? document.elementsFromPoint(x, y).find((e) => e !== host) ?? null;
   };
-  ipcRenderer.on("page:comment-mode", (_e, on: unknown, keepDraft: unknown) => comments.setMode(on === true, keepDraft === true));
+  ipcRenderer.on("page:comment-mode", (_e, on: unknown, keepDraft: unknown) => { if (on === true) void drawing.setMode(false); comments.setMode(on === true, keepDraft === true); });
   ipcRenderer.on("page:comment-at", (_e, p: { x?: unknown; y?: unknown } | null) => {
     if (typeof p?.x === "number" && typeof p.y === "number") comments.openAt(p.x, p.y);
   });
@@ -220,8 +324,11 @@ function init(): void {
       case "conversation":
         threads.setConversation(cmd.entries);
         break;
+      case "held":
+        threads.setHeld(cmd.items);
+        break;
       case "provisional":
-        threads.provisional(cmd.turnId);
+        threads.provisional(cmd.turnId, cmd.anchor);
         break;
       case "provisional.clear":
         threads.clearProvisional(cmd.turnId);
@@ -230,7 +337,7 @@ function init(): void {
         hub.update(cmd.state);
         break;
       case "comment.insert":
-        hub.insert(cmd.text);
+        hub.insert(cmd.text, cmd.dictation);
         break;
     }
   });

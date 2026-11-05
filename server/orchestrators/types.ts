@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
 import type { RunConfig } from "../../shared/config.ts";
 import type { CursorSample, PageEvents, PointingTarget, ServerMsg, Usage } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
@@ -32,6 +33,7 @@ export interface ConnectionChannel {
 
 /** What a Session gives an orchestrator for one turn. */
 export interface TurnContext {
+  annotation?: DrawingAnnotation;
   turnId: string;
   config: RunConfig;
   mark: Mark;
@@ -47,6 +49,8 @@ export interface TurnContext {
   typedText?: string;
   /** The thread whose panel was open when the turn started: the turn goes to it, not where the router would send it. */
   pinnedThread?: string;
+  /** Typed in the conversation's message box (turn.start `chat`): the turn stays in the conversation. */
+  chat?: boolean;
   /** Clicks and highlighted text the client reported for this turn (turn.context). */
   pageEvents?: () => PageEvents;
   /** T7 addition: state that outlives the turn (one per browser connection). */

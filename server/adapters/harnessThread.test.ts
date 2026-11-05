@@ -1,3 +1,5 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
+import { annotation } from "./drawing.fixture.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,14 +20,16 @@ class Fake implements WarmAgent {
   dead = false;
   keptAgent: boolean;
   messages: string[] = [];
+  attachments: (readonly DrawingAnnotation[])[] = [];
   pending: { resolve: (r: HarnessResult) => void; reject: (e: Error) => void }[] = [];
   aborts = 0;
   constructor(readonly spec: AgentSpec, keep = false, private hasAbort = true) { this.keptAgent = keep; made.push(this); }
   alive() { return !this.dead; }
   ready() { return true; }
   keep() { this.keptAgent = true; return true; }
-  request(user: string, onText: ((d: string) => void) | undefined): Promise<HarnessResult> {
+  request(user: string, onText: ((d: string) => void) | undefined, _timeoutMs?: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
     this.messages.push(user);
+    this.attachments.push(annotations ?? []);
     onText?.("…");
     return new Promise((resolve, reject) => this.pending.push({ resolve, reject }));
   }
@@ -55,6 +59,30 @@ afterEach(() => { for (const t of sessionsLeft.splice(0)) t.close(); });
 const open = (replay = () => "") => { const t = openHarnessThread({ role: "solver", choice: SMART, replay }); sessionsLeft.push(t); return t; };
 
 describe("harness threads", () => {
+  it("replays historical images only when reopening and preserves each queued request's own drawing", async () => {
+    const previous = { ...annotation, id: "previous" };
+    const current = { ...annotation, id: "current" };
+    const t = openHarnessThread({ role: "solver", choice: SMART, replay: () => "Earlier drawing previous", replayAnnotations: () => [previous] });
+    sessionsLeft.push(t);
+    const first = t.send("move", undefined, 1000, [current]);
+    await until(() => !!made[0]?.pending.length);
+    expect(made[0]!.attachments[0]).toEqual([previous, current]);
+    expect(made[0]!.messages[0]).toContain("Attached images, in order: previous, current");
+    made[0]!.answer("done");
+    await first;
+    const next = t.send("further", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    expect(made[0]!.attachments[1]).toEqual([]);
+    made[0]!.answer("done");
+    await next;
+    made[0]!.dead = true;
+    const reopened = t.send("again", undefined, 1000);
+    await until(() => made.length === 2 && !!made[1]?.pending.length);
+    expect(made[1]!.attachments[0]).toEqual([previous]);
+    made[1]!.answer("done");
+    await reopened;
+  });
+
   it("keeps one solver agent across requests; replay only when a session is opened", async () => {
     let history = "";
     const t = open(() => history);

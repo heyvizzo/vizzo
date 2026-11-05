@@ -3,13 +3,24 @@
 // was) and Send (an arrow with Instant feedback on, a plus with it off: it adds to the list).
 // Dictation is the chat's (web/chat/main.ts): it knows one "comment" at a time. The hub stands for all the forms on
 // the page: it tells the chat one is open (comment.draft), and puts the dictated words into the active one (the
-// last focused or recording). In the field, Shift is for typing capitals: only Shift held alone for SHIFT_HOLD_MS
-// dictates.
+// last focused or recording). In the field, keys are for typing: a talk key that's a modifier dictates once it's held
+// alone for FIELD_HOLD_MS; one that types nothing (an F key, or with ⌃/⌘) at once; one that types never does.
 import type { CursorSample } from "../../shared/protocol.ts";
-import type { CommentState, PageCommentAction } from "./pageBridge.ts";
+import { hotkeyLabel, hotkeys, isFunctionKey, isModifierOnly } from "../../shared/hotkeys.ts";
+import { createTalkKey, isPttKey } from "../audio/ptt.ts";
+import type { CommentState, DictationTranscript, PageCommentAction } from "./pageBridge.ts";
 
-/** Shift held this long in a form's field, with no other key, dictates (shorter: it was a capital letter). */
-export const SHIFT_HOLD_MS = 300;
+/** A modifier talk key held this long in a form's field, with no other key, dictates (shorter: a shortcut or a capital). */
+export const FIELD_HOLD_MS = 300;
+
+/** The talk key works in a form's field (it types nothing there). */
+function talksInField(): boolean {
+  const hk = hotkeys().talk;
+  return isModifierOnly(hk) || isFunctionKey(hk.code) || hk.ctrl || hk.meta;
+}
+
+/** "hold Control" / "press F5": the talk key, for hints. */
+export const talkHint = (): string => `hold ${hotkeyLabel(hotkeys().talk)}`;
 const MAX_FIELD_PX = 160;
 
 const ICON_MIC = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" fill="currentColor"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
@@ -59,7 +70,7 @@ export interface InlineForm {
   value(): string;
   clear(): void;
   focus(): void;
-  /** Wants dictation (Shift and always-listen go into it); the comment bubble is open for as long as it exists. */
+  /** Wants dictation (the talk key and always-listen go into it); the comment bubble is open for as long as it exists. */
   setOpen(open: boolean): void;
   /** Gone with its bubble: stops its dictation and tells the hub. */
   destroy(): void;
@@ -73,6 +84,14 @@ export interface InlineFormOpts {
   escape?(empty: boolean): void;
   /** Open only while its field has focus or it's dictating (the thread panel); else open until destroyed. */
   openOnFocus?: boolean;
+  /** Select this form immediately, before it receives keyboard focus (drawing tools). */
+  activateOnCreate?: boolean;
+  /** Keep talk-key dictation running while drawing/tools take field focus. */
+  keepDictationOnBlur?: boolean;
+  /** Preserve tool/editor focus when an asynchronous transcript arrives. */
+  focusAfterDictation?: boolean;
+  /** Called after insertion with the exact spoken text range, excluding added spaces. */
+  onDictation?(text: string, metadata: DictationTranscript, range: { start: number; end: number }, previousText: string): void;
 }
 
 export interface FormHub {
@@ -80,17 +99,21 @@ export interface FormHub {
   update(state: CommentState): void;
   state(): CommentState;
   /** Dictated words: into the active form, at its caret. */
-  insert(text: string): void;
-  /** Keyboard focus is in a form's field (Shift there types capitals; the field handles its own Shift hold). */
+  insert(text: string, dictation?: DictationTranscript): void;
+  /** Capture the intended recipient before the recording-start IPC roundtrip. */
+  prepareDictation(): void;
+  /** Release an in-field talk-key hold even when drawing input swallowed the native event. */
+  releaseTalkKey(): void;
+  /** Keyboard focus is in a form's field (keys there type; the field handles its own talk-key hold). */
   typing(): boolean;
-  /** A comment from a form: sent now, or added to the list (the chat decides). */
-  send(text: string, sample: CursorSample): void;
+  /** A comment from a form: sent now, or added to the list (the chat decides). `threadId`: from that thread's panel. */
+  send(text: string, sample: CursorSample, threadId?: string): void;
   create(opts: InlineFormOpts): InlineForm;
 }
 
 export interface FormHubOpts {
   send(action: PageCommentAction): void;
-  /** Push-to-talk, as Shift outside a field: Shift held alone in a field. */
+  /** Push-to-talk, as the talk key outside a field: the talk key in a field (talksInField). */
   ptt(down: boolean): void;
   /** Called after every state change (the bubbles may need to move: the live words change their height). */
   changed?(): void;
@@ -106,8 +129,10 @@ interface FormView {
   form: InlineForm;
   open: boolean;
   render(): void;
-  put(text: string): void;
+  put(text: string, dictation?: DictationTranscript): void;
   isFocused(): boolean;
+  /** Remember the field's selection (dictated words go there). */
+  keepSel(): void;
   /** Open only while focused or dictating: closes once neither is true any more. */
   settle(): void;
 }
@@ -117,6 +142,9 @@ export function createFormHub(opts: FormHubOpts): FormHub {
   const forms = new Set<FormView>();
   let active: FormView | null = null;
   let draftOpen = false;
+  const recipients = new Map<string, FormView | null>();
+  let pendingRecipient: FormView | null | undefined;
+  let talkOwner: FormView | null = null;
 
   const syncDraft = () => {
     const open = [...forms].some((f) => f.open);
@@ -124,19 +152,37 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     draftOpen = open;
     opts.send({ type: "comment.draft", open });
   };
-  const target = (): FormView | null => (active && forms.has(active) ? active : [...forms].find((f) => f.open) ?? null);
+  const target = (): FormView | null => (active && active.open && forms.has(active) ? active : [...forms].find((f) => f.open) ?? null);
+  const prepareDictation = () => { if (!state.recording && !state.transcribing) pendingRecipient = target(); };
+  const recordingTarget = () => state.dictationId ? recipients.get(state.dictationId) ?? null : target();
+  const forgetRecipient = (view: FormView) => {
+    for (const [id, recipient] of recipients) if (recipient === view) recipients.set(id, null);
+    if (pendingRecipient === view) pendingRecipient = null;
+  };
   const renderAll = () => {
     for (const f of forms) f.render();
     opts.changed?.();
   };
 
-  // Shift held alone in a field dictates; another key in the meantime made it a capital.
-  let shiftTimer: ReturnType<typeof setTimeout> | null = null;
-  let shiftTalking = false;
-  function shiftUp(): void {
-    if (shiftTimer) { clearTimeout(shiftTimer); shiftTimer = null; }
-    if (shiftTalking) { shiftTalking = false; opts.ptt(false); }
+  // The talk key in a field dictates into it (a modifier once it's held alone; another key in the meantime was a
+  // shortcut or a capital).
+  const talk = createTalkKey((down) => {
+    if (!down) { opts.ptt(false); return; }
+    const view = talkOwner;
+    if (!view) return;
+    view.keepSel();
+    active = view;
+    prepareDictation();
+    opts.ptt(true);
+  }, FIELD_HOLD_MS);
+  function talkUp(): void {
+    talk.release();
+    talkOwner = null;
   }
+
+  window.addEventListener("keyup", (event) => talk.keyup(event), true);
+  window.addEventListener("blur", talkUp);
+  window.addEventListener("pagehide", talkUp);
 
   function create(o: InlineFormOpts): InlineForm {
     const root = h("div", "if-wrap");
@@ -162,10 +208,11 @@ export function createFormHub(opts: FormHubOpts): FormHub {
       field.style.height = "0";
       field.style.height = `${Math.min(MAX_FIELD_PX, field.scrollHeight)}px`;
     };
-    const mine = () => active === view && state.recording;
+    const mine = () => recordingTarget() === view && state.recording;
     /** Dictating, or its words are still on the way: closing now would drop them. */
-    const busy = () => active === view && (state.recording || state.transcribing);
+    const busy = () => recordingTarget() === view && (state.recording || state.transcribing);
     const view: FormView = {
+      keepSel: () => keepSel(),
       open: !o.openOnFocus,
       form: null as unknown as InlineForm,
       isFocused: () => (field.getRootNode() as ShadowRoot | Document).activeElement === field,
@@ -180,7 +227,7 @@ export function createFormHub(opts: FormHubOpts): FormHub {
         rec.classList.toggle("listen", listening);
         field.disabled = listening;
         field.placeholder = listening ? "Listening…" : o.placeholder;
-        rec.dataset.tip = listening ? "Listening…" : recording ? "Stop dictating" : "Dictate into the field (or hold Shift)";
+        rec.dataset.tip = listening ? "Listening…" : recording ? "Stop dictating" : `Dictate into the field (or ${talkHint()})`;
         rec.setAttribute("aria-label", listening ? "Listening" : recording ? "Stop dictating" : "Dictate");
         rec.setAttribute("aria-pressed", String(recording || listening));
         send.innerHTML = state.instant ? ICON_SEND : ICON_ADD;
@@ -194,17 +241,28 @@ export function createFormHub(opts: FormHubOpts): FormHub {
       settle() {
         if (o.openOnFocus && view.open && !view.isFocused() && !busy()) setOpen(false);
       },
-      put(text) {
-        const { value, caret } = insertAtCaret(field.value, sel.start, sel.end, text);
+      put(text, dictation) {
+        const previousText = field.value;
+        const spoken = text.trim();
+        const { value, caret } = insertAtCaret(previousText, sel.start, sel.end, text);
         field.value = value;
         field.setSelectionRange(caret, caret);
         sel = { start: caret, end: caret };
         fit();
         view.render();
-        field.focus({ preventScroll: true });
+        if (dictation && spoken) o.onDictation?.(spoken, dictation, { start: caret - spoken.length, end: caret }, previousText);
+        if (o.focusAfterDictation !== false && (!o.keepDictationOnBlur || view.isFocused())) field.focus({ preventScroll: true });
       },
     };
-    const setOpen = (open: boolean) => { view.open = open; syncDraft(); };
+    const setOpen = (open: boolean) => {
+      if (!open) {
+        if (busy()) opts.send({ type: "comment.record", on: false });
+        if (talkOwner === view) talkUp();
+        forgetRecipient(view);
+      }
+      view.open = open;
+      syncDraft();
+    };
     const submit = () => {
       const text = field.value.trim();
       if (!text) return field.focus({ preventScroll: true });
@@ -217,16 +275,17 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     rec.onclick = () => {
       if (state.listening && !mine()) return; // a turn is being recorded: the field is off until it's sent
       keepSel();
-      // One dictation at a time: the mic stops it wherever it was going, and its words now come here.
+      // Stopping another form's recording must not retarget its eventual transcript.
       const on = !state.recording;
       active = view;
       if (o.openOnFocus) setOpen(true);
       field.focus({ preventScroll: true });
+      if (on) prepareDictation();
       opts.send({ type: "comment.record", on });
       renderAll();
     };
     send.onclick = submit;
-    field.addEventListener("input", () => { fit(); view.render(); });
+    field.addEventListener("input", () => { keepSel(); fit(); view.render(); });
     field.addEventListener("select", keepSel);
     field.addEventListener("keyup", keepSel);
     field.addEventListener("pointerup", keepSel);
@@ -235,23 +294,19 @@ export function createFormHub(opts: FormHubOpts): FormHub {
       if (o.openOnFocus) setOpen(true);
     });
     field.addEventListener("blur", () => {
-      shiftUp();
+      if (!o.keepDictationOnBlur) talkUp();
       view.settle();
     });
-    field.addEventListener("keyup", (e) => { if (e.key === "Shift") shiftUp(); });
+    field.addEventListener("keyup", (e) => talk.keyup(e));
     field.addEventListener("keydown", (e) => {
-      if (e.key === "Shift") {
-        if (e.repeat || e.ctrlKey || e.altKey || e.metaKey || shiftTimer || shiftTalking) return;
-        shiftTimer = setTimeout(() => {
-          shiftTimer = null;
-          keepSel();
-          active = view;
-          shiftTalking = true;
-          opts.ptt(true);
-        }, SHIFT_HOLD_MS);
+      if (isPttKey(e)) {
+        if (!talksInField()) return;
+        if (!isModifierOnly(hotkeys().talk)) e.preventDefault();
+        if (!e.repeat) talkOwner = view;
+        talk.keydown(e, true);
         return;
       }
-      if (shiftTimer) { clearTimeout(shiftTimer); shiftTimer = null; }
+      talk.keydown(e, true); // another key: a shortcut or a capital, not talking
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         submit();
@@ -271,7 +326,8 @@ export function createFormHub(opts: FormHubOpts): FormHub {
       destroy() {
         if (!forms.has(view)) return;
         if (busy()) opts.send({ type: "comment.record", on: false });
-        if (view.isFocused()) shiftUp();
+        if (view.isFocused() || talkOwner === view) talkUp();
+        forgetRecipient(view);
         forms.delete(view);
         if (active === view) active = null;
         syncDraft();
@@ -279,6 +335,7 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     };
     view.form = form;
     forms.add(view);
+    if (o.activateOnCreate) active = view;
     view.render();
     syncDraft();
     return form;
@@ -286,17 +343,27 @@ export function createFormHub(opts: FormHubOpts): FormHub {
 
   return {
     update(next) {
+      if (next.dictationId && !recipients.has(next.dictationId)) {
+        recipients.set(next.dictationId, pendingRecipient === undefined ? target() : pendingRecipient);
+        pendingRecipient = undefined;
+        // Completed recordings are never routed again; keep memory bounded during long sessions.
+        if (recipients.size > 100) recipients.delete(recipients.keys().next().value!);
+      }
       state = next;
       renderAll();
       for (const f of forms) f.settle(); // dictated into a panel's form that has since lost focus
     },
     state: () => state,
-    insert(text) {
+    insert(text, dictation) {
       if (!text.trim()) return;
-      target()?.put(text);
+      const recipient = dictation ? recipients.get(dictation.id) : target();
+      if (recipient && forms.has(recipient) && recipient.open) recipient.put(text, dictation);
+      if (dictation) recipients.set(dictation.id, null);
     },
+    prepareDictation,
+    releaseTalkKey: talkUp,
     typing: () => [...forms].some((f) => f.isFocused()),
-    send: (text, sample) => opts.send({ type: "comment.send", text, sample }),
+    send: (text, sample, threadId) => opts.send({ type: "comment.send", text, sample, ...(threadId ? { threadId } : {}) }),
     create,
   };
 }

@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "../shared/annotations.ts";
 // One browser connection = one Session (ARCHITECTURE §1, §3).
 import { randomUUID } from "node:crypto";
 import type { WebSocket, RawData } from "ws";
@@ -12,7 +13,7 @@ import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
 import { computeCost, costItems } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
-import { getConversation } from "./conversation.ts";
+import { getConversation, retainConversationDrawings } from "./conversation.ts";
 import { cancelJobs, stopJob } from "./orchestrators/jobs.ts";
 import { cancelRun } from "./threads/runner.ts";
 import type { ConnectionChannel } from "./orchestrators/types.ts";
@@ -31,6 +32,7 @@ const PLAYED_GRACE_MS = 3000;
 const IDLE_GRACE_MS = 800;
 
 interface Turn {
+  annotation?: DrawingAnnotation;
   turnId: string;
   config: RunConfig;
   fixtureId?: string;
@@ -175,7 +177,7 @@ export class Session {
         this.floor.turnStarted(); // …or over a thread's line
         threadStore().touch(this.threadSub); // this connection speaks thread results from now on
         return this.startTurn(msg.turnId, msg.config, msg.tPress, msg.fixtureId, typeof msg.pageUrl === "string" ? msg.pageUrl : undefined,
-          typeof msg.text === "string" && msg.text.trim() ? msg.text : undefined, typeof msg.threadId === "string" && msg.threadId ? msg.threadId : undefined);
+          typeof msg.text === "string" && msg.text.trim() ? msg.text : undefined, typeof msg.threadId === "string" && msg.threadId ? msg.threadId : undefined, msg.annotation, msg.chat === true);
       case "cursor.samples":
         if (this.turn?.turnId === msg.turnId) this.turn.samples.push(...msg.samples);
         return;
@@ -217,10 +219,11 @@ export class Session {
           void h.done.then((r) => {
             if (!r.transcript && !r.voiceText) return;
             getConversation(this.connection).push({
-              turnId: t.turnId, approach: t.config.approach, user: r.transcript,
+              turnId: t.turnId, approach: t.config.approach, user: r.transcript, annotation: t.annotation,
               assistant: `${r.voiceText.trim()} [${msg.reason === "interrupt" ? "interrupted" : "stopped"} by the user]`.trim(),
               detail: "",
             });
+            retainConversationDrawings();
           }, () => {});
         }
         return;
@@ -242,6 +245,9 @@ export class Session {
       case "thread.focus":
         threadStore().focus(msg.threadId);
         return;
+      case "thread.smart":
+        threadStore().update(msg.threadId, (t) => { t.alwaysSmart = msg.on === true; });
+        return;
       case "task.stop": {
         const task = msg.task as { kind?: unknown; jobId?: unknown; threadId?: unknown } | undefined;
         if (task?.kind === "job" && typeof task.jobId === "string") stopJob(this.connection, this.channel, task.jobId);
@@ -251,12 +257,12 @@ export class Session {
     }
   }
 
-  private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string, pinnedThread?: string): void {
+  private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string, pinnedThread?: string, annotation?: DrawingAnnotation, chat = false): void {
     this.turn?.handlers?.cancel();
     // Older clients send `claudeBackend` instead of `llm`.
     const config: RunConfig = { ...sent, llm: llmOf(sent) };
     const turn: Turn = {
-      turnId, config, fixtureId, marks: { press: tPress }, markMeta: {}, samples: [], released: false, auto: false,
+      turnId, config, fixtureId, annotation, marks: { press: tPress }, markMeta: {}, samples: [], released: false, auto: false,
       segmentsSent: new Set(), segmentsPlayed: new Set(), page: { clicks: [], preselected: null, highlights: [] },
     };
     this.turn = turn;
@@ -293,7 +299,9 @@ export class Session {
         tAudioStart: () => turn.tAudioStart,
         ...(pageUrl ? { pageUrl: () => pageUrl } : {}),
         ...(typedText ? { typedText } : {}),
+        ...(annotation ? { annotation } : {}),
         ...(pinnedThread ? { pinnedThread } : {}),
+        ...(chat ? { chat } : {}),
         pageEvents: () => turn.page,
         connection: this.connection,
         channel: this.channel,
@@ -315,8 +323,9 @@ export class Session {
     if (turn.config.memory && (result.transcript || result.voiceText)) {
       getConversation(this.connection).push({
         turnId: turn.turnId, approach: turn.config.approach,
-        user: result.transcript, assistant: result.voiceText.trim(), detail: result.solverText,
+        annotation: turn.annotation, user: result.transcript, assistant: result.voiceText.trim(), detail: result.solverText,
       });
+      retainConversationDrawings();
     }
     // Wait for the client to report every segment we sent as played.
     await new Promise<void>((resolve) => {
@@ -328,6 +337,7 @@ export class Session {
     if (this.turn !== turn) return;
     const usage = result.usage;
     const run: RunRecord = {
+      annotation: turn.annotation,
       runId: randomUUID(), turnId: turn.turnId, approach: turn.config.approach, config: turn.config,
       fixtureId: turn.fixtureId, marks: turn.marks, metrics: deriveMetrics(turn.marks),
       transcript: result.transcript, pointing: result.pointing, voiceText: result.voiceText, solverText: result.solverText,

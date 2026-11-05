@@ -85,6 +85,9 @@
     <button id="comment-mode" title="Comment mode: off. Click to point at elements on the page and leave feedback on them." aria-label="Comment mode" aria-pressed="false">
       <svg viewBox="0 0 24 24"><path d="M4.04 4.69a.5.5 0 0 1 .65-.65l16 6.5a.5.5 0 0 1-.06.95l-6.13 1.58a2 2 0 0 0-1.43 1.43l-1.58 6.13a.5.5 0 0 1-.95.06z"/></svg>
     </button>
+    <button id="drawing-mode" title="Loading model settings…" aria-label="Draw on page" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z"/></svg>
+    </button>
     <div class="mic" id="mic-box" hidden>
       <canvas id="mic-meter" hidden aria-hidden="true"></canvas>
       <button id="mic" title="Click: Always listen. Hold: talk." aria-label="Microphone" aria-pressed="false">
@@ -127,7 +130,9 @@
       document.title = s.title ? `${s.title} — Browser` : "Browser";
     });
     shell.onFocusAddress(() => { url.focus(); });
-    shell.bindShiftPtt(); // Shift is push-to-talk here too (not in the address field)
+    shell.bindTalkKey(); // the talk key is push-to-talk here too (not in the address field)
+    let keys = shell.hotkeyLabels();
+    shell.onHotkeyLabels((k) => { keys = k; if (mic) showMic(mic); showComment(commenting); });
 
     // Feedback queue (the chat sidebar holds it). Hidden until the chat reports its state.
     const instant = $("instant");
@@ -175,10 +180,10 @@
       micBtn.setAttribute("aria-pressed", always ? "true" : "false");
       micDot.hidden = !(always || live);
       micBtn.title = live
-        ? "Listening… release (or press Shift) to send"
+        ? `Listening… release (or press ${keys.talk}) to send`
         : !s.ready ? "Microphone not ready. Click: Always listen " + (always ? "off" : "on")
         : always ? "Always listen: on. Talk to start a turn. Click to turn it off; hold to talk."
-        : "Push to talk: hold (or hold Shift). Click to turn on Always listen.";
+        : `Push to talk: hold (or hold ${keys.talk}). Click to turn on Always listen.`;
       micMeter.hidden = !always;
       if (!always) levels.length = 0;
       drawMeter();
@@ -259,7 +264,7 @@
     for (const ev of ["pointerup", "pointercancel", "pointerleave"]) micBtn.addEventListener(ev, micUp);
     window.addEventListener("blur", () => micUp());
     micBtn.addEventListener("contextmenu", (e) => e.preventDefault());
-    // Keyboard: Enter/Space toggles Always listen (Shift is push to talk).
+    // Keyboard: Enter/Space toggles Always listen (the talk key is push to talk).
     micBtn.addEventListener("click", (e) => { if (e.detail === 0 && mic) shell.mic.setAlways(!mic.always); });
     shell.mic.onState(showMic);
     shell.mic.getState().then(showMic);
@@ -271,12 +276,36 @@
       commenting = on === true;
       commentBtn.setAttribute("aria-pressed", commenting ? "true" : "false");
       commentBtn.title = commenting
-        ? "Comment mode: on. Click an element on the page to leave feedback on it; Esc or click here to stop."
-        : "Comment mode: off. Click to point at elements on the page and leave feedback on them.";
+        ? `Comment mode: on. Click an element on the page to leave feedback on it; Esc, ${keys.comment} or click here to stop.`
+        : `Comment mode: off. Click (or press ${keys.comment}) to point at elements on the page and leave feedback on them.`;
     }
     commentBtn.onclick = () => shell.comment.set(!commenting);
     shell.comment.onState(showComment);
     shell.comment.get().then(showComment);
+    const drawingBtn = $("drawing-mode");
+    let drawing = false;
+    let drawingDisabledReason = "Loading model settings…";
+    const renderDrawing = () => {
+      drawingBtn.disabled = drawingDisabledReason !== null;
+      drawingBtn.setAttribute("aria-pressed", String(drawing));
+      drawingBtn.title = drawingDisabledReason ?? (drawing ? "Drawing mode: on. Click again or press Esc to discard the draft and return to browsing." : "Draw on a fresh capture of the page");
+      if (drawingDisabledReason !== null) drawingBtn.setAttribute("aria-description", drawingDisabledReason);
+      else drawingBtn.removeAttribute("aria-description");
+    };
+    const showDrawing = (on) => {
+      drawing = on === true;
+      renderDrawing();
+    };
+    const showDrawingDisabledReason = (reason) => {
+      drawingDisabledReason = reason;
+      renderDrawing();
+    };
+    drawingBtn.onclick = () => { if (!drawingBtn.disabled) shell.drawing.set(!drawing); };
+    shell.drawing.onState(showDrawing);
+    shell.drawing.get().then(showDrawing);
+    shell.drawing.onDisabledReason(showDrawingDisabledReason);
+    shell.drawing.getDisabledReason().then(showDrawingDisabledReason);
+
 
   </script>
 </body>

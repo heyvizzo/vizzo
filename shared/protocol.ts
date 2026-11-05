@@ -1,3 +1,4 @@
+import { isDrawingAnnotation, type DrawingAnnotation } from "./annotations.ts";
 // Browser ↔ server protocol (ARCHITECTURE §3). One WebSocket at /ws.
 // Binary frames carry PCM16 mono 24 kHz audio for the active turn; text frames are JSON.
 import type { RunConfig } from "./config.ts";
@@ -302,8 +303,12 @@ export type ClientMsg =
    * pageUrl: the browser page the turn was recorded on (a queued turn sent later); otherwise the pane's current page.
    * text: a typed comment (shared/comment.ts): the turn's words, instead of transcribing audio.
    */
-  /** threadId: the thread whose panel is open on the page; the turn goes to it instead of being routed. */
-  | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string; pageUrl?: string; text?: string; threadId?: string }
+  /**
+   * The turn's focus, where a typed (or dictated) message stays: threadId, the thread whose panel is open on the page
+   * (the turn goes to it instead of being routed); chat, the conversation's message box (the turn stays in the
+   * conversation). Neither: routed by what was said and pointed at.
+   */
+  | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string; pageUrl?: string; text?: string; threadId?: string; chat?: boolean; annotation?: DrawingAnnotation }
   | { type: "cursor.samples"; turnId: string; samples: CursorSample[] }
   /** tAudioStart: client time of the first captured audio sample (ARCHITECTURE §6). */
   | { type: "turn.audioStart"; turnId: string; tAudioStart: number }
@@ -323,8 +328,11 @@ export type ClientMsg =
   | { type: "thread.delete"; threadId: string }
   /** Element threads: the user opened a thread's panel (it becomes the focused thread; its result counts as told). */
   | { type: "thread.focus"; threadId: string }
+  /** Element threads: the panel's "Always use the smart model" checkbox (ThreadInfo.alwaysSmart). */
+  | { type: "thread.smart"; threadId: string; on: boolean }
   /**
-   * Stop a task that's still working (Esc three times, then Yes): a background job, or an element thread's current
+   * Stop a task that's still working (its × in the conversation or in the "N tasks running" list; or Esc three
+   * times, then Yes): a background job, or an element thread's current
    * run (the thread stays; its queued follow-ups are dropped). What it already changed in the project stays.
    */
   | { type: "task.stop"; task: TaskRef };
@@ -390,6 +398,7 @@ export interface Usage {
 }
 
 export interface RunRecord {
+  annotation?: DrawingAnnotation;
   runId: string;
   turnId: string;
   approach: RunConfig["approach"];
@@ -415,6 +424,7 @@ export interface RunRecord {
 export function parseClientMsg(raw: string): ClientMsg | null {
   try {
     const m = JSON.parse(raw) as { type?: unknown };
+    if (m?.type === "turn.start" && "annotation" in m && m.annotation !== undefined && !isDrawingAnnotation(m.annotation)) return null;
     return typeof m?.type === "string" ? (m as ClientMsg) : null;
   } catch {
     return null;

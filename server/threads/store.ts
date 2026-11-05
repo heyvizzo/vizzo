@@ -1,3 +1,4 @@
+import { drawingContext } from "../adapters/drawing.ts";
 // Element threads: the process-level store (docs/PLAN-threads.md, "Lifetime"). Every thread's record, its harness
 // session handle and its run queue, plus the central conversation (server/conversation.ts). Lives as long as the
 // server process: survives page and sidebar reloads, gone when the app closes. Every change goes out to every
@@ -89,7 +90,14 @@ export class ThreadStore {
 
   addMessage(threadId: string, m: Omit<ThreadMessage, "id" | "at"> & { at?: number }, fn?: (t: ThreadInfo) => void): ThreadMessage | undefined {
     const msg: ThreadMessage = { id: randomUUID(), at: this.now(), ...m };
-    return this.update(threadId, (t) => { t.messages.push(msg); fn?.(t); }) ? msg : undefined;
+    return this.update(threadId, (t) => { t.messages.push(msg);
+      // Keep the latest 8 full images per thread. Older requests retain their geometry and element context.
+      const attachments = t.messages.filter(m => m.annotation);
+      for (const old of attachments.slice(0, -8)) {
+        old.text += `\n\n[Drawing preview expired from retained history]\n${drawingContext(old.annotation!)}`;
+        delete old.annotation;
+      }
+      fn?.(t); }) ? msg : undefined;
   }
 
   /** created / followup / correction / tell / focus. */

@@ -1,3 +1,4 @@
+import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resources/messages";
 // The stream-json reader for `claude -p` (Claude Code, headless) and Grok's CLI, which prints the same events
 // (--output-format streaming-messages-json). A `claude -p` agent starts with its system prompt, model and
 // effort and waits for one user message on stdin (--input-format stream-json), so it can be spawned ahead
@@ -80,7 +81,7 @@ export class CliAgent {
    * Send one user message (`null`: the prompt was in the arguments) and stream the reply until the `result`
    * event. The process exits afterwards, unless `keep`: then it waits for the next message (a timeout still kills it).
    */
-  request(user: string | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
+  request(user: string | (ImageBlockParam | TextBlockParam)[] | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
     return new Promise<CliResult>((resolve, reject) => {
       let text = "";
       let stopReason: string | null = null;

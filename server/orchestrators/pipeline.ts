@@ -14,6 +14,8 @@
 // go to the router; its target sends the turn to a new thread (a short new question still answers inline, recorded
 // in the thread), an existing one (follow-up queued / correction restarts, after the ack), a tell (the thread's
 // latest result is this turn's answer) or the central conversation (as without threads).
+// A thread that always uses the smart model (ThreadInfo.alwaysSmart), from its open panel: a spoken turn goes to the
+// router in forced mode (it only speaks the ack); a typed one skips it and goes straight to the thread's harness session.
 //
 // Typed comments (ctx.typedText, shared/comment.ts): the text stands in for Scribe's final, on a synthetic timeline.
 // With config.silent (set for them) nothing is spoken: the TTS sockets are stand-ins and there are no fillers, so the
@@ -220,11 +222,44 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         return spoken;
       };
       const trace = tracer((m) => { if (!base.isFinished) ctx.send(m); }, ctx.turnId);
+      const smart = ctx.pinnedThread && threadsEnabled(cfg, deps, ctx) ? threadStore().info(ctx.pinnedThread) : undefined;
+      if (smart?.alwaysSmart && typed !== undefined) {
+        if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // nothing is said in this turn
+        if (!fin.text) return base.finish({ transcript: "" });
+        const store = threadStore();
+        const { threadId, intent } = smart;
+        const msg = store.addMessage(threadId, { turnId: ctx.turnId, role: "user", kind: "followup", text: fin.text, annotation: ctx.annotation });
+        store.bump(threadId);
+        base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], intent, estimateS: null, background: true, threadId, relation: "direct" };
+        ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS: null, background: true, threadId });
+        submitRun(threadId, {
+          kind: "direct", question: fin.text, turnId: ctx.turnId, config: cfg, intent, pointing,
+          annotation: ctx.annotation, pageContext: solverContext, language: base.language, messageId: msg?.id,
+        }, deps).catch((e) => console.warn("[threads] run failed", e));
+        base.finish();
+        return;
+      }
       const canBackground = cfg.memory && cfg.backgroundLongTasks && !!ctx.channel;
       // Element threads: the element this turn is about and what the router is told about the threads.
+      // A turn with a focus stays there: the message box's in the conversation, an open panel's in its thread.
+      // Typed (no speech) stays on the click. Only spoken with no focus can move to an existing thread it names.
+      const clicks = ctx.pageEvents?.().clicks;
+      const chatTurn = typed !== undefined && !!ctx.chat;
+      const typedTurn = typed !== undefined && !ctx.annotation && !chatTurn;
+      const spokenClick = !typedTurn && !ctx.annotation && !ctx.pinnedThread && !!clicks?.some((c) => c.elementPath);
       const tt = threadsEnabled(cfg, deps, ctx)
-        ? prepareThreads({ words: fin.words, pointing, rests: base.rests, samples: ctx.cursorSamples(), pageUrl: ctx.pageUrl?.() ?? browserUrl() ?? "" }, undefined, ctx.pinnedThread)
+        ? prepareThreads({
+          annotation: ctx.annotation, words: fin.words, pointing, rests: base.rests, samples: ctx.cursorSamples(),
+          pageUrl: ctx.pageUrl?.() ?? browserUrl() ?? "", ...(clicks?.length ? { clicks } : {}),
+        }, undefined, ctx.pinnedThread, { clicked: typedTurn || spokenClick, typed: typedTurn, chat: chatTurn })
         : null;
+      if (tt?.pinnedMissing) {
+        // The open panel's thread is gone: say so rather than route the message somewhere else.
+        if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; }
+        base.softError("threads", new Error("That thread no longer exists, so the message wasn't sent. Close its panel and try again."));
+        base.finish({ transcript: "" });
+        return;
+      }
       const th: { plan: ThreadPlan | null } = { plan: null };
       let background = false;
       let decided = false;
@@ -246,10 +281,14 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         ctx.send({ type: "decision", turnId: ctx.turnId, intent, estimateS, background, ...threadId });
       };
       const route = await tag("router", deps.routeTurn({
-        mark: base.mark, transcript: base.markedTranscript(), pointing, mode: cfg.routerMode, history, pageContext, language: base.language,
+        mark: base.mark, transcript: base.markedTranscript(), pointing, mode: smart?.alwaysSmart ? "forced" : cfg.routerMode, history, annotation: ctx.annotation, pageContext, language: base.language,
         voiceCues: useVoiceCues(cfg.ttsModel, base.language),
         longTaskSeconds: cfg.backgroundLongTasks || tt ? cfg.longTaskSeconds : undefined, llm: cfg.llm.fast,
-        ...(tt ? { threads: tt.briefs, ...(tt.anchorLabel ? { anchorLabel: tt.anchorLabel } : {}) } : {}),
+        ...(tt ? {
+          threads: tt.briefs, ...(tt.anchorLabel ? { anchorLabel: tt.anchorLabel } : {}),
+          ...(tt.clicked && !tt.typed ? { clicked: true } : {}), ...(tt.typed ? { typed: true } : {}), ...(tt.chat ? { chat: true } : {}),
+          ...(tt.pinned && !tt.typed && tt.anchorLabel ? { panel: tt.anchorLabel } : {}),
+        } : {}),
         onDecision: (d) => decide(d),
         ...trace(),
         onSpokenDelta: (d, kind) => {
@@ -286,7 +325,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       if (plan && plan.relation !== "tell") {
         // Record the turn in its thread: the user's words, then what was said right away.
         const kind = plan.relation === "new" ? "request" : plan.relation;
-        const msg = store.addMessage(plan.threadId, { turnId: ctx.turnId, role: "user", kind, text: fin.text || delegate?.question || "" });
+        const msg = store.addMessage(plan.threadId, { turnId: ctx.turnId, role: "user", kind, text: fin.text || delegate?.question || "", annotation: ctx.annotation });
         if (plan.relation !== "new") store.bump(plan.threadId);
         if (base.voiceText.trim()) {
           store.addMessage(plan.threadId, { turnId: ctx.turnId, role: "assistant", kind: delegate ? "ack" : "result", text: base.voiceText.trim() }, (t) => {
@@ -296,14 +335,17 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         if (delegate) {
           threadSpec = {
             kind, question: delegate.question, turnId: ctx.turnId, config: cfg, intent: delegate.intent, pointing,
-            pageContext: solverContext, language: base.language, messageId: msg?.id,
+            annotation: ctx.annotation, pageContext: solverContext, language: base.language, messageId: msg?.id,
           };
         }
       }
 
-      if (plan?.relation === "tell") {
+      // From the message box, a tell reads the thread's result here: the turn stays in the conversation.
+      const told = plan?.relation === "tell" ? plan.threadId
+        : tt?.chat && route.decision.tell && store.info(route.decision.tell) ? route.decision.tell : null;
+      if (told) {
         // "Tell me about the red button": its latest result is this turn's answer (the router said nothing).
-        const last = store.info(plan.threadId)?.messages.findLast((m) => m.kind === "result");
+        const last = store.info(told)?.messages.findLast((m) => m.kind === "result");
         if (last) {
           const t = openTts("answer");
           t.setLabel("answer");
@@ -314,7 +356,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           answerDone = t.done();
           answerDone.catch(() => {});
         }
-        store.focus(plan.threadId); // told: read, idle, focused
+        store.focus(told); // told: read, idle, focused
       } else if (plan && threadSpec && background) {
         // The ack said "I'll let you know": the run goes on the thread's runner and outlives this turn.
         const spec = threadSpec;
@@ -328,7 +370,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         // Long task: the ack said "I'll get back to you"; the solver runs as a job that outlives this turn.
         const job = startJob(ctx.connection, ctx.channel!, deps, {
           turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question,
-          estimateS: delegate.estimateS, pointing, history: history ?? [], pageContext: solverContext, language: base.language,
+          estimateS: delegate.estimateS, pointing, history: history ?? [], annotation: ctx.annotation, pageContext: solverContext, language: base.language,
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
       } else if (delegate) {
@@ -375,7 +417,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           if (r) solverUsage = r.usage;
         } else {
           const solved = await tag("solver", deps.solveTask({
-            mark: base.mark, question: delegate.question, pointing, fast: cfg.solverFast, history, intent: delegate.intent, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
+            mark: base.mark, question: delegate.question, pointing, fast: cfg.solverFast, history, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
             timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
             onDelta,
             ...trace(),

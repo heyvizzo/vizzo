@@ -6,6 +6,9 @@
 // Element threads (docs/PLAN-threads.md): the server's threads are kept here, listed by page, and the browser
 // pane gets the ones on its page (markers, panel, bubbles: web/cursor/threadOverlay.ts).
 import "./chat.css";
+import { drawingAnchor } from "../../shared/anchor.ts";
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
+import { drawingPreview, drawingPreviewOpen } from "../cursor/drawingPreview.ts";
 import { connectWithStatus } from "../common.ts";
 import { languagesFor } from "../../shared/pointing.ts";
 import { DEFAULT_CONFIG, isLocalStt, llmOf, type RunConfig } from "../../shared/config.ts";
@@ -16,9 +19,12 @@ import { startCapture, warmCapture, type CaptureHandle } from "../audio/capture.
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
 import { bindPushToTalk, isPttKey, isTypingTarget } from "../audio/ptt.ts";
+import { hotkeyLabel, hotkeys, setHotkeys } from "../../shared/hotkeys.ts";
 import { mountAlwaysListen, type AlwaysListenHandle } from "./alwaysListen.ts";
-import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type RemotePage } from "../cursor/pageBridge.ts";
+import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageHeldAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type CommentState, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type PageCommentAction, type RemotePage } from "../cursor/pageBridge.ts";
 import { typedSpanMs } from "../../shared/comment.ts";
+import { createFormHub, INLINE_FORM_CSS } from "../cursor/inlineForm.ts";
+import { themeCss } from "../../shared/theme.ts";
 import { STATE_LABEL } from "../cursor/threadOverlay.ts";
 import { stateColorVars } from "../cursor/colors.ts";
 import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
@@ -28,9 +34,12 @@ import { addResponse, renderPrompt } from "./promptView.ts";
 import { anchorKey, isQueuedId, queuedAnchor, queuedThreads as groupQueued, recordedMs, recordedPcm, shiftMsg, type QueueState, type Recorded, type TurnMsg } from "./queue.ts";
 import { costBreakdown, fmtUsd, renderTurnCost, savingsOf, savingsText, type TurnCost } from "./costView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtBytes, fmtElapsed, fmtEstimate, groupThreads, jobHeadline, markerLabel, pageLabel, replyNeedsReply, runningLabel, spokenOf, threadsOnPage, type DecisionLike } from "./logic.ts";
+import { mountAttention, type AttentionBridge } from "./attention.ts";
 import { PANEL_KEYS, SIDEBAR_KEYS, fishVoice, loadSettings, normalizeSettings, saveSettingsKeys, type ChatSettingsBridge } from "./settings.ts";
 
 const PRE_ROLL_MS = 500;
+/** A held modifier talks only once it's held a moment (shared/hotkeys.ts TALK_HOLD_MS, a bubble's FIELD_HOLD_MS): its audio starts that far back. */
+const TALK_PRE_ROLL_MS = 300;
 const BATCH_MS = 100;
 /** Give up on a turn that never gets turn.done (server hiccup). */
 const TURN_TIMEOUT_MS = 90_000;
@@ -40,8 +49,10 @@ const SHOWN_ALGORITHM = "dwellMode";
 const shell = (window as { shell?: {
   onPtt?: (cb: (down: boolean) => void) => void; onEscape?: (cb: () => void) => void; page?: PageBridge; queue?: QueueBridge; mic?: MicBridge;
   chatSettings?: ChatSettingsBridge;
+  drawing?: { publishDisabledReason: (reason: string | null) => void };
   getProject?: () => Promise<string | null>; pickProject?: () => Promise<string | null>;
   onProject?: (cb: (dir: string | null) => void) => void;
+  openSettings?: (section?: string) => Promise<void>; attention?: AttentionBridge;
 } }).shell;
 /** The browser toolbar's Instant toggle and Send button (electron/preload.ts `queue`). */
 interface QueueBridge {
@@ -71,12 +82,14 @@ app.innerHTML = `
 <aside class="chat-side">
   <section class="panel chat-head">
     <div class="head-row opts">
-      <span class="jobs-pill" id="jobs-pill" hidden></span>
+      <button type="button" class="jobs-pill" id="jobs-pill" hidden aria-expanded="false" aria-controls="tasks-pop" title="Tasks still working: open the list to stop one"></button>
+      <div class="tasks-pop" id="tasks-pop" hidden role="group" aria-label="Tasks running"></div>
       <span class="session-cost" id="session-cost" hidden title="This conversation: what was billed, and what subscriptions (Claude Code, Codex, Grok) and on-device speech saved"></span>
       <span class="session-mem" id="session-mem" hidden></span>
       <span class="spacer"></span>
     </div>
   </section>
+  <section class="panel attention" id="attention" hidden role="status" aria-live="polite"></section>
   <section class="panel project" id="project" hidden>
     <span class="project-label">Project</span>
     <button type="button" id="project-pick" title="Choose project folder (⌘O)" aria-label="Choose project folder">
@@ -88,23 +101,26 @@ app.innerHTML = `
   <section class="panel threads" id="threads" hidden>
     <details id="threads-box" open><summary id="threads-sum">Threads</summary><div class="thread-all"><button type="button" class="thread-bulk" id="threads-clear" title="Delete every thread, on every page">Delete all threads</button></div><div class="thread-groups" id="threads-list"></div></details>
   </section>
-  <section class="panel messages" id="messages" aria-live="polite">
-    <button type="button" class="conv-reset" id="reset" title="Forget the conversation on the server (also drops background tasks)">New conversation</button>
-    <div class="empty" id="empty">
-      <h3>Speak</h3>
-      <p>Hover the mouse over an element while you talk to include it. Click or select text to point at “this” or “that”.</p>
-      <h3>Type</h3>
-      <p>Hold <b>Caps Lock</b> (or use the pointer button) and click an element. <b>Esc</b> cancels.</p>
+  <section class="panel conv">
+    <div class="messages" id="messages" aria-live="polite">
+      <button type="button" class="conv-reset" id="reset" title="Forget the conversation on the server (also drops background tasks)">New conversation</button>
+      <div class="empty" id="empty">
+        <h3>Speak</h3>
+        <p>Hover the mouse over an element while you talk to include it. Click or select text to point at “this” or “that”.</p>
+        <h3>Type</h3>
+        <p>Write in the box below: a message about an element that already has a thread goes to that thread. To comment on an element, press <b class="key-comment"></b> (or use the pointer button) and click it. <b>Esc</b> cancels.</p>
+      </div>
     </div>
+    <div class="compose" id="compose"></div>
   </section>
   <section class="panel talk">
     <div class="listen-row">
-      <label class="always" title="Start a turn when the microphone crosses the line. A few seconds below the line (set beside it), or Shift, sends it.">
+      <label class="always" id="always-label">
         <input type="checkbox" id="always-listen"> Always listen
       </label>
       <span class="info" id="meter-hint" hidden>
         <button type="button" class="info-icon" aria-label="How Always listen works" aria-describedby="meter-tip">i</button>
-        <span class="info-tip" id="meter-tip" role="tooltip">Drag the line to set the minimum. Crossing it starts a turn; staying below it for the set time, or Shift, sends the turn. A bump, or a clip with no words, is ignored.</span>
+        <span class="info-tip" id="meter-tip" role="tooltip">Drag the line to set the minimum. Crossing it starts a turn; staying below it for the set time, or <span class="key-talk"></span>, sends the turn. A bump, or a clip with no words, is ignored.</span>
       </span>
       <label class="hang" id="hang-row" hidden title="How long the level must stay below the line before the turn is sent">
         Send after <input type="number" id="listen-hang" min="${VAD_HANG_MIN_MS / 1000}" max="${VAD_HANG_MAX_MS / 1000}" step="0.5" inputmode="decimal"> s below the line
@@ -113,7 +129,7 @@ app.innerHTML = `
     <canvas id="meter" class="meter" hidden role="slider" aria-orientation="vertical" aria-label="Minimum microphone level" tabindex="-1"></canvas>
     <div class="row">
       <button id="enable" title="Allow microphone access and start audio playback">Enable mic &amp; audio</button>
-      <button id="ptt" class="ptt-big" disabled title="Hold to talk, release to send (or hold Shift). Press while it's talking to interrupt.">Hold to talk</button>
+      <button id="ptt" class="ptt-big" disabled>Hold to talk</button>
       <button id="stop" class="stop" hidden title="Stop speaking (Esc)">Stop</button>
     </div>
     <p class="status" id="status"></p>
@@ -139,14 +155,41 @@ function setStatus(text: string, isErr = false): void {
 
 function readyStatus(): string {
   return settings.alwaysListen
-    ? "Always listen is on: talk when the meter crosses the line. Press Shift while it's talking to interrupt; Esc stops it."
-    : "Hold Shift or the button to talk. Press again to interrupt; Esc stops.";
+    ? `Always listen is on: talk when the meter crosses the line. Press ${talkKeyLabel()} while it's talking to interrupt; Esc stops it.`
+    : `Hold ${talkKeyLabel()} or the button to talk. Press again to interrupt; Esc stops.`;
 }
 
 // ── settings ───────────────────────────────────────
 // Changed in the Settings window (web/settings/main.ts); each applies from the next turn.
 // The server's saved selection is what its agents are warm for: send it with each turn.
-fetch("/api/llm/selection").then((r) => r.json()).then((sel: RunConfig["llm"]) => { settings.llm = llmOf({ llm: sel }); }).catch(() => {});
+function publishDrawingAvailability(): void {
+  const grokTiers = (["fast", "smart"] as const).filter((tier) => settings.llm[tier].provider === "grok");
+  const tierLabel = grokTiers.map((tier) => tier === "fast" ? "Fast" : "Smart").join(" and ");
+  shell?.drawing?.publishDisabledReason(grokTiers.length
+    ? `Drawing is unavailable because the Grok CLI integration cannot receive images. Choose another harness for the ${tierLabel} ${grokTiers.length === 1 ? "tier" : "tiers"} in Settings → Models.`
+    : null);
+}
+// The keyboard shortcuts (Settings → Keyboard), in the hints.
+const talkKeyLabel = () => hotkeyLabel(hotkeys().talk);
+function showHotkeys(): void {
+  for (const el of document.querySelectorAll(".key-talk")) el.textContent = talkKeyLabel();
+  for (const el of document.querySelectorAll(".key-comment")) el.textContent = hotkeyLabel(hotkeys().comment);
+  $("always-label").title = `Start a turn when the microphone crosses the line. A few seconds below the line (set beside it), or ${talkKeyLabel()}, sends it.`;
+  $("ptt").title = `Hold to talk, release to send (or hold ${talkKeyLabel()}). Press while it's talking to interrupt.`;
+}
+setHotkeys(settings.hotkeys);
+showHotkeys();
+let llmSelectionChanged = false;
+// What needs attention in the setup (the Settings Dashboard's list), at the top of the sidebar.
+const attention = mountAttention(document.getElementById("attention")!, {
+  bridge: shell?.attention,
+  openSettings: (section) => void shell?.openSettings?.(section),
+  current: () => settings,
+});
+fetch("/api/llm/selection").then((r) => r.json()).then((sel: RunConfig["llm"]) => {
+  // A settings change made during startup takes precedence over this initial response.
+  if (!llmSelectionChanged) settings.llm = llmOf({ llm: sel });
+}).catch(() => {}).finally(() => { publishDrawingAvailability(); attention.refresh(); });
 // The server loads only the selected on-device Voice / Speech engines; it may have started with an older selection
 // (the Settings window sends each change itself).
 void fetch("/api/speech/selection", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tts: settings.ttsModel, stt: settings.sttModel }) }).catch(() => {});
@@ -154,10 +197,15 @@ shell?.chatSettings?.onChanged?.((json) => {
   let next;
   try { next = normalizeSettings(JSON.parse(json)); } catch { return; }
   const prev = { ...settings };
+  if (JSON.stringify(next.llm) !== JSON.stringify(settings.llm)) llmSelectionChanged = true;
   Object.assign(settings, Object.fromEntries(PANEL_KEYS.map((key) => [key, next[key]])));
+  publishDrawingAvailability();
   if (settings.sttModel !== prev.sttModel) for (const q of queue) transcribeQueued(q); // an on-device model: transcribe what's queued
   if (settings.debugOutlines !== prev.debugOutlines || settings.hoverOutline !== prev.hoverOutline || settings.showDebug !== prev.showDebug) sendDebug();
+  setHotkeys(settings.hotkeys);
+  showHotkeys();
   renderDisplay();
+  attention.refresh();
 });
 
 function sendDebug(): void {
@@ -187,6 +235,7 @@ function config(): RunConfig {
 
 // ── conversation view ──────────────────────────────
 interface TurnView {
+  annotation?: DrawingAnnotation;
   root: HTMLElement;
   user: HTMLElement;
   /** The transcript with its reference markers ("move it [@1] over there [1]"), under the user's bubble. */
@@ -194,6 +243,8 @@ interface TurnView {
   chips: HTMLElement;
   badges: HTMLElement;
   decision: HTMLElement;
+  /** "working… ×" under the user's bubble while the turn is being worked on; its × stops the turn (turn.cancel). */
+  working: HTMLElement;
   bot: HTMLElement;
   botText: Text;
   detail: HTMLDetailsElement;
@@ -232,6 +283,14 @@ function addTurnView(turnId: string, shown = true): TurnView {
   badges.hidden = true;
   const decision = el("span", "decision");
   badges.append(decision);
+  const working = el("div", "turn-working");
+  working.hidden = true;
+  const workingStop = el("button", "turn-stop", "×");
+  workingStop.type = "button";
+  workingStop.title = "Stop this task (Esc)";
+  workingStop.setAttribute("aria-label", "Stop this task");
+  workingStop.onclick = () => stopActiveTurn(turnId);
+  working.append(el("span", "thread-dot"), el("span", "turn-working-text", "working…"), workingStop);
   const bot = el("div", "bubble bot");
   bot.hidden = true;
   const botText = document.createTextNode("");
@@ -241,13 +300,20 @@ function addTurnView(turnId: string, shown = true): TurnView {
   const detailPre = el("pre");
   detail.append(el("summary", undefined, "The solver's detailed answer"), detailPre);
   const meta = el("div", "meta");
-  root.append(user, annot, chips, badges, bot, detail, meta);
+  root.append(user, annot, chips, working, badges, bot, detail, meta);
   stampTime(root);
   if (shown) messages.append(root);
-  const v: TurnView = { root, user, annot, chips, badges, decision, bot, botText, detail, detailPre, meta };
+  const v: TurnView = { root, user, annot, chips, badges, decision, working, bot, botText, detail, detailPre, meta };
   views.set(turnId, v);
   if (shown) scrollDown();
   return v;
+}
+
+/** Keep the image outside the user text node, which transcript/queue updates replace. */
+function attachDrawing(v: TurnView, annotation: DrawingAnnotation): void {
+  if (v.annotation) return;
+  v.annotation = annotation;
+  v.user.after(drawingPreview(annotation));
 }
 
 /** When a message was sent ("14:05"; the full date and time on hover), at the top of its entry; set again on a resend. */
@@ -426,8 +492,13 @@ interface JobCard {
   info: JobInfo;
   /** performance.now() when the job started (approx: first seen minus elapsedMs). */
   tStart: number;
+  /** The marker's row in the conversation: the marker and its × (stop, while running). */
+  row: HTMLElement;
   /** The clickable marker in the conversation; toggles `root`, the task's own thread. */
   marker: HTMLButtonElement;
+  /** Stop buttons (task.stop): the × by the marker and the one in the card; shown while running. */
+  stop: HTMLButtonElement;
+  cardStop: HTMLButtonElement;
   costBox: HTMLElement;
   root: HTMLElement;
   head: HTMLElement;
@@ -500,6 +571,14 @@ function createJobCard(info: JobInfo): JobCard {
   marker.dataset.turn = info.turnId;
   marker.setAttribute("aria-expanded", "false");
   marker.title = "Show or hide this background job";
+  const stop = el("button", "job-stop", "×");
+  stop.type = "button";
+  stop.title = "Stop this task";
+  stop.setAttribute("aria-label", `Stop task: ${markerLabel(info.question)}`);
+  stop.onclick = () => stopTask({ kind: "job", jobId: info.jobId });
+  const row = el("div", "job-row");
+  row.dataset.turn = info.turnId;
+  row.append(marker, stop);
   const root = el("div", "job");
   root.dataset.turn = info.turnId;
   root.hidden = true;
@@ -511,11 +590,15 @@ function createJobCard(info: JobInfo): JobCard {
   const detailPre = el("pre");
   detail.append(el("summary", undefined, "Detailed answer"), detailPre);
   const err = el("div", "job-err");
+  const cardStop = el("button", "job-stop-btn", "Stop this task");
+  cardStop.type = "button";
+  cardStop.title = "Stop it now. What it already changed stays.";
+  cardStop.onclick = () => stopTask({ kind: "job", jobId: info.jobId });
   const costBox = el("div", "costbox");
   costBox.hidden = true;
-  root.append(head, question, sub, spoken, detail, err, costBox);
+  root.append(head, question, sub, cardStop, spoken, detail, err, costBox);
   stampTime(root, new Date(Date.now() - (info.elapsedMs ?? 0)));
-  const card: JobCard = { info, tStart: performance.now() - (info.elapsedMs ?? 0), marker, costBox, root, head, question, sub, spoken, detail, detailPre, err };
+  const card: JobCard = { info, tStart: performance.now() - (info.elapsedMs ?? 0), row, marker, stop, cardStop, costBox, root, head, question, sub, spoken, detail, detailPre, err };
   marker.addEventListener("click", () => {
     root.hidden = !root.hidden;
     marker.setAttribute("aria-expanded", String(!root.hidden));
@@ -523,11 +606,11 @@ function createJobCard(info: JobInfo): JobCard {
   // After the starting turn (and after any earlier markers and cards of that turn); else at the end.
   const turnRoot = views.get(info.turnId)?.root;
   let anchor: Element | null = turnRoot?.isConnected ? turnRoot : null;
-  while (anchor?.nextElementSibling instanceof HTMLElement && anchor.nextElementSibling.matches(`.job-marker[data-turn="${CSS.escape(info.turnId)}"], .job[data-turn="${CSS.escape(info.turnId)}"]`)) {
+  while (anchor?.nextElementSibling instanceof HTMLElement && anchor.nextElementSibling.matches(`.job-row[data-turn="${CSS.escape(info.turnId)}"], .job[data-turn="${CSS.escape(info.turnId)}"]`)) {
     anchor = anchor.nextElementSibling;
   }
-  if (anchor) anchor.after(marker, root);
-  else messages.append(marker, root);
+  if (anchor) anchor.after(row, root);
+  else messages.append(row, root);
   return card;
 }
 
@@ -555,6 +638,9 @@ function renderJob(c: JobCard): void {
   const j = c.info;
   c.root.dataset.state = j.state;
   c.marker.dataset.state = j.state;
+  c.row.dataset.state = j.state;
+  c.stop.hidden = j.state !== "running";
+  c.cardStop.hidden = j.state !== "running";
   const status = j.state === "running" ? `${fmtElapsed(performance.now() - c.tStart)}…` : j.state === "failed" || j.state === "stopped" ? j.state : j.costUsd !== undefined ? fmtUsd(j.costUsd) : "";
   const isCost = j.state === "done" && j.costUsd !== undefined;
   c.marker.replaceChildren(el("span", "job-marker-q", `${j.intent === "question" ? "Question" : "Task"}: ${markerLabel(j.question)}`), el("span", isCost ? "job-marker-status cost-text" : "job-marker-status", status));
@@ -581,12 +667,115 @@ function renderJob(c: JobCard): void {
   c.err.hidden = j.state !== "failed";
 }
 
-function renderJobsPill(): void {
-  const n = [...jobs.values()].filter((c) => c.info.state === "running").length;
-  const pill = $("jobs-pill");
-  pill.textContent = runningLabel(n);
-  pill.hidden = n === 0;
+/** A task still working, as the tasks list shows it. `key` tells rows apart between renders; `elapsed` is live. */
+interface RunningTask { key: string; kind: string; title: string; elapsed?: () => number; open: () => void; stop: () => void }
+
+/** What's still working: the turn being answered now, background jobs, then element threads' runs. */
+function runningTasks(): RunningTask[] {
+  const out: RunningTask[] = [];
+  const w = workingTurn();
+  // A turn whose work went to a job or a thread is listed as that job or thread.
+  if (w && !w.background) {
+    const t0 = w.tRelease!;
+    const text = w.view.user.classList.contains("pending") ? "" : w.view.user.textContent ?? "";
+    out.push({
+      key: `turn:${w.turnId}`, kind: w.intent === "question" || w.intent === "answer" ? "Question" : w.intent === "clarify" ? "Asking" : "Task", title: text || "(listening…)",
+      elapsed: () => performance.now() - t0, open: () => w.view.root.scrollIntoView({ block: "nearest", behavior: "smooth" }), stop: () => stopActiveTurn(w.turnId),
+    });
+  }
+  for (const c of jobs.values()) {
+    if (c.info.state !== "running") continue;
+    out.push({
+      key: `job:${c.info.jobId}`, kind: c.info.intent === "question" ? "Question" : "Task", title: c.info.question,
+      elapsed: () => performance.now() - c.tStart, open: () => showJob(c), stop: () => stopTask({ kind: "job", jobId: c.info.jobId }),
+    });
+  }
+  const running = [...threads.values()].filter((t) => t.state === "running").sort((a, b) => b.lastInteractionAt - a.lastInteractionAt);
+  for (const t of running) {
+    out.push({
+      key: `thread:${t.threadId}`, kind: "Thread", title: `${displayTitle(t.title)} · ${pageLabel(t.pageUrl)}`,
+      open: () => openThread(t), stop: () => stopTask({ kind: "thread", threadId: t.threadId }),
+    });
+  }
+  return out;
 }
+
+/** Expand a job's card and bring it into view. */
+function showJob(c: JobCard): void {
+  c.root.hidden = false;
+  c.marker.setAttribute("aria-expanded", "true");
+  c.root.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+/** A Stop (×) button: the task's solver is killed; what it already changed stays. The card / thread shows "stopped". */
+function stopTask(ref: TaskRef): void {
+  if (!taskRunning(ref)) return;
+  sock.send({ type: "task.stop", task: ref });
+  setStatus("Stopping the task…");
+}
+
+/** The rows the tasks list shows now (by key), with their live elapsed spans. */
+let tasksShown: { keys: string; ticks: { span: HTMLElement; elapsed: () => number }[] } = { keys: "", ticks: [] };
+
+/** The "N tasks running" pill, and the list it opens: each task with its × (stop). */
+function renderJobsPill(): void {
+  const tasks = runningTasks();
+  const pill = $("jobs-pill") as HTMLButtonElement;
+  const label = runningLabel(tasks.length);
+  if (pill.textContent !== label) pill.textContent = label;
+  pill.hidden = tasks.length === 0;
+  const pop = $("tasks-pop");
+  if (tasks.length === 0) closeTasks();
+  if (pop.hidden) return;
+  const keys = tasks.map((t) => `${t.key}|${t.title}`).join("\n");
+  if (keys === tasksShown.keys) {
+    for (const k of tasksShown.ticks) k.span.textContent = `${fmtElapsed(k.elapsed())}…`;
+    return;
+  }
+  const ticks: typeof tasksShown.ticks = [];
+  pop.replaceChildren(...tasks.map((t) => {
+    const item = el("button", "task-item");
+    item.type = "button";
+    item.title = t.key.startsWith("thread:") ? "Open its panel" : "Show it in the conversation";
+    const elapsed = el("span", "task-elapsed", t.elapsed ? `${fmtElapsed(t.elapsed())}…` : "");
+    if (t.elapsed) ticks.push({ span: elapsed, elapsed: t.elapsed });
+    item.append(el("span", "thread-dot"), el("span", "task-kind", `${t.kind}:`), el("span", "task-title", t.title), elapsed);
+    item.onclick = () => { closeTasks(); t.open(); };
+    const x = el("button", "task-stop", "×");
+    x.type = "button";
+    x.title = "Stop this task";
+    x.setAttribute("aria-label", `Stop task: ${markerLabel(t.title)}`);
+    x.onclick = t.stop;
+    const row = el("div", "task-row");
+    row.append(item, x);
+    return row;
+  }));
+  tasksShown = { keys, ticks };
+}
+
+function closeTasks(): void {
+  const pop = $("tasks-pop");
+  if (pop.hidden) return;
+  pop.hidden = true;
+  pop.replaceChildren();
+  tasksShown = { keys: "", ticks: [] };
+  $("jobs-pill").setAttribute("aria-expanded", "false");
+}
+
+$("jobs-pill").addEventListener("click", () => {
+  const pop = $("tasks-pop");
+  if (!pop.hidden) return closeTasks();
+  pop.hidden = false;
+  $("jobs-pill").setAttribute("aria-expanded", "true");
+  renderJobsPill();
+});
+// Click anywhere else: the list closes.
+document.addEventListener("pointerdown", (e) => {
+  const pop = $("tasks-pop");
+  if (pop.hidden || !(e.target instanceof Node)) return;
+  if (pop.contains(e.target) || $("jobs-pill").contains(e.target)) return;
+  closeTasks();
+});
 
 // ── audio + cursor ─────────────────────────────────
 const sock = connectWithStatus();
@@ -699,6 +888,7 @@ function onPageUrl(url: string): void {
   threadsChanged();
   orbChanged(true);
   sendConversation(true);
+  publishHeld();
   publishComment();
   // Sent again on every update until the page answers with thread.focus (the first may reach a document that isn't ready).
   if (pendingOpen && Date.now() > pendingOpen.until) pendingOpen = null;
@@ -829,6 +1019,7 @@ function renderThreadList(): void {
     return box;
   }));
   renderMemory();
+  renderJobsPill();
 }
 
 /** The latest RAM sample from the server (server/memory.ts), null until the first. */
@@ -951,6 +1142,11 @@ function sendTurnBubble(t: Turn, ended: boolean): void {
 
 bridge.onThreadAction?.((a) => {
   if (isPageConfirmAction(a)) return answerStopConfirm(a.confirmId, a.yes);
+  if (isPageHeldAction(a)) {
+    const q = held.find((x) => x.turnId === a.turnId);
+    if (q) (a.type === "held.send" ? interruptForHeld : removeHeld)(q);
+    return;
+  }
   if (isPageOrbAction(a)) {
     settings.orbPos = a.pos;
     saveSettings();
@@ -1014,16 +1210,18 @@ interface Turn {
   /** decision: the route and, with element threads, the thread the turn went to (its reply bubbles from that marker). */
   intent?: RouteIntent;
   threadId?: string;
+  /** decision: the work went to a thread's runner (or a job) and the turn only says the ack. */
+  background?: boolean;
   bubbleEnded?: boolean;
   /** A typed comment: answered in text only (RunConfig.silent). */
   silent?: boolean;
 }
 let turn: Turn | null = null;
-/** This recording was opened by the meter. Silence or one Shift sends it; a held Shift/button is separate. */
+/** This recording was opened by the meter. Silence or one talk-key press sends it; a held talk key/button is separate. */
 let meterTurn = false;
 /** Set once the talk controls are mounted (the mic tap starts after enableAudio). */
 let listen: AlwaysListenHandle | null = null;
-/** Still capturing this turn or a dictation (Shift is held, the button is held, or the meter is open). */
+/** Still capturing this turn or a dictation (the talk key is held, the button is held, or the meter is open). */
 function isRecording(): boolean {
   return (!!turn && !turn.finished && turn.tRelease === undefined) || (!!dictation && !dictation.released);
 }
@@ -1038,7 +1236,30 @@ function turnBusy(): boolean {
 /** Show the Stop button while the assistant is thinking/speaking or a notice is audible. */
 function refreshBusy(): void {
   $("stop").hidden = !(turnBusy() || noticeJobId || playback.isPlaying(performance.now()));
+  const w = workingTurn();
+  for (const v of views.values()) v.working.hidden = v !== w?.view;
+  if (w) w.view.working.querySelector(".turn-working-text")!.textContent = w.background ? "handed over…" : w.intent ? `${INTENT_WORKING[w.intent]}…` : "thinking…";
+  renderJobsPill();
   orbChanged();
+}
+
+/** The turn being worked on now (sent, not yet done): the one the × under its bubble and the tasks list can stop. */
+function workingTurn(): Turn | null {
+  const t = turn;
+  return t && !t.finished && !t.rec && t.tRelease !== undefined ? t : null;
+}
+
+const INTENT_WORKING: Record<RouteIntent, string> = { question: "answering", task: "working", clarify: "asking", answer: "answering" };
+
+/** The × under the active turn, or its row in the tasks list: stop it (turn.cancel) and silence what it was saying. */
+function stopActiveTurn(turnId: string): void {
+  const t = workingTurn();
+  if (!t || t.turnId !== turnId) return;
+  player?.reset();
+  playback.reset();
+  cancelTurn(t, "stop");
+  setStatus(queue.length ? `Stopped. ${queuedText()}` : "Stopped.");
+  refreshBusy();
 }
 
 // ── the conversation orb ───────────────────────────
@@ -1101,9 +1322,10 @@ function conversationEntries(): ConvoEntry[] {
       if (!id || !v) continue;
       const badges = [...v.badges.querySelectorAll(".badge, .tag")].map((b) => b.textContent ?? "").filter(Boolean);
       out.push({
+        ...(v.annotation ? { annotation: v.annotation } : {}),
         id, user: ownText(v.user) || (v.user.textContent ?? ""), assistant: v.bot.hidden ? "" : v.botText.data, badges,
         ...(v.detail.hidden ? {} : { detail: v.detailPre.textContent ?? "" }),
-        ...(n.classList.contains("queued") ? { note: "not sent yet" } : {}),
+        ...(n.classList.contains("held") ? { note: "queued", held: true } : n.classList.contains("queued") ? { note: "not sent yet" } : {}),
       });
     }
   }
@@ -1165,7 +1387,7 @@ function cancelTurn(t: Turn, reason: "interrupt" | "stop"): void {
 
 function press(how: "manual" | "vad" = "manual"): void {
   if (!player) return setStatus("Click “Enable mic & audio” first.", true);
-  if (commentOpen) return startDictation(how); // a comment bubble is open: talking fills it in
+  if (commentOpen()) return startDictation(how, chatDraftOpen ? "chat" : "page"); // a form is open: talking fills it in
   const queued = !settings.instant;
   if (!queued && !sock.isOpen) return setStatus("Server not connected.", true);
   const now = performance.now();
@@ -1206,7 +1428,7 @@ function press(how: "manual" | "vad" = "manual"): void {
   $("ptt").classList.add("live");
   if (how === "vad") $("ptt").textContent = "Listening…";
   setStatus(how === "vad"
-    ? `Listening… two seconds under the line ${queued ? "queues" : "sends"} it, or press Shift.`
+    ? `Listening… two seconds under the line ${queued ? "queues" : "sends"} it, or press ${talkKeyLabel()}.`
     : queued ? "Listening… release to queue it." : "Listening… release to send.");
   refreshBusy();
   publishComment();
@@ -1214,7 +1436,7 @@ function press(how: "manual" | "vad" = "manual"): void {
     try {
       t.capture = await startCapture({
         onFrame: (pcm) => { if (turn === t && t.tRelease === undefined && !t.finished) out.sendAudio(pcm); },
-        preRollMs: how === "vad" ? VAD_PRE_ROLL_MS : 0,
+        preRollMs: how === "vad" ? VAD_PRE_ROLL_MS : TALK_PRE_ROLL_MS,
       });
       const tAudioStart = await t.capture.tAudioStart;
       t.tAudioStart = tAudioStart;
@@ -1239,7 +1461,7 @@ function discardAutoTurn(t: Turn): void {
   endTurn(t);
   t.view.root.remove();
   views.delete(t.turnId);
-  if (!messages.querySelector(".turn, .job, .job-marker")) $("empty").hidden = false;
+  if (!messages.querySelector(".turn, .job, .job-row")) $("empty").hidden = false;
   setStatus(readyStatus());
 }
 
@@ -1309,6 +1531,8 @@ let stopConfirm: { confirmId: string; task: SpokenTask; timer: ReturnType<typeof
 
 /** `relayed`: pressed in the browser pane or the toolbar, where the page may use Esc itself: it only stops speech. */
 function onEscape(relayed: boolean): void {
+  if (drawingPreviewOpen()) return;
+  closeTasks();
   const now = performance.now();
   if (escBurst && now - escBurst.last <= ESC_BURST_GAP_MS) {
     escBurst.count++;
@@ -1442,32 +1666,54 @@ function failTurn(t: Turn, msg: string): void {
 
 // ── comments ───────────────────────────────────────
 // Comment mode (the pointer button in the browser toolbar, web/cursor/commentOverlay.ts): click an element, and a
-// bubble on it takes typed feedback (so does the form in a thread's panel, while its field has focus: a follow-up on
-// the thread's element). While one is open, Shift, the talk button, always-listen and the form's mic dictate into it
+// bubble on it takes typed feedback (so does the form in a thread's panel, while the panel is open: a follow-up on
+// the thread's element). While one is open, the talk key, the talk button, always-listen and the form's mic dictate into it
 // instead of starting a turn: a cursor-only turn (speech-to-text only: no reply, not remembered), whose final words
 // are inserted at the form's caret. Its Send runs a turn that carries the text (shared/comment.ts) with the pointer
 // on the element, on B; with Instant off it's added to the list instead (the bubble stays open, showing it).
-const COMMENT_STATUS = "Comment open: type, or hold Shift / press the mic to talk into it.";
+const commentStatus = () => `Comment open: type, or hold ${talkKeyLabel()} / press the mic to talk into it.`;
 const DICTATION_TIMEOUT_MS = 30_000;
-/** A comment bubble is open on the page. */
-let commentOpen = false;
+/** A comment bubble or a thread panel's form is open on the page. */
+let pageDraftOpen = false;
+/** The message box (below the conversation) has focus or is dictating. */
+let chatDraftOpen = false;
+/** A form wants dictation: talking fills it in. */
+const commentOpen = (): boolean => pageDraftOpen || chatDraftOpen;
+/** Where a dictation's words go: the page's open form or the message box. */
+type DictationTo = "page" | "chat";
 interface Dictation {
   turnId: string;
+  startedAt: number;
+  endedAt?: number;
+  audioReady?: boolean;
   released: boolean;
   capture?: CaptureHandle;
   audioStarted: Promise<void>;
   /** Words heard so far (stt.partial). */
   partial: string;
+  to: DictationTo;
   timeout?: ReturnType<typeof setTimeout>;
 }
 let dictation: Dictation | null = null;
 /** Dictation turns: their server messages never reach the conversation. */
 const dictationIds = new Set<string>();
+/** The message box's forms (see "message box" below). */
+const chatForms = createFormHub({
+  send: (a) => { if (a.type !== "comment.send") onDraftAction(a, "chat"); },
+  ptt: (down) => { if (down) press("manual"); else if (isRecording()) void release(); },
+});
 
 function publishComment(): void {
   const d = dictation;
   const listening = !!turn && !turn.finished && turn.tRelease === undefined;
-  bridge.send({ type: "comment.state", state: { instant: settings.instant, recording: !!d && !d.released, transcribing: !!d?.released, partial: d && !d.released ? d.partial : "", listening } });
+  // Each side sees only its own dictation.
+  const stateFor = (to: DictationTo): CommentState => {
+    const mine = d?.to === to ? d : null;
+    return { instant: settings.instant, recording: !!mine && !mine.released, transcribing: !!mine?.released, partial: mine && !mine.released ? mine.partial : "", listening, ...(mine ? { dictationId: mine.turnId, startedAt: mine.startedAt } : {}) };
+  };
+  bridge.send({ type: "comment.state", state: stateFor("page") });
+  // The message box always sends now (Instant off only queues feedback on the page).
+  chatForms.update({ ...stateFor("chat"), instant: true });
 }
 
 function resetPtt(): void {
@@ -1485,7 +1731,7 @@ function commentConfig(): RunConfig {
   return { ...config(), approach: "pipeline", threads: true, silent: true, fillers: false };
 }
 
-function startDictation(how: "manual" | "vad" | "button"): void {
+function startDictation(how: "manual" | "vad" | "button", to: DictationTo): void {
   if (dictation) return;
   if (!sock.isOpen) return setStatus("Server not connected.", true);
   // The server runs one turn at a time: dictating talks over a reply, like a new turn would.
@@ -1501,25 +1747,37 @@ function startDictation(how: "manual" | "vad" | "button"): void {
   playback.reset();
   const turnId = crypto.randomUUID();
   const tPress = performance.now();
-  const d: Dictation = { turnId, released: false, audioStarted: Promise.resolve(), partial: "" };
+  const d: Dictation = { turnId, startedAt: performance.timeOrigin + tPress, released: false, audioStarted: Promise.resolve(), partial: "", to };
   dictation = d;
   dictationIds.add(turnId);
   sock.send({ type: "turn.start", turnId, config: dictationConfig(), tPress });
   $("ptt").classList.add("live");
   $("ptt").textContent = "Dictating…";
-  setStatus(how === "vad" ? "Dictating into the comment… pause or press Shift to stop."
-    : how === "button" ? "Dictating into the comment… press the mic again when done."
-      : "Dictating into the comment… release to stop.");
+  const into = to === "chat" ? "the message" : "the comment";
+  setStatus(how === "vad" ? `Dictating into ${into}… pause or press ${talkKeyLabel()} to stop.`
+    : how === "button" ? `Dictating into ${into}… press the mic again when done.`
+      : `Dictating into ${into}… release to stop.`);
   publishComment();
   refreshBusy();
+  d.timeout = setTimeout(() => endDictation(d, "Mic did not provide audio (timed out)."), DICTATION_TIMEOUT_MS);
   d.audioStarted = (async () => {
     try {
-      d.capture = await startCapture({
+      const capture = await startCapture({
         onFrame: (pcm) => { if (dictation === d && !d.released) sock.sendAudio(pcm); },
-        preRollMs: how === "vad" ? VAD_PRE_ROLL_MS : 0,
+        preRollMs: how === "vad" ? VAD_PRE_ROLL_MS : TALK_PRE_ROLL_MS,
       });
-      const tAudioStart = await d.capture.tAudioStart;
-      if (dictation === d) sock.send({ type: "turn.audioStart", turnId, tAudioStart });
+      // The form may have closed or the talk key may have been released while mic setup was pending.
+      if (dictation !== d) { capture.stop(); return; }
+      d.capture = capture;
+      const tAudioStart = await capture.tAudioStart;
+      if (dictation === d) {
+        clearTimeout(d.timeout);
+        d.timeout = undefined;
+        d.audioReady = true;
+        d.startedAt = performance.timeOrigin + tAudioStart;
+        sock.send({ type: "turn.audioStart", turnId, tAudioStart });
+        publishComment();
+      }
     } catch (e) {
       endDictation(d, `Mic: ${(e as Error).message}`);
     }
@@ -1531,12 +1789,15 @@ async function stopDictation(): Promise<void> {
   const d = dictation;
   if (!d || d.released) return;
   d.released = true;
+  d.endedAt = performance.timeOrigin + performance.now();
+  // No first sample means no speech was delivered. Cancel rather than emit a reversed capture interval.
+  if (!d.audioReady) { endDictation(d, undefined, true); return; }
   resetPtt();
   publishComment();
   await d.audioStarted;
   d.capture?.stop();
   if (dictation !== d) return;
-  sock.send({ type: "turn.release", turnId: d.turnId, tRelease: performance.now() });
+  sock.send({ type: "turn.release", turnId: d.turnId, tRelease: d.endedAt - performance.timeOrigin });
   setStatus("Transcribing…");
   d.timeout = setTimeout(() => endDictation(d, "No transcript from the server (timed out)."), DICTATION_TIMEOUT_MS);
 }
@@ -1556,7 +1817,7 @@ function endDictation(d: Dictation, error?: string, cancel = !!error): void {
   publishComment();
   refreshBusy();
   if (error) setStatus(error, true);
-  else if (!isRecording() && !turnBusy()) setStatus(commentOpen ? COMMENT_STATUS : readyStatus());
+  else if (!isRecording() && !turnBusy()) setStatus(pageDraftOpen ? commentStatus() : readyStatus());
 }
 
 function onDictationMsg(msg: ServerMsg): void {
@@ -1566,7 +1827,13 @@ function onDictationMsg(msg: ServerMsg): void {
     d.partial = msg.text;
     publishComment();
   } else if (msg.type === "stt.final") {
-    if (msg.text.trim()) bridge.send({ type: "comment.insert", text: msg.text });
+    if (msg.text.trim()) {
+      const transcript = {
+        id: d.turnId, startedAt: d.startedAt, endedAt: Math.max(d.startedAt, d.endedAt ?? performance.timeOrigin + performance.now()), words: msg.words,
+      };
+      if (d.to === "chat") chatForms.insert(msg.text, transcript);
+      else bridge.send({ type: "comment.insert", text: msg.text, dictation: transcript });
+    }
     endDictation(d);
   } else if (msg.type === "error") {
     endDictation(d, `${msg.source}: ${msg.message}`);
@@ -1575,52 +1842,170 @@ function onDictationMsg(msg: ServerMsg): void {
   }
 }
 
-/** The bubble's Send: run the comment as a turn now, or add it to the list (Instant off, or now isn't a good time). */
-function sendComment(text: string, sample: CursorSample): void {
+/**
+ * The bubble's Send: run the comment as a turn now, or add it to the list (Instant off, or now isn't a good time).
+ * `threadId`: from that thread's panel: the turn is that thread's (sent now, never queued), shown in the panel only.
+ * `chat`: from the message box: sent now, never queued, pointing at nothing; it stays in the conversation. False: not sent (the status says why).
+ */
+function sendComment(text: string, sample: CursorSample | null, threadId?: string, annotation?: DrawingAnnotation, chat = false): boolean {
+  if (threadId || chat) {
+    const busy = !sock.isOpen ? "Server not connected" : isRecording() ? "You're talking" : sending ? "The list is being sent" : "";
+    if (busy) { setStatus(`${busy}: the message wasn't sent.`, true); return false; }
+  }
   if (dictation) endDictation(dictation, undefined, true);
   const turnId = crypto.randomUUID();
   // The pointer rests on the clicked element for the whole synthetic utterance (shared/comment.ts).
   const tRelease = performance.now();
   const tPress = tRelease - typedSpanMs(text);
   const samples: CursorSample[] = [];
-  for (let t = tPress; t <= tRelease; t += BATCH_MS) samples.push({ ...sample, t, details: samples.length ? undefined : sample.details });
+  for (let t = tPress; sample && t <= tRelease; t += BATCH_MS) samples.push({ ...sample, t, details: samples.length ? undefined : sample.details });
   const msgs: TurnMsg[] = [
-    { type: "turn.start", turnId, config: commentConfig(), tPress, text, ...(pageUrl ? { pageUrl: normalizePageUrl(pageUrl) } : {}) },
+    { type: "turn.start", turnId, config: commentConfig(), tPress, text, ...(annotation ? { annotation, pageUrl: annotation.pageUrl } : pageUrl ? { pageUrl: normalizePageUrl(pageUrl) } : {}), ...(threadId ? { threadId } : {}), ...(chat ? { chat } : {}) },
     { type: "turn.audioStart", turnId, tAudioStart: tPress },
     { type: "cursor.samples", turnId, samples },
     { type: "turn.context", turnId, clicks: [], preselected: null, highlights: [] },
     { type: "turn.release", turnId, tRelease },
   ];
-  const view = addTurnView(turnId);
+  const view = addTurnView(turnId, !threadId);
   view.root.classList.add("comment");
-  const q: Queued = { turnId, rec: msgs.map((msg) => ({ msg })), view, comment: text, at: Date.now() };
-  const later = !settings.instant ? "" : !player ? "Audio isn't enabled" : !sock.isOpen ? "Server not connected" : isRecording() ? "You're talking" : sending ? "The list is being sent" : "";
-  if (!settings.instant || later) {
+  if (annotation) attachDrawing(view, annotation);
+  const q: Queued = { turnId, rec: msgs.map((msg) => ({ msg })), view, comment: text, at: Date.now(), ...(threadId ? { threadId } : {}) };
+  const later = threadId || chat ? "" : !settings.instant ? "" : !player ? "Audio isn't enabled" : !sock.isOpen ? "Server not connected" : isRecording() ? "You're talking" : sending ? "The list is being sent" : "";
+  if (!threadId && !chat && (!settings.instant || later)) {
     queue.push(q);
     showQueued(q);
     publishQueue();
     setStatus(later ? `${later}: added the comment to the list. ${queuedText()}` : `Added to the list. ${queuedText()}`);
-    return;
+    return true;
   }
-  if (turn && !turn.finished) cancelTurn(turn, "interrupt");
+  if (turn && !turn.finished) {
+    if (mustFinish(turn)) {
+      holdComment(q, turn);
+      return true;
+    }
+    cancelTurn(turn, "interrupt");
+  }
   void replay(q);
+  return true;
+}
+
+/**
+ * Comments sent while a turn can't be cut: sent in order once it ends. Cancelling a turn before its routing is done
+ * drops it (nothing reaches its thread), so a comment a few seconds after another would lose the first.
+ */
+const held: Queued[] = [];
+let sendingHeld = false;
+
+/** Undecided (still routing), a typed comment's text reply, or only the ack of work handed off: let it finish. */
+function mustFinish(t: Turn): boolean {
+  return t.silent === true || t.intent === undefined || t.background === true;
+}
+
+function holdComment(q: Queued, t: Turn): void {
+  held.push(q);
+  showHeld(q);
+  publishHeld();
+  setStatus("Sending your comment when the current one is through…");
+  if (!sendingHeld && held.length === 1) sendAfter(t);
+}
+
+/** Drawn like queued feedback, with Remove and Interrupt and send (replay() turns it back into a turn). */
+function showHeld(q: Queued): void {
+  const v = q.view;
+  v.root.classList.add("queued", "held");
+  v.user.classList.remove("pending");
+  v.user.textContent = `Queued · “${q.comment ?? ""}”`;
+  const note = el("span", "held-note", "Sends when the current turn ends");
+  const remove = el("button", "link queued-remove", "Remove");
+  remove.title = "Drop this comment without sending it";
+  remove.onclick = () => removeHeld(q);
+  const now = el("button", "link queued-remove", "Interrupt and send");
+  now.title = "Stop the current turn and send this comment now";
+  now.onclick = () => interruptForHeld(q);
+  v.meta.replaceChildren(note, now, remove);
+}
+
+function removeHeld(q: Queued): void {
+  const i = held.indexOf(q);
+  if (i < 0) return;
+  held.splice(i, 1);
+  publishHeld();
+  q.view.root.remove();
+  views.delete(q.turnId);
+  if (!messages.querySelector(".turn, .job, .job-row")) $("empty").hidden = false;
+  if (!held.length && !turnBusy()) setStatus(readyStatus());
+}
+
+/** Send `q` next: the current turn is cancelled, which sends what's held (q first). */
+function interruptForHeld(q: Queued): void {
+  const i = held.indexOf(q);
+  if (i < 0) return;
+  held.splice(i, 1);
+  held.unshift(q);
+  publishHeld();
+  if (turn && !turn.finished) cancelTurn(turn, "interrupt");
+  else void sendHeld();
+}
+
+/** After `t` ends (and after whatever ended it, e.g. a press starting a new turn, has run). */
+function sendAfter(t: Turn): void {
+  const prev = t.onEnd;
+  t.onEnd = () => { prev?.(); setTimeout(() => void sendHeld(), 0); };
+}
+
+async function sendHeld(): Promise<void> {
+  if (sendingHeld) return;
+  sendingHeld = true;
+  while (held.length) {
+    if (turn && !turn.finished) { // the user started talking meanwhile: after that turn
+      sendingHeld = false;
+      return sendAfter(turn);
+    }
+    const q = held.shift()!;
+    publishHeld();
+    await replay(q);
+  }
+  sendingHeld = false;
+}
+
+/** The thread panels' waiting comments (the sidebar's show in the conversation, which the orb's panel mirrors). */
+function publishHeld(): void {
+  bridge.send({ type: "held", items: held.flatMap((q) => (q.threadId ? [{ turnId: q.turnId, threadId: q.threadId, text: q.comment ?? "" }] : [])) });
+}
+
+/** A form opened or closed, or its mic was pressed: on the page (`page`) or in the message box (`chat`). */
+function onDraftAction(a: Extract<PageCommentAction, { type: "comment.draft" | "comment.record" }>, to: DictationTo): void {
+  if (a.type === "comment.draft") {
+    if (to === "page") pageDraftOpen = a.open; else chatDraftOpen = a.open;
+    if (!a.open && dictation?.to === to) endDictation(dictation, undefined, true);
+    if (!isRecording() && !turnBusy() && !noticeJobId) setStatus(pageDraftOpen ? commentStatus() : readyStatus());
+    publishComment();
+  } else if (!a.on) void stopDictation();
+  else if (!player) setStatus("Click “Enable mic & audio” first.", true);
+  else startDictation("button", to);
 }
 
 bridge.onComment?.((a) => {
   if (!isPageCommentAction(a)) return;
-  if (a.type === "comment.draft") {
-    commentOpen = a.open;
-    if (!a.open && dictation) endDictation(dictation, undefined, true);
-    if (!isRecording() && !turnBusy() && !noticeJobId) setStatus(commentOpen ? COMMENT_STATUS : readyStatus());
-    publishComment();
-  } else if (a.type === "comment.record") {
-    if (!a.on) void stopDictation();
-    else if (!player) setStatus("Click “Enable mic & audio” first.", true);
-    else startDictation("button");
-  } else {
-    sendComment(a.text, a.sample); // the bubble says when it closes (with Instant off it stays open for more)
-  }
+  if (a.type === "comment.send") sendComment(a.text, a.sample, a.threadId, a.annotation); // the bubble says when it closes (with Instant off it stays open for more)
+  else onDraftAction(a, "page");
 });
+
+// ── message box ────────────────────────────────────
+// The conversation's own form (web/cursor/inlineForm.ts, as in a thread's panel): type, or dictate with the mic or
+// the talk key while it has focus. It points at nothing, and what's sent from it stays in the conversation.
+{
+  const style = document.createElement("style");
+  style.textContent = `${themeCss({ scope: "#compose", prefix: "ui-", dataTheme: false })}\n${INLINE_FORM_CSS}`;
+  document.head.append(style);
+  const form = chatForms.create({
+    placeholder: "Type a message…",
+    openOnFocus: true,
+    submit: (text) => { if (sendComment(text, null, undefined, undefined, true)) form.clear(); },
+    escape: () => form.field.blur(),
+  });
+  $("compose").append(form.root);
+}
 
 // ── queued feedback ────────────────────────────────
 // Instant off (the lightning button right of the address bar): a turn is recorded (audio, pointer, clicks and
@@ -1635,6 +2020,8 @@ interface Queued {
   view: TurnView;
   /** A comment's text (it has no audio; it's sent on B). */
   comment?: string;
+  /** Typed in this thread's panel: the turn is the thread's, never queued, shown in the panel only. */
+  threadId?: string;
   /** Its element on the page (queuedAnchor), once computed; null when it points at nothing. */
   anchor?: ThreadAnchor | null;
   /** When it was queued (epoch ms). */
@@ -1660,7 +2047,7 @@ function queuedThreads(): ThreadInfo[] {
     if (!q.anchor) return [];
     const text = q.comment ?? (q.transcript?.text ? `“${q.transcript.text}”`
       : `Voice feedback, ${(recordedMs(q.rec) / 1000).toFixed(1)} s ${q.transcribing ? "(transcribing…)" : q.transcript ? "(no speech heard)" : "(transcribed when it's sent)"}`);
-    return [{ turnId: q.turnId, anchor: q.anchor, text, at: q.at ?? Date.now() }];
+    return [{ turnId: q.turnId, anchor: q.anchor, text, at: q.at ?? Date.now(), ...(q.view.annotation ? { annotation: q.view.annotation } : {}) }];
   }));
 }
 const queuedText = () => `${queue.length} queued; send ${queue.length === 1 ? "it" : "them"} with the arrow next to the address bar.`;
@@ -1728,7 +2115,7 @@ function removeQueued(q: Queued): void {
   queue.splice(i, 1);
   q.view.root.remove();
   views.delete(q.turnId);
-  if (!messages.querySelector(".turn, .job, .job-marker")) $("empty").hidden = false;
+  if (!messages.querySelector(".turn, .job, .job-row")) $("empty").hidden = false;
   publishQueue();
   setStatus(queue.length ? queuedText() : readyStatus());
 }
@@ -1739,7 +2126,7 @@ function dropRecording(t: Turn): void {
   endTurn(t);
   t.view.root.remove();
   views.delete(t.turnId);
-  if (!messages.querySelector(".turn, .job, .job-marker")) $("empty").hidden = false;
+  if (!messages.querySelector(".turn, .job, .job-row")) $("empty").hidden = false;
 }
 
 function stopSending(): void {
@@ -1752,6 +2139,7 @@ async function sendQueue(): Promise<void> {
   if (sending || !queue.length) return;
   if (!player) return setStatus("Click “Enable mic & audio” first.", true);
   if (isRecording()) return setStatus("Finish talking first, then send the queue.", true);
+  if (held.length || sendingHeld) return setStatus("Your comments are still being sent; send the list after them.", true);
   if (turn && !turn.finished) cancelTurn(turn, "interrupt");
   sending = true;
   publishQueue();
@@ -1782,12 +2170,12 @@ function replay(q: Queued): Promise<void> {
   // The queued bubble becomes the turn: moved to the end of the conversation.
   const comment = q.comment !== undefined;
   const v = q.view;
-  v.root.classList.remove("queued");
+  v.root.classList.remove("queued", "held");
   v.user.classList.add("pending");
   v.user.textContent = q.comment ?? "…";
   v.meta.replaceChildren();
   stampTime(v.root);
-  messages.append(v.root);
+  if (!q.threadId) messages.append(v.root);
   views.set(q.turnId, v);
   cancelled.delete(q.turnId);
 
@@ -1810,7 +2198,8 @@ function replay(q: Queued): Promise<void> {
     const msg = shiftMsg(r.msg, d);
     sock.send((msg.type === "turn.start" ? { ...msg, config: comment ? commentConfig() : config() } : msg) as ClientMsg);
   }
-  bridge.send({ type: "provisional", turnId: t.turnId });
+  const drawing = start?.msg.annotation && drawingAnchor(start.msg.annotation);
+  bridge.send({ type: "provisional", turnId: t.turnId, ...(drawing ? { anchor: drawing } : {}) });
   setStatus(queue.length ? `Thinking… (${queue.length} more queued)` : "Thinking…");
   refreshBusy();
   t.timeout = setTimeout(() => failTurn(t, "No reply from the server (timed out)."), TURN_TIMEOUT_MS);
@@ -1884,7 +2273,8 @@ sock.on((msg: ServerMsg) => {
       renderDecision(v, msg);
       t.intent = msg.intent;
       t.threadId = msg.threadId;
-      orbChanged();
+      t.background = msg.background;
+      refreshBusy();
       bridge.send({ type: "provisional.clear", turnId: t.turnId });
       sendTurnBubble(t, false);
       setStatus(msg.background ? "Working on it in the background; you can keep talking." : INTENT_STATUS[msg.intent]);
@@ -1923,13 +2313,14 @@ sock.on((msg: ServerMsg) => {
       break;
     case "turn.done": {
       const run = msg.run;
+      if (run.annotation) attachDrawing(v, run.annotation);
       const filled = !t.voice && !!run.voiceText; // no voice.text deltas came: the run has the reply
       if (filled) t.voice = run.voiceText;
       endTurn(t);
       if (t.auto && !hasSpokenWords(run.transcript)) {
         v.root.remove();
         views.delete(t.turnId);
-        if (!messages.querySelector(".turn, .job, .job-marker")) $("empty").hidden = false;
+        if (!messages.querySelector(".turn, .job, .job-row")) $("empty").hidden = false;
         setStatus(readyStatus());
         break;
       }
@@ -2008,7 +2399,7 @@ listen = mountAlwaysListen({
 });
 
 // The toolbar's mic mirrors the talk button (ready, red while a turn or dictation records) and the Always listen box.
-// Holding it reaches us as an external push-to-talk (main relays it on "ptt", like Shift in the browser pane).
+// Holding it reaches us as an external push-to-talk (main relays it on "ptt", like the talk key in the browser pane).
 function publishMic(): void {
   const ptt = $<HTMLButtonElement>("ptt");
   shell?.mic?.publish({ ready: !ptt.disabled, always: settings.alwaysListen, live: ptt.classList.contains("live"), threshold: settings.listenThreshold });
@@ -2034,7 +2425,7 @@ if (shell?.mic) {
   publishMic();
 }
 
-// One Shift while the meter holds the turn sends it. Held Shift (when the meter is idle) is still
+// One talk-key press while the meter holds the turn sends it. A held talk key (when the meter is idle) is still
 // push-to-talk, via bindPushToTalk on the bubble phase. Swallow this keydown so it doesn't also start a hold.
 window.addEventListener("keydown", (e) => {
   if (!meterTurn || e.repeat || !isPttKey(e) || isTypingTarget(e.target)) return;
@@ -2058,7 +2449,7 @@ bindPushToTalk({
     if (isRecording()) void release();
   },
   external: shell?.onPtt && ((down, up) => shell.onPtt!((d) => {
-    // Shift in the browser pane: one press sends a meter turn; a press while idle still holds to talk.
+    // The talk key in the browser pane: one press sends a meter turn; a press while idle still holds to talk.
     if (d && meterTurn) {
       meterTurn = false;
       listen?.disarm();
@@ -2085,12 +2476,12 @@ void enableAudio();
 // Live timers on running job cards, and the Stop button once queued audio has drained.
 setInterval(() => {
   for (const c of jobs.values()) if (c.info.state === "running") renderJob(c);
-  refreshBusy();
+  refreshBusy(); // also the tasks pill and the list's times
 }, TICK_MS);
 
 function clearConversation(): void {
   queueMicrotask(renderSessionCost);
-  messages.querySelectorAll(".turn:not(.queued), .job, .job-marker, .note").forEach((n) => n.remove());
+  messages.querySelectorAll(".turn:not(.queued), .job, .job-row, .note").forEach((n) => n.remove());
   centralAsking = false;
   centralFailed = false;
   views.clear();

@@ -1,10 +1,12 @@
 // Element threads: which element a turn is about (its anchor), and whether an existing thread is on that element.
 // Contract for docs/PLAN-threads.md. Unit tested in anchor.test.ts.
+import type { DrawingAnnotation } from "./annotations.ts";
 import { tagFromPath } from "./pointing.ts";
 import type { CursorRest, CursorSample, ElementDetails, PageClick, PointingTarget, Word } from "./protocol.ts";
 import { normalizePageUrl, type ThreadAnchor, type ThreadInfo } from "./threads.ts";
 
 export interface AnchorInput {
+  annotation?: DrawingAnnotation;
   words: Word[];
   /** Resolved pointing targets of the turn (TurnBase.pointing). */
   pointing: PointingTarget[];
@@ -60,6 +62,7 @@ function detailsFor(s: CursorSample, input: AnchorInput): { details: ElementDeta
  * pointing target's sample, else the last sample on an element. Null when the user pointed at nothing.
  */
 export function inferAnchor(input: AnchorInput): ThreadAnchor | null {
+  if (input.annotation) return drawingAnchor(input.annotation);
   const s = dominantSample(input);
   if (!s?.elementPath) return null;
   const found = detailsFor(s, input);
@@ -79,6 +82,46 @@ export function inferAnchor(input: AnchorInput): ThreadAnchor | null {
       ? { x: d.bounds.x + at.scrollX, y: d.bounds.y + at.scrollY, width: d.bounds.width, height: d.bounds.height }
       : { x: s.x + s.scrollX, y: s.y + s.scrollY, width: 0, height: 0 },
     point: { x: s.x + s.scrollX, y: s.y + s.scrollY },
+  };
+}
+
+/** Prefer the smallest captured element containing the center, otherwise the nearest element. */
+export function drawingMarkerSample(samples: readonly CursorSample[], point: { x: number; y: number }): CursorSample | undefined {
+  const ranked = samples.filter(s => s.elementPath && s.details).map(sample => {
+    const b = sample.details!.bounds;
+    const x = b.x + sample.scrollX, y = b.y + sample.scrollY;
+    const distance = Math.hypot(Math.max(x - point.x, 0, point.x - x - b.width), Math.max(y - point.y, 0, point.y - y - b.height));
+    return { sample, distance, area: b.width * b.height };
+  });
+  ranked.sort((a, b) => a.distance - b.distance || a.area - b.area);
+  return ranked[0]?.sample;
+}
+
+/** Start at the drawing's bounding-box center, then follow its captured element. */
+export function drawingAnchor(annotation: DrawingAnnotation): ThreadAnchor | null {
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const stroke of annotation.strokes) {
+    for (const point of stroke.points) {
+      left = Math.min(left, point.x);
+      top = Math.min(top, point.y);
+      right = Math.max(right, point.x);
+      bottom = Math.max(bottom, point.y);
+    }
+  }
+  if (!Number.isFinite(left)) return null;
+  const x = left + annotation.viewport.scrollX, y = top + annotation.viewport.scrollY;
+  const width = right - left, height = bottom - top;
+  const point = { x: x + width / 2, y: y + height / 2 };
+  const sample = annotation.markerSample ?? drawingMarkerSample(annotation.targetSamples, point);
+  if (sample?.elementPath) {
+    const anchor = inferAnchor({ words: [], pointing: [], rests: [], samples: [sample], pageUrl: annotation.pageUrl });
+    if (anchor) return { ...anchor, kind: "drawing", point };
+  }
+  return {
+    kind: "drawing", pageUrl: normalizePageUrl(annotation.pageUrl),
+    selector: "", domPath: `drawing:${annotation.id}`, dataSource: null,
+    label: null, text: null, role: null, tag: "drawing",
+    bounds: { x, y, width, height }, point: { x: x + width / 2, y: y + height / 2 },
   };
 }
 
@@ -140,6 +183,7 @@ function shortName(s: string): string {
 
 /** Short spoken name for an anchor: "the red button", "the footer links" (from label / text / role / tag). */
 export function anchorTitle(anchor: ThreadAnchor): string {
+  if (anchor.kind === "drawing") return "the drawing";
   const noun = (anchor.role && ROLE_NOUN[anchor.role.toLowerCase()]) || TAG_NOUN[anchor.tag.toLowerCase()] || null;
   if (noun && LANDMARKS.has(noun)) return `the ${noun}`;
   const name = (anchor.label?.trim() || anchor.text?.trim() || "");

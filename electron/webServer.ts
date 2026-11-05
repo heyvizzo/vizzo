@@ -1,6 +1,6 @@
 // The packaged app's stand-in for Vite (electron/main.ts startWebApp): serves the built pages (dist/, `vite build`)
 // and passes /api and the /ws WebSocket on to the voice server, as vite.config.ts's proxy does in development. The
-// voice server only starts once a project folder is chosen; until then /api answers 502, like Vite's proxy.
+// voice server starts at launch; until it's listening /api answers 502, like Vite's proxy.
 import { createServer, request, type Server } from "node:http";
 import { connect } from "node:net";
 import { readFile } from "node:fs/promises";

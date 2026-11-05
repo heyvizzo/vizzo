@@ -1,8 +1,9 @@
 // Electron app: a browser pane on the left (address bar + the page) and the voice chat as a sidebar on the right.
 // The chat UI is served by Vite inside the app (chat.html) — there is no standalone website; the packaged app serves
 // the built pages instead (webServer.ts). The voice server runs in a utilityProcess on a free local port and Vite
-// (or webServer.ts) proxies /api and /ws to it. The server only starts once a
-// project folder is chosen, and it gets the browser pane's URL with every page change (it goes into each turn's context).
+// (or webServer.ts) proxies /api and /ws to it. The server starts at launch, before a project folder is chosen (its
+// agents wait in an empty temp folder until then), and it gets the browser pane's URL with every page change (it goes
+// into each turn's context).
 import {
   app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, nativeTheme, safeStorage, screen, shell, systemPreferences, utilityProcess,
   type IpcMainEvent, type IpcMainInvokeEvent, type UtilityProcess, type WebContents,
@@ -22,6 +23,7 @@ import { LEGACY_NAMES, legacySecrets, moveLegacyDir } from "./rename.ts";
 import { loginShellPath, mergePath } from "./shellPath.ts";
 import { chromeKeychainAccess, fullDiskAccess, fullDiskRow, keychainRow, microphoneRow, type PermissionRow } from "./permissions.ts";
 import { THEME } from "../shared/theme.ts";
+import { endsHold, fromElectronInput, hotkeys, matchesDown, onHotkeys, setHotkeys } from "../shared/hotkeys.ts";
 
 const TOOLBAR_HEIGHT = 44;
 const SIDEBAR_WIDTH = 480;
@@ -32,7 +34,7 @@ const MIN_PANE_WIDTH = 360;
 const DIVIDER_WIDTH = 7;
 /** The top-right bar's width while the sidebar is hidden: just the button that shows the sidebar again. */
 const COLLAPSED_BAR_WIDTH = 56;
-const HOME_PAGE = "https://duckduckgo.com/";
+const HOME_PAGE = "https://heyvizzo.com/";
 const ROOT = join(__dirname, "..");
 const APP_NAME = "Vizzo";
 // Electron names the settings folder after package.json's name, which `npm run dev` uses too: the packaged app keeps
@@ -167,8 +169,19 @@ async function permissionStatuses(): Promise<PermissionRow[]> {
   ];
 }
 
-function openSettings() {
+/** The chat sidebar's attention list (web/chat/attention.ts) should be fetched again. */
+function attentionChanged(): void {
+  sidebar?.webContents.send("attention:changed");
+}
+
+/** Settings' sections (web/settings/attention.ts SECTIONS): the one it opens at, named in its URL hash. */
+const SETTINGS_SECTIONS = ["dashboard", "models", "stt", "tts", "keyboard", "permissions", "debugging", "cookies", "keys"];
+
+function openSettings(section?: string) {
+  const hash = section && SETTINGS_SECTIONS.includes(section) ? `#${section}` : "";
   if (settingsWin && !settingsWin.isDestroyed()) {
+    // Settings follows its hash (hashchange) to the section.
+    if (hash) void settingsWin.webContents.executeJavaScript(`location.hash = ${JSON.stringify(hash)}`).catch(() => {});
     settingsWin.focus();
     return;
   }
@@ -190,7 +203,7 @@ function openSettings() {
   settingsWin.on("closed", () => { settingsWin = null; });
   // A Vite page (web/settings.html), like the chat: it shares the chat's settings code and asks the server for voices and models.
   const w = settingsWin;
-  void webAppBase().then((base) => { if (!w.isDestroyed()) void w.loadURL(`${base}settings.html`); }, (err: unknown) => console.error(err));
+  void webAppBase().then((base) => { if (!w.isDestroyed()) void w.loadURL(`${base}settings.html${hash}`); }, (err: unknown) => console.error(err));
 }
 
 /** A JSON object's fields; {} for anything else. */
@@ -287,11 +300,24 @@ function webAppBase(): Promise<string> {
   return webApp;
 }
 
-/** Starts the server for the chosen folder, then puts the chat in the sidebar. Runs once. */
+let voiceStart: Promise<void> | null = null;
+/**
+ * Starts the voice server, once: at launch, with or without a project folder. Without one its agents wait in an
+ * empty temp folder (server/adapters/claudeCli.ts EMPTY_CWD), so Settings can scan the harnesses, list the models
+ * and load the speech engines before a folder is chosen, and the first run picks its models (server/llmSelection.ts).
+ */
+function startVoiceServer(): Promise<void> {
+  voiceStart ??= webAppBase().then(() => startServer(serverPort));
+  return voiceStart;
+}
+
+let chatShown = false;
+/** Puts the chat in the sidebar (in place of the gate) once a project folder is chosen. Runs once. */
 async function startBackend() {
-  if (server) return;
+  if (chatShown) return;
+  chatShown = true;
   const base = await webAppBase();
-  await startServer(serverPort);
+  await startVoiceServer();
   sidebar?.webContents.loadURL(`${base}chat.html`);
   reportPage(browser?.webContents ?? null);
 }
@@ -423,23 +449,45 @@ function toggleInspector() {
 // Comment mode (the toolbar's pointer button): kept here, shown in the toolbar, applied by the browser pane
 // (web/cursor/commentOverlay.ts), whose bubble talks to the chat sidebar.
 let commentMode = false;
-/** Comment mode is on only while Caps Lock is held (it was off when the key went down). */
+let drawingMode = false;
+let drawingDisabledReason: string | null = "Loading model settings…";
+let drawingPreviewIsOpen = false;
+function setDrawingMode(on: boolean) {
+  if (on && drawingDisabledReason !== null) return;
+  if (on && commentMode) setCommentMode(false);
+  drawingMode = on;
+  toolbar?.webContents.send("drawing:state", on);
+  browser?.webContents.send("page:drawing-mode", on);
+  if (on) browser?.webContents.focus();
+}
+/** Comment mode is on only while the comment key is held (it was off when the key went down). */
 let commentHeld = false;
-/** keepDraft: an empty bubble stays open (letting go of Caps Lock after clicking an element). */
+let commentHeldAt = 0;
+/** A comment-key press shorter than this is a tap: comment mode stays on. */
+const COMMENT_TAP_MS = 300;
+/** keepDraft: an empty bubble stays open (letting go of the comment key after clicking an element). */
 function setCommentMode(on: boolean, keepDraft = false) {
+  if (on && drawingMode) setDrawingMode(false);
   commentHeld = false;
   commentMode = on;
   toolbar?.webContents.send("comment:state", commentMode);
   browser?.webContents.send("page:comment-mode", commentMode, keepDraft);
 }
-/** Holding Caps Lock while comment mode is off turns it on until the key comes up, wherever focus is. */
-function holdCommentKey(input: Electron.Input) {
-  if (input.key !== "CapsLock" || input.isAutoRepeat) return;
-  if (input.type === "keyDown" && !commentMode) {
+/**
+ * The comment key (Settings → Keyboard, Ctrl+M by default), wherever focus is: a tap turns comment mode on or off;
+ * held while it was off, it's on until the key comes up.
+ */
+function commentKey(input: Electron.Input) {
+  if (input.isAutoRepeat) return;
+  const hk = hotkeys().comment;
+  if (input.type === "keyDown" && matchesDown(fromElectronInput(input), hk)) {
+    if (commentMode) return setCommentMode(false);
     setCommentMode(true);
     commentHeld = true;
-  } else if (input.type === "keyUp" && commentHeld) {
-    setCommentMode(false, true);
+    commentHeldAt = Date.now();
+  } else if (input.type === "keyUp" && commentHeld && endsHold(input, hk)) {
+    if (Date.now() - commentHeldAt < COMMENT_TAP_MS) commentHeld = false;
+    else setCommentMode(false, true);
   }
 }
 
@@ -511,19 +559,22 @@ function createWindow() {
   // the key still reaches that view. The page handles its own Esc (an empty bubble closes first).
   for (const view of [toolbar, sidebar]) {
     view.webContents.on("before-input-event", (_e, input) => {
+      if (drawingMode && input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat) setDrawingMode(false);
       if (commentMode && input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat) setCommentMode(false);
     });
   }
-  for (const view of [toolbar, sidebar, browser]) view.webContents.on("before-input-event", (_e, input) => holdCommentKey(input));
+  for (const view of [toolbar, sidebar, browser]) view.webContents.on("before-input-event", (_e, input) => commentKey(input));
   // Esc stops the voice wherever focus is (three in a row ask to stop its task too): the sidebar handles its own Esc,
   // the browser pane's and the toolbar's are relayed (the key still reaches the page, so its own Esc works as before).
   for (const view of [toolbar, browser]) {
     view.webContents.on("before-input-event", (_e, input) => {
-      if (input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat) sidebar?.webContents.send("escape");
+      if (input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat && !drawingPreviewIsOpen) sidebar?.webContents.send("escape");
     });
   }
   // The key can come up in another app: a held mode ends when the window loses focus.
   win.on("blur", () => { if (commentHeld) setCommentMode(false, true); });
+  // Back from System Settings (a permission granted): the sidebar checks what still needs attention.
+  win.on("focus", attentionChanged);
 
   const wc = browser.webContents;
   addInspect(wc, true);
@@ -533,16 +584,20 @@ function createWindow() {
     wc.loadURL(url);
     return { action: "deny" };
   });
-  for (const ev of ["did-navigate", "did-navigate-in-page"] as const) {
-    wc.on(ev, () => { reportPage(wc); saveLastUrl(wc.getURL()); sendPageUrl(); });
-  }
-  for (const ev of ["did-navigate", "did-navigate-in-page", "page-title-updated", "did-start-loading", "did-stop-loading"] as const) {
-    wc.on(ev, () => sendState(wc));
-  }
+  const navigated = () => { drawingPreviewIsOpen = false; setDrawingMode(false); wc.send("page:drawing-clear"); reportPage(wc); saveLastUrl(wc.getURL()); sendPageUrl(); };
+  wc.on("did-navigate", navigated);
+  wc.on("did-navigate-in-page", navigated);
+  const navigationState = () => sendState(wc);
+  wc.on("did-navigate", navigationState);
+  wc.on("did-navigate-in-page", navigationState);
+  wc.on("page-title-updated", navigationState);
+  wc.on("did-start-loading", navigationState);
+  wc.on("did-stop-loading", navigationState);
   toolbar.webContents.once("did-finish-load", () => sendState(wc));
   wc.loadURL(loadLastUrl());
 
-  // Until a folder is chosen, the sidebar shows the gate instead of the chat.
+  // The voice server starts either way; until a folder is chosen, the sidebar shows the gate instead of the chat.
+  void startVoiceServer().catch(fail);
   if (projectFolder) void startBackend().catch(fail);
   else sidebar.webContents.loadFile(join(__dirname, "shell", "gate.html"));
 }
@@ -553,8 +608,10 @@ function createWindow() {
 async function setProjectFolder(dir: string) {
   projectFolder = dir;
   saveProjectFolder(dir);
-  if (server) server.postMessage({ type: "project", dir });
-  else await startBackend();
+  // Started at launch (maybe without a folder, or still starting): it gets the folder once it's listening.
+  await startVoiceServer();
+  server?.postMessage({ type: "project", dir });
+  await startBackend();
   sidebar?.webContents.send("project-changed", projectFolder);
 }
 
@@ -659,25 +716,45 @@ function registerIpc() {
     return clearCookies();
   });
   ipcMain.handle("project:pick", () => pickProjectFolder());
-  ipcMain.handle("settings:open", (e) => {
+  ipcMain.handle("settings:open", (e, section: unknown) => {
     if (e.sender !== folderBar?.webContents && e.sender !== sidebar?.webContents) return;
-    openSettings();
+    openSettings(typeof section === "string" ? section : undefined);
+  });
+  // What needs attention, for the chat sidebar (web/chat/attention.ts): the permissions, which keys are set (never
+  // their values) and their labels, and the keys macOS wouldn't decrypt. It's told when Settings changes any of them.
+  ipcMain.handle("attention:get", (e) => {
+    if (!sidebar || e.sender !== sidebar.webContents) return null;
+    const { values, unreadable } = storedEnv();
+    return {
+      // The required ones only (the Chrome keychain is optional, and checking it runs Swift): cheap, so it's
+      // asked again each time the window comes back into focus (after System Settings).
+      permissions: [microphoneRow(systemPreferences.getMediaAccessStatus("microphone")), fullDiskRow(fullDiskAccess())],
+      set: Object.keys(values).filter((k) => values[k]?.trim()),
+      labels: Object.fromEntries(ENV_FIELDS.map((f) => [f.key, f.label])),
+      unreadable,
+    };
   });
   ipcMain.handle("settings:get", (e) => {
     if (!fromSettings(e)) return null;
     const { values, unreadable } = storedEnv();
     return permissionStatuses().then((permissions) => ({ permissions, fields: ENV_FIELDS, values, unreadable }));
   });
-  ipcMain.handle("settings:refresh", (e) => (fromSettings(e) ? permissionStatuses() : []));
+  ipcMain.handle("settings:refresh", (e) => {
+    if (!fromSettings(e)) return [];
+    attentionChanged();
+    return permissionStatuses();
+  });
   ipcMain.handle("settings:allow-microphone", async (e) => {
     if (!fromSettings(e)) return [];
     await systemPreferences.askForMediaAccess("microphone");
+    attentionChanged();
     return permissionStatuses();
   });
   // Reading Chrome's Safe Storage password is what shows the macOS keychain prompt; a refusal just re-checks.
   ipcMain.handle("settings:allow-keychain", async (e) => {
     if (!fromSettings(e)) return [];
     await chromeSafeStoragePassword().catch(() => undefined);
+    attentionChanged();
     return permissionStatuses();
   });
   ipcMain.handle("settings:open-privacy", (e, pane: unknown) => {
@@ -693,6 +770,7 @@ function registerIpc() {
     saveEnv(env);
     applyEnv(env);
     server?.postMessage({ type: "env", env });
+    attentionChanged();
   });
   ipcMain.on("sidebar:toggle", (e) => {
     if (folderBar && e.sender === folderBar.webContents) toggleSidebar();
@@ -765,7 +843,12 @@ function registerIpc() {
     const merged = JSON.stringify({ ...jsonObject(readSettings().chat), ...jsonObject(json) });
     saveSettings({ chat: merged });
     if (fromSettings(e)) sidebar?.webContents.send("chat-settings:changed", merged);
+    setHotkeys(jsonObject(merged).hotkeys);
   });
+  // The keyboard shortcuts (shared/hotkeys.ts), saved with the chat's settings: the preloads read them at load and
+  // hear each change (the sidebar's page has them from its settings).
+  ipcMain.on("hotkeys:get", (e) => { e.returnValue = hotkeys(); });
+  onHotkeys((hk) => { for (const view of [toolbar, folderBar, browser, sidebar]) view?.webContents.send("hotkeys", hk); });
   ipcMain.handle("page:url", (e) => (fromSidebar(e) ? browser?.webContents.getURL() || null : null));
   ipcMain.on("page:thread", (e, action: unknown) => {
     if (fromPage(e)) sidebar?.webContents.send("page:thread", action);
@@ -792,6 +875,26 @@ function registerIpc() {
     if (!fromToolbar(e) && !fromFolderBar(e)) return;
     sidebar?.webContents.send("ptt", down === true);
     if (down !== true && !sidebarHidden && win?.isFocused()) sidebar?.webContents.focus();
+  });
+  ipcMain.on("page:drawing-preview", (e, on: unknown) => {
+    if (fromPage(e)) drawingPreviewIsOpen = on === true;
+  });
+  ipcMain.handle("drawing:get", (e) => (fromToolbar(e) || fromPage(e) ? drawingMode : null));
+  ipcMain.handle("drawing:disabled-reason:get", (e) => (fromToolbar(e) ? drawingDisabledReason : null));
+  ipcMain.on("drawing:disabled-reason", (e, reason: unknown) => {
+    if (!fromSidebar(e) || !(reason === null || (typeof reason === "string" && reason.length > 0 && reason.length <= 500))) return;
+    drawingDisabledReason = reason;
+    if (reason !== null && drawingMode) setDrawingMode(false);
+    toolbar?.webContents.send("drawing:disabled-reason", reason);
+  });
+  ipcMain.on("drawing:mode", (e, on: unknown) => {
+    if (fromToolbar(e) || fromPage(e)) setDrawingMode(on === true);
+  });
+  ipcMain.handle("page:drawing-capture", async (e) => {
+    if (!fromPage(e) || !drawingMode || !browser) return null;
+    tooltip?.setVisible(false);
+    const capture = await e.sender.capturePage();
+    return capture.toDataURL();
   });
   ipcMain.handle("comment:get", (e) => (fromToolbar(e) || fromPage(e) ? commentMode : null));
   ipcMain.on("comment:mode", (e, on: unknown) => {
@@ -905,6 +1008,7 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 app.whenReady().then(() => {
   // Opened from Finder, the PATH lacks the user's tools (the harness CLIs, node, uv, Homebrew): take the login shell's.
   if (app.isPackaged) process.env.PATH = mergePath(loginShellPath(), process.env.PATH ?? "");
+  setHotkeys(jsonObject(readSettings().chat).hotkeys);
   registerIpc();
   buildMenu();
   applyEnv(storedEnv().values);

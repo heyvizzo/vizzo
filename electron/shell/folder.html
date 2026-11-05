@@ -58,7 +58,7 @@
     const settings = document.getElementById("settings");
     const sidebar = document.getElementById("sidebar");
     settings.onclick = () => shell.openSettings();
-    shell.bindShiftPtt(); // Shift is push-to-talk here too
+    shell.bindTalkKey(); // the talk key is push-to-talk here too
     sidebar.onclick = () => shell.toggleSidebar();
     shell.onSidebarHidden((hidden) => {
       settings.hidden = hidden;

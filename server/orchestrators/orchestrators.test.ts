@@ -27,7 +27,7 @@ function harness(config: Partial<RunConfig>, connection = new ConnectionState())
   const marks: { name: MarkName; meta?: Record<string, unknown> }[] = [];
   const ctx: TurnContext = {
     turnId: "t1",
-    config: { ...DEFAULT_CONFIG, ...config },
+    config: { ...DEFAULT_CONFIG, ttsModel: "eleven_v4_turbo", sttModel: "scribe_v2", ...config },
     mark: (name, meta) => { marks.push({ name, meta }); },
     send: (m) => events.push(m),
     sendAudio: (b) => events.push({ type: "audio", bytes: b.length }),

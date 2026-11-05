@@ -1,3 +1,5 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
+import { attachmentSummary, drawingContext, redactImagePayloads } from "./drawing.ts";
 // The model tiers' three jobs: the router and the progress lines (fast tier, the router's job) and the solver
 // (smart tier, the solver's job), each run on a warm harness agent (warmPool.ts / harnesses.ts) chosen per tier in
 // RunConfig.llm. The fast tier can instead call a model API directly (llmApi.ts), with the same prompts. The router and the progress lines write their answer as one JSON object in text (no tool
@@ -17,6 +19,7 @@ import { describeAgent, type HarnessResult } from "./harnesses.ts";
 import { agentSpec, harnessRequest, registerRoleSpecs, ROLE_TIER } from "./warmPool.ts";
 import { apiRequest, describeApi } from "./llmApi.ts";
 import { projectDir } from "../project.ts";
+import { gitContext } from "../gitContext.ts";
 import { SERVER_DIR } from "../paths.ts";
 import { FISH_ACK_CUES, FISH_FILLER_CUES, FISH_SOLVER_CUES } from "./voiceCues.ts";
 
@@ -31,7 +34,18 @@ export const ROLE_TIMEOUT_MS: Record<CliRole, number> = { router: 30_000, filler
 
 export interface ChatMessage { role: "user" | "assistant"; content: string }
 /** The messages of one request. A harness gets them flattened into one user message (`flattenMessages`). */
-export interface ChatParams { messages: ChatMessage[] }
+export interface ChatParams { messages: ChatMessage[]; annotations?: readonly DrawingAnnotation[] }
+
+function attachDrawing(params: ChatParams, annotation?: DrawingAnnotation, history: ChatTurn[] = []): ChatParams {
+  const all = [...history.flatMap(t => t.annotation ? [t.annotation] : []), ...(annotation ? [annotation] : [])];
+  const seen = new Set<string>();
+  const images = all.reverse().filter(a => { if (seen.has(a.id)) return false; seen.add(a.id); return true; }).slice(0, 4).reverse();
+  if (!images.length) return params;
+  const last = params.messages.at(-1);
+  if (last) last.content += `${annotation ? `\n\n${drawingContext(annotation)}` : ""}\n\nAttached images, in order: ${images.map(a => a.id).join(", ")}. Match image IDs to the drawing context in this conversation.`;
+  params.annotations = images;
+  return params;
+}
 
 /** The request's messages as one user message: earlier turns as a transcript, then this turn. */
 export function flattenMessages(params: ChatParams): string {
@@ -62,7 +76,7 @@ export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: Chat
       target: role, model: `${choice.model || "no model"} via ${LLM_PROVIDER_LABELS[provider]}`,
       system: [{ label: ROLE_PROMPT_LABEL[role], text: roleSystem(role, provider).system }],
       messages: params.messages.map((m, i) => ({ role: m.role, text: m.content, ...(i === params.messages.length - 1 ? { label: "this turn" } : {}) })),
-      settings: { api: LLM_PROVIDER_LABELS[provider], ...(choice.level ? { level: choice.level } : {}), run: describeApi(provider, choice) },
+      settings: { ...(params.annotations?.length ? { attachments: attachmentSummary(params.annotations) } : {}), api: LLM_PROVIDER_LABELS[provider], ...(choice.level ? { level: choice.level } : {}), run: describeApi(provider, choice) },
     };
   }
   const spec = agentSpec(role, choice);
@@ -71,6 +85,7 @@ export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: Chat
     system: [{ label: ROLE_PROMPT_LABEL[role] + (spec.project ? " + project note" : ""), text: spec.system }],
     messages: [{ role: "user", text: flattenMessages(params), label: "this turn (earlier turns flattened in)" }],
     settings: {
+      ...(params.annotations?.length ? { attachments: attachmentSummary(params.annotations) } : {}),
       harness: LLM_PROVIDER_LABELS[spec.harness], ...(spec.level ? { level: spec.level } : {}), ...(spec.speed ? { speed: spec.speed } : {}),
       ...(spec.project ? { cwd: spec.project } : {}), run: describeAgent(spec),
     },
@@ -87,7 +102,7 @@ export function harnessResponseInfo(target: LlmPrompt["target"], t0: number, r: 
     billing: own?.billing ?? "subscription",
     durationMs: Math.round(performance.now() - t0),
     raw: {
-      ...(typeof r.raw === "object" && r.raw ? r.raw as object : { raw: r.raw }), warmAgent: r.warm,
+      ...(typeof r.raw === "object" && r.raw ? redactImagePayloads(r.raw) as object : { raw: redactImagePayloads(r.raw) }), warmAgent: r.warm,
       ...(choice.speed === "fast" && speed && speed !== "fast" ? { speedNote: `fast requested, served ${speed}` } : {}),
     },
   };
@@ -95,7 +110,7 @@ export function harnessResponseInfo(target: LlmPrompt["target"], t0: number, r: 
 
 /** A failed call as a debug response. */
 export function errorResponseInfo(target: LlmPrompt["target"], t0: number, err: unknown): LlmResponse {
-  return { target, durationMs: Math.round(performance.now() - t0), error: err instanceof Error ? err.message : String(err) };
+  return { target, durationMs: Math.round(performance.now() - t0), error: redactImagePayloads(err instanceof Error ? err.message : String(err)) as string };
 }
 
 // ── Spoken language ─────────────────────────────────────────────────────────
@@ -123,7 +138,7 @@ const FILLERS_FORMAT = `
 Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…", "…", "…"], "cut_in": "…"}`;
 
 /** Added to the solver's system prompt when it works in the project folder (Claude Code's tool names). */
-const PROJECT_NOTE = `Your working directory is the project you're answering about. Find the code behind the pointed elements with Glob, Grep and Read: start from the \`selector\` line (tag, ids, classes, text), then read the markup, CSS and script that render it, and the project's DECISIONS.md. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, make the change with Edit or Write, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`;
+const PROJECT_NOTE = `Your working directory is the project you're answering about. Find the code behind the pointed elements with Glob, Grep and Read: start from the \`selector\` line (tag, ids, classes, text), then read the markup, CSS and script that render it, and the project's DECISIONS.md. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, make the change with Edit or Write, keep it to what was asked, and read the file back to check it. Never read or edit .env files. Without a shell you can't run git, and the files under .git/ are compressed: don't read them or hunt for other copies of a file. Use the request's git state block (status, recent commits, uncommitted changes), and say plainly when an answer needs history it doesn't show.`;
 /** Added to the solver's system prompt when there's no project folder (no tools). */
 const NO_TOOLS_NOTE = `You have no tools in this session: no files, no shell, no web. Answer from the request and the conversation alone, in the format above, and never write a tool call.`;
 /** PROJECT_NOTE for the other harnesses (their file tools have other names). */
@@ -173,8 +188,8 @@ function fastRequest(
 ): Promise<HarnessResult> {
   const provider = choice.provider;
   return isApiProvider(provider)
-    ? apiRequest(provider, choice, { system: roleSystem(role, provider).system, messages: params.messages }, onText, timeoutMs)
-    : harnessRequest(role, choice, flattenMessages(params), onText, timeoutMs);
+    ? apiRequest(provider, choice, { system: roleSystem(role, provider).system, messages: params.messages, annotations: params.annotations }, onText, timeoutMs)
+    : harnessRequest(role, choice, flattenMessages(params), onText, timeoutMs, undefined, params.annotations);
 }
 
 export class ClaudeRefusalError extends Error {
@@ -231,7 +246,7 @@ export interface RouterInput { intent: RouteIntent; estimateS: number | null; sa
 /** Earlier chat turns as alternating user/assistant messages (never empty content). */
 export function historyMessages(history: ChatTurn[], forSolver: boolean): ChatMessage[] {
   return history.flatMap((t): ChatMessage[] => [
-    { role: "user", content: t.user || "(inaudible)" },
+    { role: "user", content: (t.user || "(inaudible)") + (t.annotation ? `\n\n${drawingContext(t.annotation)}` : "") },
     {
       role: "assistant",
       // The solver answers in the SPOKEN:-first format; replay its own detailed answer when it gave one.
@@ -282,10 +297,21 @@ export function formatThreadBriefs(threads: readonly ThreadBrief[]): string {
 }
 
 /** The threads block of the turn's message: rules, the pointed element, the threads, the output format. */
-export function threadsBlock(threads: readonly ThreadBrief[], anchorLabel?: string): string {
+export function threadsBlock(
+  threads: readonly ThreadBrief[], anchorLabel?: string, extra: { clicked?: boolean; typed?: boolean; chat?: boolean; panel?: string } = {},
+): string {
+  const where = extra.chat
+    ? [`The user typed this in the conversation's message box and is not pointing at anything. It stays in the conversation: target is "central", even when it is about a thread (answer from the threads below, or use \`tell\` to read a thread's finished result). Never a thread id and never "new".`]
+    : extra.typed
+    ? [`The user typed this on the clicked element and did not speak. The marker stays on that click: target is "new" or that element's thread id. Do not target a different thread and do not use "central".`]
+    : [
+      ...(extra.panel ? [`The user is speaking with ${extra.panel}'s panel open. The turn stays on that thread: target is that thread's id.`] : []),
+      ...(extra.clicked ? [`The user clicked this element while speaking. Place a marker on it (target "new" or its thread) unless they name a different existing thread.`] : []),
+    ];
   return [
     prompts().routerThreads,
     `Pointed element this turn: ${anchorLabel ?? "none"}.`,
+    ...where,
     formatThreadBriefs(threads),
     THREADS_FORMAT,
   ].join("\n\n");
@@ -293,7 +319,7 @@ export function threadsBlock(threads: readonly ThreadBrief[], anchorLabel?: stri
 
 export function buildRouterParams(
   transcript: string, pointing: PointingTarget[], mode: RouterMode, history: ChatTurn[] = [],
-  extra: { pageContext?: string; longTaskSeconds?: number; language?: string; voiceCues?: boolean; threads?: ThreadBrief[]; anchorLabel?: string } = {},
+  extra: { pageContext?: string; longTaskSeconds?: number; language?: string; voiceCues?: boolean; threads?: ThreadBrief[]; anchorLabel?: string; clicked?: boolean; typed?: boolean; chat?: boolean; panel?: string } = {},
 ): ChatParams {
   // Per-turn context goes in the user message so the system prompt stays the same (warm agents start with it).
   const lines = [`${MODE_LINE[mode]}`, `Transcript: "${transcript}"`, formatPointingForPrompt(pointing)];
@@ -304,7 +330,7 @@ export function buildRouterParams(
   if (extra.longTaskSeconds !== undefined && extra.longTaskSeconds !== DEFAULT_LONG_TASK_SECONDS) {
     lines.push(`Long-task threshold for this conversation: ${extra.longTaskSeconds} seconds (use it instead of ${DEFAULT_LONG_TASK_SECONDS}).`);
   }
-  if (extra.threads) lines.push("", threadsBlock(extra.threads, extra.anchorLabel));
+  if (extra.threads) lines.push("", threadsBlock(extra.threads, extra.anchorLabel, { clicked: extra.clicked, typed: extra.typed, chat: extra.chat, panel: extra.panel }));
   return { messages: [...historyMessages(history, false), { role: "user", content: lines.join("\n") }] };
 }
 
@@ -322,10 +348,10 @@ function validateThreadsInput(v: unknown, ctx: ThreadRouteContext): RouterInput 
 
 export const routeTurn: RouteTurn = async ({
   mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, voiceCues, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, llm,
-  threads, anchorLabel,
+  threads, anchorLabel, clicked, typed, chat, panel, annotation,
 }) => {
   const choice = choiceFor(llm, "router");
-  const params = buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language, voiceCues, threads, anchorLabel });
+  const params = attachDrawing(buildRouterParams(transcript, pointing, mode, history, { pageContext, longTaskSeconds, language, voiceCues, threads, anchorLabel, clicked, typed, chat, panel }), annotation, history);
   onPrompt?.(harnessPromptInfo("router", choice, params));
   const ctx: ThreadRouteContext | null = threads
     ? { threadIds: threads.map((t) => t.threadId), pointed: !!anchorLabel, forced: mode === "forced" }
@@ -502,7 +528,7 @@ export function buildSolverParams(
   };
 }
 
-export const solveTask: SolveTask = async ({ mark, question, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs }) => {
+export const solveTask: SolveTask = async ({ mark, question, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation }) => {
   const t0 = performance.now();
   const choice = choiceFor(llm, "solver");
   let text = "";
@@ -513,7 +539,9 @@ export const solveTask: SolveTask = async ({ mark, question, pointing, history, 
     mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-  const params = buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues);
+  const params = attachDrawing(buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues), annotation, history);
+  const git = await gitContext(projectDir());
+  if (git) params.messages.at(-1)!.content += `\n\n${git}`;
   onPrompt?.(harnessPromptInfo("solver", choice, params));
   mark("solver.request", {
     model: choice.model, backend: choice.provider, fast: choice.speed === "fast",
@@ -525,13 +553,13 @@ export const solveTask: SolveTask = async ({ mark, question, pointing, history, 
     onDelta(d);
     parser.feed(d);
   };
-  // Harnesses other than Claude Code narrate before using their tools ("I'll check the CSS…"): that text is
-  // dropped up to the SPOKEN: line.
-  const gate = choice.provider !== "claude-code" && projectDir() ? new NarrationGate(onText) : null;
+  // Every harness can narrate before its final answer, including Claude Code.
+  // Hold that narration so the fallback parser cannot announce it as the result.
+  const gate = new NarrationGate(onText);
   let res: HarnessResult;
   try {
-    res = await harnessRequest("solver", choice, flattenMessages(params), gate ? (d) => gate.feed(d) : onText, timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal);
-    gate?.end();
+    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations);
+    gate.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));
     throw err;
@@ -566,7 +594,7 @@ function pointedTail(pointing: PointingTarget[], pageContext?: string, language?
  * is a system note to act on.
  */
 export function threadUserMessage(
-  kind: "request" | "followup" | "correction" | "reconcile", question: string, pointing: PointingTarget[], intent: Intent = "question",
+  kind: "request" | "followup" | "correction" | "reconcile" | "direct", question: string, pointing: PointingTarget[], intent: Intent = "question",
   pageContext?: string, language?: string, voiceCues = false,
 ): string {
   const tail = pointedTail(pointing, pageContext, language, voiceCues);
@@ -576,6 +604,8 @@ export function threadUserMessage(
       return intent === "task"
         ? `Follow-up on the same element (more feedback from the user; build on what you did so far). Request type: TASK: make the change and report it in the task format.\n\nTask: ${question}${tail}`
         : `Follow-up on the same element (a further question from the user; what you found so far still applies).\n\nQuestion: ${question}${tail}`;
+    case "direct":
+      return `Follow-up on the same element, in the user's own words. If it asks for a change, it's Request type: TASK: make the change and report it in the task format. Otherwise answer it.\n\nUser: ${question}${tail}`;
     case "correction":
       return `Correction: the user changed their mind about this element. This replaces their previous instruction: ${question}\n\nMake the final state match this request: adjust or undo what you already changed for the previous instruction where it no longer applies. Report it in the task format (SPOKEN line first, past tense).${tail}`;
     case "reconcile":
@@ -587,7 +617,7 @@ export function threadUserMessage(
 const threadChoice = (thread: { choice?: LlmChoice }): LlmChoice | undefined => thread.choice;
 
 export const solveInThread: SolveInThread = async ({
-  thread, kind, mark, question, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs,
+  thread, kind, mark, question, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation,
 }) => {
   const t0 = performance.now();
   const choice = threadChoice(thread);
@@ -599,8 +629,9 @@ export const solveInThread: SolveInThread = async ({
     mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-  const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues);
-  const params: ChatParams = { messages: [{ role: "user", content: user }] };
+  const git = await gitContext(projectDir());
+  const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues) + (annotation ? `\n\n${drawingContext(annotation)}` : "") + (git ? `\n\n${git}` : "");
+  const params: ChatParams = { messages: [{ role: "user", content: user }], ...(annotation ? { annotations: [annotation] } : {}) };
   if (onPrompt) {
     const info: LlmPrompt = choice
       ? harnessPromptInfo("solver", choice, params)
@@ -621,12 +652,12 @@ export const solveInThread: SolveInThread = async ({
     onDelta(d);
     parser.feed(d);
   };
-  // As in solveTask: other harnesses' narration is dropped up to the SPOKEN: line (also when the harness is unknown).
-  const gate = choice?.provider !== "claude-code" && projectDir() ? new NarrationGate(onText) : null;
+  // Thread sessions can narrate before the final SPOKEN line with any provider.
+  const gate = new NarrationGate(onText);
   let res: Awaited<ReturnType<typeof thread.send>>;
   try {
-    res = await thread.send(user, gate ? (d) => gate.feed(d) : onText, timeoutMs ?? ROLE_TIMEOUT_MS.solver);
-    gate?.end();
+    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations);
+    gate.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));
     throw err;

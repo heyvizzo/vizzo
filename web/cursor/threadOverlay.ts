@@ -1,3 +1,5 @@
+import { drawingAnchor } from "../../shared/anchor.ts";
+import { drawingPreview, drawingPreviewOpen } from "./drawingPreview.ts";
 // Element threads on the page (docs/PLAN-threads.md): a marker at the top-right corner of each thread's element, the
 // thread panel (history, files, an inline form to follow up by typing or dictating, delete with an in-panel
 // confirmation), the bubbles of its spoken lines, and the
@@ -9,8 +11,8 @@
 import { displayTitle, type ThreadAnchor, type ThreadInfo, type ThreadMessage, type ThreadSay, type ThreadState } from "../../shared/threads.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
 import type { CursorSample } from "../../shared/protocol.ts";
-import type { FormHub, InlineForm } from "./inlineForm.ts";
-import type { BubbleConfirm, ConvoEntry, OrbPos, OrbState, PageConfirmAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
+import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
+import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
 import { mountPlasmaOrb, PLASMA_ORB_CSS, type PlasmaState } from "./plasmaOrb.ts";
 import { ORB_ASKING_COLORS, ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
 
@@ -140,7 +142,11 @@ export const THREAD_CSS = `
 .th-turn { display: flex; flex-direction: column; gap: 4px; }
 .th-turn.note { opacity: .7; }
 .th-msg.queued { border-left-style: dashed; border-left-color: var(--ui-violet); opacity: .85; }
+.th-held { display: flex; gap: 6px; margin-top: 6px; }
+.th-panel .th-held button { font-size: 11px; padding: 2px 8px; }
 .th-compose { padding: 8px 12px; border-top: 1px solid var(--ui-line); }
+.th-smart { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); cursor: pointer; }
+.th-smart input { margin: 0; accent-color: var(--ui-accent); cursor: pointer; }
 .th-foot { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--ui-line); }
 .th-foot .th-confirm { flex: 1; font-size: 12px; }
 .th-foot .th-danger { border-color: color-mix(in srgb, var(--ui-err) 50%, transparent); color: var(--ui-err-text); }
@@ -170,7 +176,7 @@ export interface ThreadOverlayOpts {
   pointed(): Element | null;
   /** The pointer's last sampled position in document coordinates (where the provisional dot goes on that element). */
   pointer?(): { x: number; y: number } | null;
-  send(action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction): void;
+  send(action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction | PageHeldAction): void;
   /** The page element at a viewport point, as a sample (a marker stands for its thread's element). */
   sampleAt(x: number, y: number): { sample: CursorSample } | null;
   /** The panel's form, its dictation, and sending (web/cursor/inlineForm.ts). */
@@ -181,7 +187,7 @@ export interface ThreadOverlayOpts {
 export interface ThreadOverlay {
   setThreads(threads: ThreadInfo[]): void;
   bubble(say: ThreadSay, ended: boolean, confirm?: BubbleConfirm): void;
-  provisional(turnId: string): void;
+  provisional(turnId: string, anchor?: ThreadAnchor): void;
   clearProvisional(turnId: string): void;
   /** Open a thread's panel and scroll its element into view (from the sidebar's list). */
   open(threadId: string): void;
@@ -189,6 +195,8 @@ export interface ThreadOverlay {
   setOrb(state: OrbState, pos: OrbPos | null): void;
   /** The conversation shown in the orb's panel. */
   setConversation(entries: ConvoEntry[]): void;
+  /** Comments typed in a thread's panel that wait for the current turn to end. */
+  setHeld(items: HeldComment[]): void;
   /** Debugging → Details: show each answer's "Full answer" and its edited files in the panel (off until the sidebar says otherwise). */
   setDetails(on: boolean): void;
   /** The node is the orb, its bubble or its panel: it stands for no element (pointing at it points at nothing). */
@@ -285,6 +293,7 @@ export function orbPoint(pos: OrbPos | null, vw: number, vh: number): { x: numbe
 }
 
 export function resolveAnchor(a: ThreadAnchor, prev: Element | null): Element | null {
+  if (a.kind === "drawing" && !a.selector) return null;
   if (prev?.isConnected) return prev;
   for (const sel of [a.domPath, a.selector]) {
     const hits = queryAll(sel);
@@ -329,7 +338,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   const bubbles = new Map<string, BubbleView>();
   /** The provisional dot: where the pointer was on its element at release (bounds/point as in ThreadAnchor). */
   let prov: {
-    turnId: string; el: Element | null; div: HTMLElement; x: number; y: number;
+    anchor?: ThreadAnchor; turnId: string; el: Element | null; div: HTMLElement; x: number; y: number;
     bounds: ThreadAnchor["bounds"] | null; point: { x: number; y: number } | null;
   } | null = null;
   /** `view`: the viewport when it opened; the panel is placed against it, so it stays put as the page scrolls. */
@@ -355,6 +364,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     dragged: false,
   };
   let entries: ConvoEntry[] = [];
+  let held: HeldComment[] = [];
   /** Debugging → Details: answers show their "Full answer" and the files they edited. */
   let details = false;
 
@@ -373,7 +383,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   function resolveAll(): void {
     opts.attach();
     for (const m of markers.values()) m.el = resolveAnchor(m.thread.anchor, m.el);
-    if (prov?.el && !prov.el.isConnected) prov.el = null;
+    if (prov?.anchor) prov.el = resolveAnchor(prov.anchor, prov.el);
+    else if (prov?.el && !prov.el.isConnected) prov.el = null;
     position();
   }
 
@@ -423,13 +434,13 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       perSpot.set(spot, n + 1);
       m.x = p.x + n * MARKER_STEP;
       m.y = p.y;
-      m.faded = !live;
+      m.faded = !live && m.thread.anchor.kind !== "drawing";
       m.btn.classList.toggle("faded", m.faded);
       m.btn.style.left = `${m.x}px`;
       m.btn.style.top = `${m.y}px`;
     }
     if (prov) {
-      const r = prov.el && docRect(prov.el);
+      const r = prov.el ? docRect(prov.el) : prov.bounds;
       prov.div.hidden = !r;
       if (r) {
         ({ x: prov.x, y: prov.y } = markerPoint({ bounds: prov.bounds ?? r, point: prov.point ?? undefined }, r));
@@ -491,7 +502,12 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       if (panel?.threadId === id) closePanel();
     }
     let added = false;
-    for (const t of threads) {
+    for (let t of threads) {
+      if (t.anchor.kind === "drawing" && !t.anchor.selector) {
+        const annotation = t.messages.find(m => m.annotation)?.annotation;
+        const anchor = annotation && drawingAnchor(annotation);
+        if (anchor?.selector) t = { ...t, anchor };
+      }
       let m = markers.get(t.threadId);
       if (!m) {
         const btn = h("button", "th-marker");
@@ -522,13 +538,13 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     prov = null;
   }
 
-  function provisional(turnId: string): void {
+  function provisional(turnId: string, anchor?: ThreadAnchor): void {
     clearProv();
     const div = h("div", "th-prov");
     div.setAttribute("aria-hidden", "true");
     layer.append(div);
-    const el = opts.pointed();
-    prov = { turnId, el, div, x: 0, y: 0, bounds: el && docRect(el), point: opts.pointer?.() ?? null };
+    const el = anchor ? resolveAnchor(anchor, null) : opts.pointed();
+    prov = { anchor, turnId, el, div, x: 0, y: 0, bounds: anchor?.bounds ?? (el && docRect(el)), point: anchor?.point ?? opts.pointer?.() ?? null };
     position();
   }
 
@@ -690,10 +706,11 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     layer.append(root);
     const queued = m.thread.state === "queued";
     const form = opts.forms.create({
-      placeholder: queued ? "Add to this feedback…" : "Follow up… type, or hold Shift to talk",
+      placeholder: queued ? "Add to this feedback…" : `Follow up… type, or ${talkHint()} to talk`,
       submit: (text) => followUp(threadId, text),
       escape: (empty) => { if (empty) closePanel(); else form.field.blur(); },
-      openOnFocus: true,
+      // Open while the panel is: the panel is the focus, so talking dictates into it whether or not the field has focus.
+      activateOnCreate: true,
     });
     panel = { threadId, root, form, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight } };
     const b = bubbleOf(threadId);
@@ -739,6 +756,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const who = msg.role === "user" ? "You" : msg.role === "assistant" ? "Assistant" : "System";
     const time = new Date(msg.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     row.append(h("div", "th-meta", `${who} · ${msg.kind} · ${time}`), h("div", "th-text", msg.role === "user" ? msg.text : stripVoiceCues(msg.text)));
+    if (msg.annotation) row.append(drawingPreview(msg.annotation));
     if (msg.detail && details) {
       const d = h("details");
       d.open = openDetails.has(msg.id);
@@ -750,12 +768,29 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     return row;
   }
 
+  /** A waiting comment's buttons (the sidebar acts on them). */
+  function heldActions(turnId: string): HTMLElement {
+    const now = h("button", undefined, "Interrupt and send");
+    now.type = "button";
+    now.dataset.tip = "Stop the current turn and send this comment now";
+    now.onclick = () => opts.send({ type: "held.send", turnId });
+    const remove = h("button", undefined, "Remove");
+    remove.type = "button";
+    remove.dataset.tip = "Drop this comment without sending it";
+    remove.onclick = () => opts.send({ type: "held.remove", turnId });
+    const row = h("div", "th-held");
+    row.append(now, remove);
+    return row;
+  }
+
   /** A conversation entry in the orb's panel: what the user said, then the reply. */
   function renderEntry(e: ConvoEntry, openDetails: Set<string>): HTMLElement {
     const row = h("div", `th-turn${e.note ? " note" : ""}`);
     if (e.user !== null) {
       const user = h("div", "th-msg role-user");
       user.append(h("div", "th-meta", ["You", ...e.badges, ...(e.note ? [e.note] : [])].join(" · ")), h("div", "th-text", e.user));
+      if (e.annotation) user.append(drawingPreview(e.annotation));
+      if (e.held) user.append(heldActions(e.id));
       row.append(user);
     }
     if (e.assistant || e.who || (e.detail && details)) {
@@ -827,7 +862,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     }
     // Follow-ups queued on its element (Instant off) are their own "queued" thread: shown here too, not sent yet.
     const pending = t.state === "queued" ? [] : queuedMessages(t.anchor.domPath);
-    if (t.messages.length || pending.length) {
+    const waiting = held.filter((c) => c.threadId === t.threadId);
+    if (t.messages.length || pending.length || waiting.length) {
       for (const m of t.messages) {
         const row = renderMessage(m, p.openDetails);
         note(m.id, row);
@@ -838,6 +874,13 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
         note(`queued:${m.id}`, row);
         row.classList.add("queued");
         row.querySelector(".th-meta")!.textContent = "You · not sent yet";
+        body.append(row);
+      }
+      // Typed here while a turn was still going: sent when it ends.
+      for (const c of waiting) {
+        const row = h("div", "th-msg role-user queued");
+        row.append(h("div", "th-meta", "You · queued · sends when the current turn ends"), h("div", "th-text", c.text), heldActions(c.turnId));
+        note(`held:${c.turnId}`, row);
         body.append(row);
       }
     } else body.append(h("div", "th-empty", "Nothing here yet."));
@@ -855,12 +898,23 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       no.onclick = () => { p.confirming = false; renderPanel(); };
       foot.append(h("span", "th-confirm", deleteConfirmText(t.state)), no, yes);
     }
+    // "Always use the smart model": the router only speaks for it (a spoken turn), a typed one goes straight to it.
+    const smart = h("label", "th-smart");
+    if (t.state !== "queued") {
+      const box = h("input");
+      box.type = "checkbox";
+      box.checked = !!t.alwaysSmart;
+      box.onchange = () => opts.send({ type: "thread.smart", threadId: t.threadId, on: box.checked });
+      smart.dataset.tip = "Everything you say or type here is done by the smart model. Spoken requests still get a quick spoken reply first.";
+      smart.append(box, "Always use the smart model");
+    }
     // The form stays in place (moving it would take the focus and the caret from it).
     const form = p.form!;
     const compose = form.root.parentElement ?? h("div", "th-compose");
     if (!compose.isConnected) { compose.append(form.root); p.root.append(compose); }
     for (const c of [...p.root.children]) if (c !== compose) c.remove();
     compose.before(head, ...(p.confirming ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
+    if (smart.childElementCount) compose.after(smart);
     scrollBody(p, body, scroll, firstRender, fresh);
     placePanel();
   }
@@ -895,13 +949,16 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     return q?.thread.messages ?? [];
   }
 
-  /** The panel's form: a comment on the thread's element (the marker stands for it), sent now or added to the list. */
+  /**
+   * The panel's form: a comment on the thread's element (the marker stands for it), for this thread whatever the router
+   * would pick. Feedback not sent yet (Instant off) isn't on the server: what's typed there joins the list.
+   */
   function followUp(threadId: string, text: string): void {
     const m = markers.get(threadId);
     const hit = m && opts.sampleAt(m.x - scrollX, m.y - scrollY);
     if (!hit || !panel?.form) return;
     hit.sample.t += performance.timeOrigin; // crosses the bridge as epoch ms
-    opts.forms.send(text, hit.sample);
+    opts.forms.send(text, hit.sample, m.thread.state === "queued" ? undefined : threadId);
     panel.form.clear();
     panel.form.focus();
   }
@@ -922,7 +979,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
 
   // Esc and clicks outside the overlay close the panel.
   window.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !panel) return;
+    if (e.key !== "Escape" || !panel || drawingPreviewOpen()) return;
     if (panel.form && (layer.getRootNode() as ShadowRoot | Document).activeElement === panel.form.field) return; // the field's own handler
     e.preventDefault();
     e.stopPropagation();
@@ -1020,6 +1077,11 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     if (panel?.threadId === null) renderPanel();
   }
 
+  function setHeld(items: HeldComment[]): void {
+    held = items;
+    if (panel?.threadId) renderPanel();
+  }
+
   function setDetails(on: boolean): void {
     if (on === details) return;
     details = on;
@@ -1034,6 +1096,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     open,
     setOrb,
     setConversation,
+    setHeld,
     setDetails,
     isOrb(node) {
       if (orb.btn.contains(node)) return true;

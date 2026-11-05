@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Warm agents for the model tiers. Each role (router and progress lines on the fast tier, the solver on the
 // smart tier) keeps a pool of agents already started with its harness, model, level, speed and system prompt
 // (harnesses.ts), so a request doesn't pay the harness's start-up; taking one starts its replacement.
@@ -140,7 +141,7 @@ export function configureWarm(selection: Record<LlmTier, LlmChoice>): void {
  * aborted: the agent is killed and this rejects at once.
  */
 export async function harnessRequest(
-  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal,
+  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal, annotations?: readonly DrawingAnnotation[],
 ): Promise<HarnessResult> {
   signal?.throwIfAborted();
   hookExit();
@@ -156,7 +157,7 @@ export async function harnessRequest(
   inflight.set(h, (inflight.get(h) ?? 0) + 1);
   let onAbort: (() => void) | null = null;
   try {
-    const request = agent.request(user, signal ? (d) => { if (!signal.aborted) onText?.(d); } : onText, timeoutMs);
+    const request = agent.request(user, signal ? (d) => { if (!signal.aborted) onText?.(d); } : onText, timeoutMs, annotations);
     if (!signal) return await request;
     request.catch(() => {}); // aborted: nobody waits for it any more
     const aborted = new Promise<never>((_, reject) => {

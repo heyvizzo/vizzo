@@ -208,3 +208,12 @@ button.model-note:hover:not(:disabled) { filter: none; text-decoration-thickness
 label.flash { animation: flash 1.6s ease-out; border-radius: 8px; }
 @keyframes flash { from { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 45%, transparent); } to { box-shadow: 0 0 0 4px transparent; } }
 @media (prefers-reduced-motion: reduce) { label.flash { animation-duration: 3s; } }
+
+/* Keyboard: a row per shortcut (what it does, its keys). */
+.hotkey { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 14px; }
+.hotkey + .hotkey { border-top: 1px solid var(--line); }
+.hotkey .hint { display: block; }
+.hotkey-key, .hotkey kbd { min-width: 96px; text-align: center; font: 600 13px/1 -apple-system, BlinkMacSystemFont, sans-serif; font-variant-numeric: tabular-nums; }
+.hotkey kbd { padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--field); color: var(--muted); }
+.hotkey-key.recording { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); color: var(--accent); }
+#hotkeys-error { margin: 8px 2px 0; }

@@ -1,7 +1,8 @@
 // Queued feedback (Instant off in the browser toolbar): a turn's messages to the server are recorded instead of sent,
 // and replayed later as a normal turn with the sidebar's settings at that moment. Recorded times are on the client
 // clock of the recording; the replay shifts them so the turn is released "now" (latency marks stay meaningful).
-import { anchorTitle, inferAnchor } from "../../shared/anchor.ts";
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
+import { anchorTitle, drawingAnchor, inferAnchor } from "../../shared/anchor.ts";
 import { computeRests, resolvePointing, type PointingLanguage } from "../../shared/pointing.ts";
 import type { ClientMsg, CursorSample, PageClick, PageEvents, Word } from "../../shared/protocol.ts";
 import type { ThreadAnchor, ThreadInfo } from "../../shared/threads.ts";
@@ -86,6 +87,7 @@ export function queuedAnchor(rec: Recorded[], words?: Word[], languages?: readon
     else if (m.type === "cursor.samples") samples.push(...m.samples);
     else if (m.type === "turn.context") clicks.push(...m.clicks);
   }
+  if (start?.annotation) return drawingAnchor(start.annotation);
   if (!start?.pageUrl) return null;
   const from = tAudioStart ?? start.tPress;
   if (words?.length) {
@@ -97,7 +99,7 @@ export function queuedAnchor(rec: Recorded[], words?: Word[], languages?: readon
 }
 
 /** One queued turn on an element, as queuedThreads groups it. */
-export interface QueuedItem { turnId: string; anchor: ThreadAnchor; text: string; at: number }
+export interface QueuedItem { turnId: string; anchor: ThreadAnchor; text: string; at: number; annotation?: DrawingAnnotation }
 
 /** Same element on the same page: queued feedback on it is one thread. */
 export const anchorKey = (a: ThreadAnchor) => `${a.pageUrl}\n${a.domPath}`;
@@ -122,7 +124,7 @@ export function queuedThreads(items: QueuedItem[]): ThreadInfo[] {
       threadId, pageUrl: first.anchor.pageUrl, anchor: first.anchor, title: anchorTitle(first.anchor), state: "queued", intent: "task",
       summary: "Not sent yet. The arrow next to the address bar sends it, with the sidebar's settings then.",
       unread: false, awaitingReply: false, createdAt: first.at, lastInteractionAt: last.at,
-      messages: g.map((it, i) => ({ id: `${QUEUED_PREFIX}${it.turnId}:request`, turnId: it.turnId, at: it.at, role: "user", kind: i ? "followup" : "request", text: it.text })),
+      messages: g.map((it, i) => ({ id: `${QUEUED_PREFIX}${it.turnId}:request`, turnId: it.turnId, at: it.at, role: "user", kind: i ? "followup" : "request", text: it.text, ...(it.annotation ? { annotation: it.annotation } : {}) })),
     };
   });
 }

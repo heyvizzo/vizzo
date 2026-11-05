@@ -108,7 +108,7 @@ export interface InstallView {
 
 export function installView(row: ModelRow, install: InstallState | undefined): InstallView | null {
   if (row.group !== "device") return null;
-  if (!install) return { text: "Choose a project folder to start the voice server." };
+  if (!install) return { text: "Waiting for the voice server…" };
   if (install.builtin) return { text: "Built into macOS" };
   if (install.state === "queued") return { button: "cancel", text: "Waiting for another install…" };
   if (install.state === "installing") {

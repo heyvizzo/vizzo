@@ -1,6 +1,6 @@
 // The Settings window of the Electron app (electron/main.ts openSettings): a sidebar of sections, one shown at a time
 // (the URL hash names it). Dashboard sums up the rest and flags what doesn't work; then the LLM tiers and how turns
-// run, the speech models (speechView.ts: pick, configure, install), the app's macOS permissions, the debugging
+// run, the speech models (speechView.ts: pick, configure, install), the keyboard shortcuts, the app's macOS permissions, the debugging
 // displays, the browser pane's cookies and the API keys. Chat settings save on every change (web/chat/settings.ts)
 // and apply from the sidebar's next turn; the API keys save with the Save bar, which shows only while they're edited.
 import "./settings.css";
@@ -8,9 +8,12 @@ import { API_PROVIDERS, HARNESSES, HARNESS_TOGGLES, LLM_DEFAULT_MODELS, LLM_PROV
 import { attachCombo, type Combo } from "../chat/combo.ts";
 import { LANGUAGES, LONG_TASK_MAX, LONG_TASK_MIN, PANEL_KEYS, loadSettings, saveSettingsKeys, type ChatSettingsBridge } from "../chat/settings.ts";
 import { mountSpeech } from "./speechView.ts";
+import { DEFAULT_HOTKEYS, HOTKEY_LABELS, hotkeyLabel, hotkeyProblem, isModifierCode, normalizeCode, sameHotkey, type Hotkey, type HotkeyAction } from "../../shared/hotkeys.ts";
 import type { SpeechKind } from "./speechModels.ts";
-
-interface PermissionRow { id: string; name: string; ok: boolean; optional?: boolean; summary: string; instruction: string; action?: { id: string; label: string } }
+import {
+  SECTIONS, SECTION_LABELS, SERVER_DOWN, keyProblems, permissionProblems, sortProblems, speechProblems as speechProblemsOf, tierProblems as tierProblemsOf,
+  verdict, type PermissionRow, type Problem, type ProviderInfo, type Section, type Tone,
+} from "./attention.ts";
 interface EnvField { key: string; label: string; hint: string; secret?: boolean; param?: boolean }
 /** electron/preload.ts: what this window uses. */
 const shell = (window as unknown as { shell: {
@@ -33,8 +36,6 @@ const saveSettings = () => saveSettingsKeys(shell.chatSettings, settings, PANEL_
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 // ── sections ───────────────────────────────────────
-type Section = "dashboard" | "models" | "stt" | "tts" | "permissions" | "debugging" | "cookies" | "keys";
-const SECTIONS: readonly Section[] = ["dashboard", "models", "stt", "tts", "permissions", "debugging", "cookies", "keys"];
 const sectionOf = (hash: string): Section => SECTIONS.find((x) => `#${x}` === hash) ?? "dashboard";
 function showSection(section: Section): void {
   for (const el of document.querySelectorAll<HTMLElement>("main section[data-section]")) el.hidden = el.dataset.section !== section;
@@ -154,7 +155,6 @@ const speech = mountSpeech({
 // starts ones for this choice. Switching back to a harness restores the choice last used with it. Under a harness,
 // checkboxes for what its agents load besides their file tools (shared/config.ts HARNESS_TOGGLES). The model APIs
 // (OpenRouter, Cerebras…) are offered on the fast tier only: the solver needs a harness's file tools.
-type ProviderInfo = Omit<HarnessScan, "models" | "error">;
 let providers: ProviderInfo[] = [
   ...HARNESSES.map((id) => ({ id, label: LLM_PROVIDER_LABELS[id], available: true })),
   ...API_PROVIDERS.map((id) => ({ id, label: LLM_PROVIDER_LABELS[id], available: true, api: true })),
@@ -168,7 +168,7 @@ const tierEls = (tier: LlmTier) => ({
   toggles: $(`llm-${tier}-toggles`),
 });
 const modelInfo = (c: LlmChoice): LlmModelInfo | undefined => loadedModels.get(c.provider)?.find((m) => m.id === c.model);
-/** The voice server didn't answer (no project folder chosen yet). */
+/** The voice server didn't answer (still starting, or it failed). */
 let serverDown = false;
 const scanBtn = $<HTMLButtonElement>("llm-scan");
 const scanNote = $("llm-scan-note");
@@ -301,6 +301,11 @@ scanBtn.onclick = async () => {
   note("Scanning…");
   try {
     const r = await fetch("/api/llm/scan", { method: "POST" });
+    // 502: the app's proxy found no voice server (it starts at launch: still starting, or it failed).
+    if (r.status === 502) {
+      note("The voice server isn't running yet: scan again in a moment.", true);
+      return;
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const scan = (await r.json()) as HarnessScan[];
     providers = scan.map(({ models: _m, error: _e, ...p }) => p);
@@ -332,20 +337,29 @@ scanBtn.onclick = async () => {
     scanBtn.disabled = false;
   }
 };
-// No voice server yet (no project folder chosen): the lists stay at their defaults.
-fetch("/api/llm/providers").then((r) => r.json()).then((p: ProviderInfo[]) => { providers = p; renderTier("fast"); renderTier("smart"); })
-  .catch(() => {
+// The harnesses and the server's saved selection (what its agents are warm for). The server starts with the app, so
+// Settings opened at launch may ask before it's listening: it asks again each second for a while, the lists staying
+// at their defaults meanwhile.
+function loadServerState(triesLeft = 30): void {
+  fetch("/api/llm/providers").then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); }).then((p: ProviderInfo[]) => {
+    providers = p;
+    if (serverDown) { serverDown = false; note(""); }
+    renderTier("fast");
+    renderTier("smart");
+    return fetch("/api/llm/selection").then((r) => r.json()).then((sel: RunConfig["llm"]) => {
+      settings.llm = llmOf({ llm: sel });
+      saveSettings();
+      renderTier("fast");
+      renderTier("smart");
+    });
+  }).catch(() => {
     serverDown = true;
-    note("The voice server isn't running yet: choose a project folder to list the harnesses and models.", true);
+    note(triesLeft > 0 ? "The voice server is starting…" : "The voice server isn't running: quit and reopen the app.", triesLeft === 0);
     dashboardChanged();
+    if (triesLeft > 0) setTimeout(() => loadServerState(triesLeft - 1), 1000);
   });
-// The server's saved selection is what its agents are warm for: show it.
-fetch("/api/llm/selection").then((r) => r.json()).then((sel: RunConfig["llm"]) => {
-  settings.llm = llmOf({ llm: sel });
-  saveSettings();
-  renderTier("fast");
-  renderTier("smart");
-}).catch(() => {});
+}
+loadServerState();
 
 // ── display ────────────────────────────────────────
 for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"]] as const) {
@@ -353,6 +367,98 @@ for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", 
   box.checked = settings[key];
   box.onchange = () => { settings[key] = box.checked; saveSettings(); dashboardChanged(); };
 }
+
+// ── keyboard ───────────────────────────────────────
+// A shortcut's button records the next keys: a key with its modifiers, or a modifier pressed and let go on its own.
+// Saved with the chat's settings; main hands them to the toolbar, the browser pane and the sidebar.
+const HOTKEY_HINTS: Record<HotkeyAction, string> = {
+  talk: "Hold it to talk, let go to send; press it while the assistant talks to interrupt. A modifier on its own talks once it's held a moment with no other key or click, so its shortcuts (⌃-click, ⌃M) still work.",
+  comment: "Tap it, then click an element on the page to leave feedback on it; tap again or Esc to stop. Held down, comment mode lasts until you let go.",
+};
+const hotkeyError = $("hotkeys-error");
+let recordingHotkey: HotkeyAction | null = null;
+/** The modifier that went down first while recording, with no other key yet: let go alone, it's the hotkey. */
+let pendingModifier: string | null = null;
+function renderHotkeys(): void {
+  $("hotkeys").replaceChildren(...(Object.keys(HOTKEY_LABELS) as HotkeyAction[]).map((action) => {
+    const row = document.createElement("div");
+    row.className = "hotkey";
+    const text = document.createElement("span");
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = HOTKEY_LABELS[action];
+    const hint = document.createElement("span");
+    hint.className = "hint";
+    hint.textContent = HOTKEY_HINTS[action];
+    text.append(label, " ", hint);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "hotkey-key";
+    const recording = recordingHotkey === action;
+    btn.classList.toggle("recording", recording);
+    btn.textContent = recording ? "Press keys…" : hotkeyLabel(settings.hotkeys[action]);
+    btn.title = recording ? "Press the new shortcut (Esc cancels)" : `Click to change ${HOTKEY_LABELS[action].toLowerCase()}`;
+    btn.onclick = () => { recordingHotkey = recording ? null : action; pendingModifier = null; renderHotkeys(); };
+    row.append(text, btn);
+    return row;
+  }));
+  $<HTMLButtonElement>("hotkeys-reset").disabled = (Object.keys(DEFAULT_HOTKEYS) as HotkeyAction[]).every((a) => sameHotkey(settings.hotkeys[a], DEFAULT_HOTKEYS[a]));
+}
+function showHotkeyError(text: string): void {
+  hotkeyError.textContent = text;
+  hotkeyError.hidden = !text;
+}
+function commitHotkey(hk: Hotkey): void {
+  const action = recordingHotkey;
+  if (!action) return;
+  recordingHotkey = null;
+  pendingModifier = null;
+  const problem = hotkeyProblem(action, hk, settings.hotkeys);
+  showHotkeyError(problem ?? "");
+  if (!problem) {
+    settings.hotkeys = { ...settings.hotkeys, [action]: hk };
+    saveSettings();
+    dashboardChanged();
+  }
+  renderHotkeys();
+}
+window.addEventListener("keydown", (e) => {
+  if (!recordingHotkey) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.repeat) return;
+  const code = normalizeCode(e.code);
+  if (code === "Escape" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+    recordingHotkey = null;
+    pendingModifier = null;
+    showHotkeyError("");
+    renderHotkeys();
+    return;
+  }
+  if (isModifierCode(code)) { pendingModifier ??= code; return; }
+  pendingModifier = null;
+  commitHotkey({ code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
+}, true);
+window.addEventListener("keyup", (e) => {
+  if (!recordingHotkey) return;
+  e.preventDefault();
+  const code = normalizeCode(e.code);
+  if (pendingModifier && code === pendingModifier) commitHotkey({ code, ctrl: false, alt: false, shift: false, meta: false });
+}, true);
+window.addEventListener("blur", () => {
+  if (!recordingHotkey) return;
+  recordingHotkey = null;
+  pendingModifier = null;
+  renderHotkeys();
+});
+$("hotkeys-reset").onclick = () => {
+  settings.hotkeys = { ...DEFAULT_HOTKEYS };
+  recordingHotkey = null;
+  showHotkeyError("");
+  saveSettings();
+  dashboardChanged();
+  renderHotkeys();
+};
 
 function renderSettings(): void {
   router.value = settings.routerMode;
@@ -362,6 +468,7 @@ function renderSettings(): void {
   renderTier("fast");
   renderTier("smart");
   speech.render();
+  renderHotkeys();
 }
 renderSettings();
 
@@ -589,12 +696,6 @@ void shell.settings.get().then((data) => {
 // ── dashboard ──────────────────────────────────────
 // A summary line per part of the setup, and above it one verdict: green when nothing is failing, red with the
 // problems (each a link to its section) when something is, grey while an engine is still loading.
-type Tone = "ok" | "bad" | "warn" | "busy";
-interface Problem { tone: Tone; text: string; section: Section; focusKey?: string }
-const SECTION_LABELS: Record<Section, string> = {
-  dashboard: "Dashboard", models: "Models", stt: "Speech to text (STT)", tts: "Text to speech (TTS)", permissions: "Permissions",
-  debugging: "Debugging", cookies: "Browser cookies", keys: "API Keys",
-};
 
 function go(p: { section: Section; focusKey?: string }): void {
   if (p.focusKey && document.getElementById(`env-${p.focusKey}`)) focusKey(p.focusKey);
@@ -608,27 +709,8 @@ function tierText(c: LlmChoice): { text: string; loads?: string } {
   return { text: parts.filter(Boolean).join(" · "), ...(loads ? { loads: loads.length ? `Loads ${loads.join(", ")}` : "File tools only" } : {}) };
 }
 
-function tierProblems(tier: LlmTier): Problem[] {
-  const c = settings.llm[tier];
-  const p = providers.find((x) => x.id === c.provider);
-  if (p && !p.available) {
-    return [{ tone: "bad", text: `${tier === "fast" ? "Fast" : "Smart"} tier: ${p.label} ${p.api ? "has no API key" : "isn't installed"}${p.note ? ` (${p.note})` : ""}.`, section: "models" }];
-  }
-  return [];
-}
-
-function speechProblems(kind: SpeechKind): Problem[] {
-  const st = speech.status(kind);
-  if (!st) return [];
-  const section: Section = kind;
-  const label = kind === "stt" ? "Speech to text" : "Text to speech";
-  return st.notes.filter((n) => n.tone !== "muted" && n.tone !== "ok").map((n) => ({
-    tone: n.tone === "error" ? "bad" : n.tone === "loading" ? "busy" : "warn",
-    text: `${label} (${st.row.name}): ${n.text}`,
-    section,
-    ...(n.focus ? { focusKey: n.focus } : {}),
-  }));
-}
+const tierProblems = (tier: LlmTier): Problem[] => tierProblemsOf(tier, settings.llm[tier], providers);
+const speechProblems = (kind: SpeechKind): Problem[] => speechProblemsOf(kind, speech.status(kind));
 
 function speechLine(kind: SpeechKind): { text: string; detail: string; tone: Tone } {
   const st = speech.status(kind);
@@ -648,16 +730,11 @@ function speechLine(kind: SpeechKind): { text: string; detail: string; tone: Ton
 
 function renderDashboard(): void {
   const problems: Problem[] = [];
-  if (serverDown) problems.push({ tone: "bad", text: "The voice server isn't running: choose a project folder in the main window.", section: "models" });
+  if (serverDown) problems.push(SERVER_DOWN);
   problems.push(...tierProblems("fast"), ...tierProblems("smart"), ...speechProblems("stt"), ...speechProblems("tts"));
-  for (const row of permissionRows ?? []) {
-    if (!row.ok && !row.optional) problems.push({ tone: "bad", text: `${row.name}: ${row.summary}. ${row.instruction}`, section: "permissions" });
-  }
-  if (unreadableKeys.length) problems.push({ tone: "bad", text: `Couldn't decrypt the saved ${unreadableKeys.map(keyLabel).join(", ")}: enter ${unreadableKeys.length === 1 ? "it" : "them"} again.`, section: "keys" });
+  problems.push(...permissionProblems(permissionRows), ...keyProblems(unreadableKeys, keyLabel));
 
-  const bad = problems.filter((p) => p.tone === "bad");
-  const busy = problems.filter((p) => p.tone === "busy");
-  const overall: Tone = bad.length ? "bad" : busy.length ? "busy" : "ok";
+  const { tone: overall, title: verdictTitle } = verdict(problems);
   const health = $("health");
   health.className = `health card ${overall}`;
   const head = document.createElement("div");
@@ -665,17 +742,14 @@ function renderDashboard(): void {
   const light = document.createElement("span");
   light.className = "light";
   const title = document.createElement("strong");
-  title.textContent = overall === "bad" ? `${bad.length} thing${bad.length === 1 ? " needs" : "s need"} attention`
-    : overall === "busy" ? "Starting up…" : "Everything works";
+  title.textContent = verdictTitle;
   const sub = document.createElement("span");
   sub.className = "hint";
   sub.textContent = overall === "ok" ? (problems.length ? "A heads-up below, nothing failing." : "Models, speech, permissions and keys are all set.") : "";
   head.append(light, title, sub);
   const list = document.createElement("ul");
   list.className = "problems";
-  // Failures first, then what's loading, then warnings.
-  const order: Record<Tone, number> = { bad: 0, busy: 1, warn: 2, ok: 3 };
-  list.replaceChildren(...[...problems].sort((a, b) => order[a.tone] - order[b.tone]).map((p) => {
+  list.replaceChildren(...sortProblems(problems).map((p) => {
     const li = document.createElement("li");
     li.className = p.tone;
     const dot = document.createElement("span");
@@ -717,6 +791,7 @@ function renderDashboard(): void {
       tone: perms ? (missingRequired ? "bad" : "ok") : "busy", section: "permissions",
     },
     { label: "Turns", text: `Router ${settings.routerMode === "auto" ? "auto (may answer)" : "forced (always the solver)"}`, detail: `Long tasks: over ${settings.longTaskSeconds} s · time limit ${settings.taskTimeoutMinutes} min`, section: "models" },
+    { label: "Keyboard", text: `Talk: ${hotkeyLabel(settings.hotkeys.talk)} · Comment: ${hotkeyLabel(settings.hotkeys.comment)}`, section: "keyboard" },
     { label: "Debugging", text: display.length ? display.join(", ") : "Nothing extra shown", section: "debugging" },
     {
       label: "API keys", text: envFields.length ? `${keysSet} of ${keyFields.length} set` : "Loading…",

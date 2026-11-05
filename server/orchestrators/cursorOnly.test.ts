@@ -35,7 +35,7 @@ function ctx(over: Partial<TurnContext> = {}) {
   const marks: string[] = [];
   const c: TurnContext = {
     turnId: "t1",
-    config: { ...DEFAULT_CONFIG, approach: "cursor-only" },
+    config: { ...DEFAULT_CONFIG, ttsModel: "eleven_v4_turbo", sttModel: "scribe_v2", approach: "cursor-only" },
     mark: (n) => void marks.push(n),
     send: (m) => void sent.push(m),
     sendAudio: () => {},
@@ -82,7 +82,7 @@ describe("cursor-only orchestrator", () => {
 
   it("uses the config window", async () => {
     const stt = fakeStt({ text: "this", words: [{ text: "this", start: 0.5, end: 0.55 }] });
-    const { c, sent } = ctx({ config: { ...DEFAULT_CONFIG, approach: "cursor-only", preMs: 0, postMs: 0 } });
+    const { c, sent } = ctx({ config: { ...DEFAULT_CONFIG, ttsModel: "eleven_v4_turbo", sttModel: "scribe_v2", approach: "cursor-only", preMs: 0, postMs: 0 } });
     const h = createCursorOnlyOrchestrator(async () => stt)(c);
     h.onRelease();
     await h.done;

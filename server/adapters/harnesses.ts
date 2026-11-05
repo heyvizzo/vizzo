@@ -1,3 +1,5 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
+import { anthropicContent, codexInput, rpcImages, opencodeParts, assertDrawingVision } from "./drawing.ts";
 // The coding-agent harnesses that run the model tiers, as agents a warm pool (warmPool.ts) can start ahead of
 // time. One agent = one request with a fresh context; each harness gets there its own way:
 //   claude-code  `claude -p` started with its prompt and flags, waiting for the message on stdin (stream-json)
@@ -62,7 +64,7 @@ export interface WarmAgent {
   alive(): boolean;
   /** Start-up finished: a request now doesn't wait for it. */
   ready(): boolean;
-  request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult>;
+  request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult>;
   kill(): void;
   /**
    * Element threads: from now on a request doesn't end the session, the next one continues it. Only on a pooled
@@ -278,12 +280,12 @@ class ClaudeAgent implements WarmAgent {
   // claude -p prints nothing until it gets the message: count it as booted after a typical start-up.
   ready(): boolean { return performance.now() - this.cli.spawnedAt > 800; }
   keep(): boolean { if (this.used) return false; this.kept = true; return true; }
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
     this.used = true;
     const warm = this.ready();
     const files = new FilesTouched(this.spec.project);
     const onEvent = (ev: Record<string, unknown>): void => { for (const f of claudeEditedFiles(ev)) files.add(f); };
-    const r = await this.cli.request(user, { onText, onEvent }, timeoutMs, warm, this.kept);
+    const r = await this.cli.request(anthropicContent(user, annotations), { onText, onEvent }, timeoutMs, warm, this.kept);
     return {
       text: r.text, stopReason: r.stopReason, model: r.model ?? this.spec.model, usage: r.usage, warm,
       raw: { ...r.raw, cliCostUsd: r.cliCostUsd, cliDurationMs: r.durationMs }, filesTouched: files.list,
@@ -389,8 +391,9 @@ class GrokAgent implements WarmAgent {
   constructor(private spec: AgentSpec) { binOrThrow("grok"); }
   alive(): boolean { return !this.used; }
   ready(): boolean { return false; }
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
     this.used = true;
+    if (annotations?.length) throw new Error("Grok CLI does not support drawing attachments. Select Codex, Claude Code, pi, omp or OpenCode for this tier.");
     let apiKeySource = "";
     const res = await runStreamJson(`grok ${this.spec.role}`, binOrThrow("grok"), grokArgs(this.spec, user), cwdOf(this.spec), {
       onText,
@@ -447,6 +450,8 @@ class RpcAgent implements WarmAgent {
   private exited = false;
   private used = false;
   private booted = false;
+  private resolveBoot!: (state: { model?: { input?: string[] } } | null) => void;
+  private bootState = new Promise<{ model?: { input?: string[] } } | null>(resolve => { this.resolveBoot = resolve; });
   private stderr = "";
   private listener: ((ev: Record<string, unknown>) => void) | null = null;
   private exitWaiters: ((code: number | null) => void)[] = [];
@@ -455,12 +460,16 @@ class RpcAgent implements WarmAgent {
   constructor(private spec: AgentSpec, private kept = false) {
     this.proc = spawn(binOrThrow(spec.harness), rpcArgs(spec), { cwd: cwdOf(spec), stdio: ["pipe", "pipe", "pipe"], env: process.env });
     jsonLines(this.proc, (ev) => {
-      if (ev.type === "response" && ev.id === "boot") { this.booted = true; return; }
+      if (ev.type === "response" && ev.id === "boot") {
+        this.booted = true;
+        this.resolveBoot((ev.data as { model?: { input?: string[] } } | undefined) ?? null);
+        return;
+      }
       this.listener?.(ev);
     });
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
-    this.proc.on("close", (code) => { this.exited = true; for (const w of this.exitWaiters) w(code); });
-    this.proc.on("error", (e) => { this.exited = true; this.stderr += String(e); });
+    this.proc.on("close", (code) => { this.exited = true; this.resolveBoot(null); for (const w of this.exitWaiters) w(code); });
+    this.proc.on("error", (e) => { this.exited = true; this.resolveBoot(null); this.stderr += String(e); });
     // Answered once the agent has loaded its models and tools: that's "booted".
     this.proc.stdin.write(JSON.stringify({ id: "boot", type: "get_state" }) + "\n");
   }
@@ -471,9 +480,15 @@ class RpcAgent implements WarmAgent {
   abort(): void { if (!this.exited) this.proc.stdin.write(JSON.stringify({ id: "abort", type: "abort" }) + "\n"); }
   pid(): number | undefined { return this.exited ? undefined : this.proc.pid; }
 
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
     this.used = true;
     const warm = this.booted;
+    if (annotations?.length) {
+      try {
+        const state = await withTimeout(this.bootState, Math.min(timeoutMs, 15_000), `${this.spec.harness} image capabilities`, () => this.kill());
+        assertDrawingVision(state?.model?.input?.includes("image"), this.spec.harness, this.spec.model);
+      } catch (err) { this.kill(); throw err; }
+    }
     const files = new FilesTouched(this.spec.project);
     const label = `${this.spec.harness} (${this.spec.role})`;
     let text = "";
@@ -512,7 +527,7 @@ class RpcAgent implements WarmAgent {
         }
       };
     });
-    this.proc.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: user }) + "\n");
+    this.proc.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: user, ...(annotations?.length ? { images: rpcImages(annotations) } : {}) }) + "\n");
     try {
       await withTimeout(done, timeoutMs, label, () => this.kill());
     } finally {
@@ -660,7 +675,7 @@ class CodexAgent implements WarmAgent {
     if (this.threadId && this.turnId) void this.server.call("turn/interrupt", { threadId: this.threadId, turnId: this.turnId }).catch(() => {});
   }
 
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
     this.used = true;
     const warm = this.threadId !== null;
     const label = `codex (${this.spec.role})`;
@@ -693,7 +708,7 @@ class CodexAgent implements WarmAgent {
     done.catch(() => {});
     try {
       const started = await this.server.call("turn/start", {
-        threadId, input: [{ type: "text", text: user, text_elements: [] }],
+        threadId, input: codexInput(user, annotations),
         ...(this.spec.level ? { effort: this.spec.level } : {}),
       });
       this.turnId = (started as { turn?: { id?: string } } | null)?.turn?.id ?? null;
@@ -863,13 +878,25 @@ class OpencodeAgent implements WarmAgent {
   keep(): boolean { if (this.used) return false; this.kept = true; return true; }
   abort(): void { if (this.sessionId) void this.server.api(`/session/${this.sessionId}/abort`, this.dir, { method: "POST" }).catch(() => {}); }
 
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
     this.used = true;
     const warm = this.sessionId !== null;
     const sid = await this.session;
     const files = new FilesTouched(this.spec.project);
     const slash = this.spec.model.indexOf("/");
     const allowed = opencodeTools(this.spec);
+    if (annotations?.length) {
+      try {
+        // /provider is specified by the installed OpenCode SDK. Older SDKs expose modalities.input.
+        const catalog = await withTimeout(this.server.api("/provider", this.dir, { method: "GET" }), Math.min(timeoutMs, 15_000), "OpenCode image capabilities", () => {}) as { all?: { id: string; models: Record<string, { capabilities?: { input?: { image?: boolean } }; modalities?: { input?: string[] } }> }[] };
+        const m = catalog.all?.find(p => p.id === this.spec.model.slice(0, slash))?.models[this.spec.model.slice(slash + 1)];
+        assertDrawingVision(m?.capabilities?.input?.image ?? m?.modalities?.input?.includes("image"), "OpenCode", this.spec.model);
+      } catch (err) {
+        this.failed = true;
+        void this.server.api(`/session/${sid}`, this.dir, { method: "DELETE" }).catch(() => {});
+        throw err;
+      }
+    }
     // Text parts stream as deltas keyed by part id; reasoning parts are skipped. A delta that comes before
     // its part's type is known is held until then.
     const partType = new Map<string, string>();
@@ -900,7 +927,7 @@ class OpencodeAgent implements WarmAgent {
           ...(this.spec.level ? { variant: this.spec.level } : {}),
           system: this.spec.system,
           tools: Object.fromEntries(OPENCODE_TOOLS.map((t) => [t, allowed.includes(t)])),
-          parts: [{ type: "text", text: user }],
+          parts: opencodeParts(user, annotations),
         },
       }), timeoutMs, `opencode (${this.spec.role})`, () => { void this.server.api(`/session/${sid}/abort`, this.dir, { method: "POST" }).catch(() => {}); });
       const r = res as {

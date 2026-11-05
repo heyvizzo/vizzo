@@ -2,8 +2,14 @@
 // pane (push-to-talk, pointer samples, clicks, highlights, the overlay; web/cursor/pageBridge.ts) to the chat sidebar.
 // Nothing else from Node or Electron reaches the page.
 import { contextBridge, ipcRenderer } from "electron";
-import { isPttKey, isTypingTarget } from "../web/audio/ptt.ts";
+import { createTalkKey, isTypingTarget } from "../web/audio/ptt.ts";
+import { hotkeyLabel, hotkeys, onHotkeys, setHotkeys, type Hotkeys } from "../shared/hotkeys.ts";
 // Hover tooltips here are Chromium's own `title` tooltips; the custom ones (tooltip.ts) are only for the browser pane.
+
+// The keyboard shortcuts (Settings → Keyboard): main sends each change.
+setHotkeys(ipcRenderer.sendSync("hotkeys:get"));
+ipcRenderer.on("hotkeys", (_e, hk: unknown) => setHotkeys(hk));
+const hotkeyLabels = (hk: Hotkeys) => ({ talk: hotkeyLabel(hk.talk), comment: hotkeyLabel(hk.comment) });
 
 contextBridge.exposeInMainWorld("shell", {
   go: (input: string) => ipcRenderer.invoke("nav:go", input),
@@ -30,7 +36,13 @@ contextBridge.exposeInMainWorld("shell", {
     size: (id: number, width: number, height: number) => ipcRenderer.send("tooltip:size", id, width, height),
   },
   pickProject: () => ipcRenderer.invoke("project:pick"),
-  openSettings: () => ipcRenderer.invoke("settings:open"),
+  /** Opens Settings (at `section`, one of its sidebar's: "models", "permissions"…). */
+  openSettings: (section?: string) => ipcRenderer.invoke("settings:open", section),
+  /** The chat sidebar: what needs attention (permissions, which keys are set) and when Settings changed it. */
+  attention: {
+    get: () => ipcRenderer.invoke("attention:get"),
+    onChanged: (cb: () => void) => ipcRenderer.on("attention:changed", () => cb()),
+  },
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
     save: (values: unknown) => ipcRenderer.invoke("settings:save", values),
@@ -44,25 +56,27 @@ contextBridge.exposeInMainWorld("shell", {
   onPtt: (cb: (down: boolean) => void) => ipcRenderer.on("ptt", (_e, down) => cb(down === true)),
   /** Esc in the browser pane or the toolbar (main relays it): stop speaking, and a burst of three asks to stop its task. */
   onEscape: (cb: () => void) => ipcRenderer.on("escape", () => cb()),
+  /** How the shortcuts read ("Control", "⌃M"), for hints; cb gets each change. */
+  hotkeyLabels: () => hotkeyLabels(hotkeys()),
+  onHotkeyLabels: (cb: (labels: { talk: string; comment: string }) => void) => onHotkeys((hk) => cb(hotkeyLabels(hk))),
   /**
-   * The top bars (shell/index.html, folder.html): Shift is push-to-talk there too, except in the address field. A
-   * clicked button would otherwise keep the keyboard, so it lets go on Shift, and main gives the keyboard to the sidebar
-   * on release.
+   * The top bars (shell/index.html, folder.html): the talk key is push-to-talk there too, except in the address field.
+   * A clicked button would otherwise keep the keyboard, so it lets go once talking starts, and main gives the keyboard
+   * to the sidebar on release.
    */
-  bindShiftPtt: () => {
+  bindTalkKey: () => {
     let held = false;
     const ptt = (down: boolean) => {
       if (held === down) return;
       held = down;
+      if (down) (document.activeElement as HTMLElement | null)?.blur();
       ipcRenderer.send("bar:ptt", down);
     };
-    window.addEventListener("keydown", (e) => {
-      if (e.repeat || !isPttKey(e) || isTypingTarget(e.target)) return;
-      (document.activeElement as HTMLElement | null)?.blur();
-      ptt(true);
-    }, true);
-    window.addEventListener("keyup", (e) => { if (e.key === "Shift") ptt(false); }, true);
-    window.addEventListener("blur", () => ptt(false));
+    const talk = createTalkKey(ptt);
+    window.addEventListener("keydown", (e) => talk.keydown(e, !isTypingTarget(e.target)), true);
+    window.addEventListener("keyup", (e) => talk.keyup(e), true);
+    window.addEventListener("pointerdown", () => talk.pointerdown(), true);
+    window.addEventListener("blur", () => talk.release());
   },
   /**
    * Feedback queue. The toolbar (shell/index.html) shows the Instant toggle and the Send button; the chat sidebar holds
@@ -104,6 +118,16 @@ contextBridge.exposeInMainWorld("shell", {
     get: () => ipcRenderer.invoke("comment:get"),
     set: (on: boolean) => ipcRenderer.send("comment:mode", on),
     onState: (cb: (on: boolean) => void) => ipcRenderer.on("comment:state", (_e, on) => cb(on === true)),
+  },
+  drawing: {
+    get: () => ipcRenderer.invoke("drawing:get"),
+    set: (on: boolean) => ipcRenderer.send("drawing:mode", on),
+    onState: (cb: (on: boolean) => void) => ipcRenderer.on("drawing:state", (_e, on) => cb(on === true)),
+    getDisabledReason: (): Promise<string | null> => ipcRenderer.invoke("drawing:disabled-reason:get"),
+    publishDisabledReason: (reason: string | null) => ipcRenderer.send("drawing:disabled-reason", reason),
+    onDisabledReason: (cb: (reason: string | null) => void) => ipcRenderer.on("drawing:disabled-reason", (_e, reason) => {
+      if (reason === null || typeof reason === "string") cb(reason);
+    }),
   },
   page: {
     send: (cmd: unknown) => ipcRenderer.send("page:cmd", cmd),

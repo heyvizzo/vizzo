@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "./annotations.ts";
 // Element threads (docs/PLAN-threads.md): feedback is scoped to the page element it's about. Each element gets a
 // thread that runs in its own persistent harness session; markers on the page show each thread's state.
 // This file is the contract shared by the server (server/threads/), the chat sidebar and the page overlay.
@@ -13,6 +14,8 @@ export type ThreadState = "running" | "pending" | "idle" | "failed" | "queued";
 
 /** The element a thread is about, as seen when the thread was created (re-resolved on the page by the overlay). */
 export interface ThreadAnchor {
+  /** Drawing anchors use the drawing center as their initial point. */
+  kind?: "drawing";
   /** normalizePageUrl() of the page the element is on. */
   pageUrl: string;
   /** Short selector (ElementDetails.selector). */
@@ -46,6 +49,7 @@ export type ThreadMessageKind =
   | "error";
 
 export interface ThreadMessage {
+  annotation?: DrawingAnnotation;
   id: string;
   /** The turn that produced it (null for system messages such as reminders and reconcile follow-ups). */
   turnId: string | null;
@@ -75,6 +79,11 @@ export interface ThreadInfo {
   unread: boolean;
   /** The thread's last spoken line asked the user something (a reminder or a question): its bubble stays up. */
   awaitingReply: boolean;
+  /**
+   * The panel's "Always use the smart model": what's said or typed in its panel is always the smart model's job. A
+   * spoken turn still goes through the router (forced: it only speaks the ack); a typed one goes straight to the thread.
+   */
+  alwaysSmart?: boolean;
   messages: ThreadMessage[];
   /** Epoch ms. */
   createdAt: number;

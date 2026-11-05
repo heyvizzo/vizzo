@@ -317,13 +317,14 @@ describe("routeTurn, threads mode", () => {
     { threadId: "t1", title: "the 'Get started' button", state: "running", summary: "Making it bigger with rounder corners.", onCurrentPage: true, underCursor: true },
     { threadId: "t2", title: "the footer", state: "pending", summary: "Lighter grey links.", onCurrentPage: false, underCursor: false },
   ];
-  async function runT(fields: Record<string, unknown>, o: { threads?: ThreadBrief[]; anchorLabel?: string; mode?: "forced" | "auto"; raw?: string } = {}) {
+  async function runT(fields: Record<string, unknown>, o: { threads?: ThreadBrief[]; anchorLabel?: string; mode?: "forced" | "auto"; raw?: string; clicked?: boolean; typed?: boolean; chat?: boolean; panel?: string } = {}) {
     scripts.push({ text: o.raw ?? JSON.stringify(fields), chunk: 3 });
     const events: string[] = [];
     const decisions: unknown[] = [];
     const res = await routeTurn({
       mark: () => {}, transcript: "Also change the label to Start free.", pointing: GRID_TARGETS, mode: o.mode ?? "auto",
       threads: o.threads ?? BRIEFS, anchorLabel: "anchorLabel" in o ? o.anchorLabel : "the 'Get started' button",
+      ...(o.clicked ? { clicked: true } : {}), ...(o.typed ? { typed: true } : {}), ...(o.chat ? { chat: true } : {}), ...(o.panel ? { panel: o.panel } : {}),
       onDecision: (d) => { decisions.push(d); events.push("decision"); },
       onSpokenDelta: () => events.push("say"),
       onSpokenEnd: () => events.push("end"),
@@ -336,6 +337,8 @@ describe("routeTurn, threads mode", () => {
     expect(s.spec.system).not.toMatch(/thread/i);
     expect(s.user).toContain("What the user SAYS wins over the cursor");
     expect(s.user).toContain("Pointed element this turn: the 'Get started' button.");
+    expect(s.user).toContain("Only a spoken turn with none of these can move to another existing thread");
+    expect(s.user).not.toContain("The user typed this on the clicked element");
     expect(s.user).toContain("- t1: the 'Get started' button (running, under the cursor): Making it bigger with rounder corners.");
     expect(s.user).toContain("- t2: the footer (pending, on another page): Lighter grey links.");
     expect(s.user).toContain(`"target": "new" | "<thread id>" | "central", "relation"`);
@@ -345,6 +348,32 @@ describe("routeTurn, threads mode", () => {
     await routeTurn({ mark: () => {}, transcript: U3, pointing: GRID_TARGETS, mode: "auto", onSpokenDelta: () => {} });
     expect(sent.at(-1)!.user).not.toMatch(/thread/i);
     expect(sent.at(-1)!.spec.system).toBe(s.spec.system);
+  });
+
+  it("a typed turn tells the router the marker stays on the click", async () => {
+    const { sent: s } = await runT(
+      { intent: "task", estimate_seconds: 60, target: "new", relation: null, tell: null, say: "Sure.", question: "q" },
+      { typed: true },
+    );
+    expect(s.user).toContain('The user typed this on the clicked element and did not speak. The marker stays on that click: target is "new" or that element\'s thread id. Do not target a different thread and do not use "central".');
+  });
+
+  it("a message box turn tells the router it stays central", async () => {
+    const { sent: s } = await runT(
+      { intent: "task", estimate_seconds: 60, target: "t1", relation: "followup", tell: null, say: "Sure.", question: "q" },
+      { chat: true, anchorLabel: undefined },
+    );
+    expect(s.user).toContain("Pointed element this turn: none.");
+    expect(s.user).toContain(`The user typed this in the conversation's message box and is not pointing at anything. It stays in the conversation: target is "central"`);
+    expect(s.user).not.toContain("The user typed this on the clicked element");
+  });
+
+  it("a spoken turn with a panel open stays on that thread", async () => {
+    const { sent: s } = await runT(
+      { intent: "task", estimate_seconds: 60, target: "t1", relation: "followup", tell: null, say: "Sure.", question: "q" },
+      { panel: "the red button" },
+    );
+    expect(s.user).toContain("The user is speaking with the red button's panel open. The turn stays on that thread: target is that thread's id.");
   });
 
   it("empty thread list still means threads mode", async () => {
@@ -443,6 +472,21 @@ describe("solveInThread", () => {
     expect(r.marks[0]!.meta).toMatchObject({ thread: "hthread-test", kind: "request", intent: "task", backend: "claude-code" });
     expect(prompts[0]).toMatchObject({ target: "solver", messages: [{ role: "user", text: thread.sentMsgs[0] }], settings: { thread: "hthread-test" } });
     expect(responses[0]).toMatchObject({ target: "solver", raw: { filesTouched: ["demo.html"], reopened: false } });
+  });
+
+  it("Claude Code progress does not become the task result before the final SPOKEN summary", async () => {
+    const summary = "I moved the bubbles up 40 pixels on desktop. On phones and tablets the orb is now centered with the bubbles over it, checked at three widths.";
+    const progress = "I found the hero layout in `Hero.astro`. Next I'm setting up a headless browser so I can measure the page before I edit it.Before measurements: on mobile and tablet the bubbles currently sit below the copy, about 550px under the orb. On desktop the thread top is at y=266.I'll raise the desktop thread by 40px.Edited. Now I'm re-measuring the page at 360, 768 and 1440 pixels wide and taking screenshots.The numbers check out. Next I'll look at the screenshots.";
+    const thread = new FakeThread(progress + "SPOKEN: " + summary, [], { provider: "claude-code", model: "claude-opus-5-5" });
+    const lines: string[] = [];
+    const deltas: string[] = [];
+    const res = await solveInThread({
+      thread, kind: "request", mark: () => {}, question: "Move the bubbles.", pointing: [], intent: "task",
+      onSpokenLine: line => lines.push(line), onDelta: delta => deltas.push(delta),
+    });
+    expect(lines).toEqual([summary]);
+    expect(deltas.join("")).toBe("SPOKEN: " + summary);
+    expect(res.text).toBe("SPOKEN: " + summary);
   });
 
   it("an unknown or other harness: narration is dropped up to the SPOKEN line", async () => {
@@ -562,6 +606,16 @@ describe("solveTask", () => {
     const res = await solve({ llm: { provider: "codex", model: "gpt-6.1-sol" }, deltas, lines });
     expect(res.text).toBe(answer);
     expect(lines[0]).toMatch(/^The cards need to line up/);
+  });
+
+  it("Claude Code task narration waits for the final summary", async () => {
+    scripts.push({ text: "I found the hero layout in `Hero.astro`. Next I'll measure it." + answer });
+    const lines: string[] = [];
+    const deltas: string[] = [];
+    const res = await solve({ llm: { provider: "claude-code", model: "claude-opus-5-5" }, lines, deltas });
+    expect(res.text).toBe(answer);
+    expect(deltas.join("")).toBe(answer);
+    expect(lines).toEqual(["The cards need to line up in rows and columns, and grid does that in one rule. Flexbox stretched the last row."]);
   });
 
   it("missing SPOKEN prefix falls back to the first sentence", async () => {

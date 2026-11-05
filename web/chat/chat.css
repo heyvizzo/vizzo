@@ -32,15 +32,33 @@ main:not(.hide-ram) .chat-head:has(#session-mem:not([hidden])) { display: flex; 
 .jobs-pill { font-size: 12px; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid var(--accent-line); color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
 .jobs-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--st-working-fill); animation: beat var(--st-beat) ease-in-out infinite; }
 .jobs-pill[hidden] { display: none; }
+.jobs-pill { background: transparent; cursor: pointer; }
+.jobs-pill:hover, .jobs-pill[aria-expanded="true"] { background: var(--hover); border-color: var(--accent); }
+/* The tasks list the pill opens: every task still working, each with its × (stop). */
+.head-row.opts { position: relative; }
+.tasks-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 10; min-width: 260px; max-width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 4px 14px var(--shadow); display: flex; flex-direction: column; gap: 2px; }
+.tasks-pop[hidden] { display: none; }
+.task-row { display: flex; align-items: center; gap: 2px; }
+.task-item { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; font-size: 12.5px; color: var(--text); }
+.task-item:hover { background: var(--hover); border-color: var(--line); }
+.task-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.task-item .thread-dot { animation: beat var(--st-beat) ease-in-out infinite; }
+.task-kind { flex: none; color: var(--muted); }
+.task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-elapsed { flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .task-item .thread-dot { animation: none; } }
 /* Working breathes at the page orb's thinking beat (the palette and --st-beat: web/cursor/colors.ts). */
 @keyframes beat { 50% { transform: scale(.75); } }
 @media (prefers-reduced-motion: reduce) { .jobs-pill::before { animation: none; } }
 
+/* The conversation: the bubbles scroll above, the message box stays at the bottom of the same panel. */
+.conv { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
 .messages { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+.conv .compose { flex: none; padding: 4px 12px 12px; }
 /* New conversation: pinned to the top of the conversation, only once it has something to forget (what it clears). */
 .conv-reset { position: sticky; top: 0; z-index: 2; align-self: flex-end; flex: none; margin-bottom: -6px; padding: 3px 10px; font-size: 12px; color: var(--muted); background: var(--panel); }
 .conv-reset:hover { color: var(--text); }
-.messages:not(:has(> .turn:not(.queued), > .job, > .job-marker, > .note)) > .conv-reset { display: none; }
+.messages:not(:has(> .turn:not(.queued), > .job, > .job-row, > .note)) > .conv-reset { display: none; }
 .empty { margin: auto; text-align: center; color: var(--muted); max-width: 320px; line-height: 1.5; }
 div.empty { text-align: left; }
 .empty h3 { margin: 0 0 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -64,6 +82,14 @@ details.detail { align-self: flex-start; max-width: 92%; font-size: 13px; }
 details.detail summary { cursor: pointer; color: var(--accent); font-size: 12px; }
 details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 6px 0 0; padding: 8px 10px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; }
 .badges { align-self: flex-start; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+/* "working… ×" under the user's bubble while the turn is being answered; the × stops it. */
+.turn-working { align-self: flex-end; display: inline-flex; align-items: center; gap: 6px; padding: 1px 2px 1px 8px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; }
+.turn-working[hidden] { display: none; }
+.turn-working .thread-dot { width: 7px; height: 7px; animation: beat var(--st-beat) ease-in-out infinite; }
+.turn-stop { flex: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--accent); font-size: 14px; line-height: 1; cursor: pointer; }
+.turn-stop:hover { background: var(--hover); color: var(--err); }
+.turn-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) { .turn-working .thread-dot { animation: none; } }
 .badges[hidden] { display: none; }
 .decision { display: contents; }
 .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--sunken); border: 1px solid var(--line); color: var(--muted); }
@@ -87,7 +113,8 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 .job[hidden] { display: none; }
 .job [hidden] { display: none; }
 /* A task's marker in the conversation: click to expand its thread (the .job panel right after it). */
-.job-marker { align-self: flex-start; margin-left: 18px; max-width: calc(100% - 18px); display: inline-flex; align-items: center; gap: 8px; padding: 3px 10px 3px 8px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
+.job-row { align-self: flex-start; margin-left: 18px; max-width: calc(100% - 18px); display: flex; align-items: center; gap: 2px; }
+.job-marker { min-width: 0; display: inline-flex; align-items: center; gap: 8px; padding: 3px 10px 3px 8px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
 .job-marker::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .job-marker[data-state="running"]::before { background: var(--st-working-fill); animation: beat var(--st-beat) ease-in-out infinite; }
 .job-marker[aria-expanded="true"] { background: var(--hover); }
@@ -98,6 +125,11 @@ details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5p
 .job-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .job-marker-q { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-marker-status { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Stop (×) by a running task's marker, and the Stop button in its card. */
+.job-stop[hidden] { display: none; }
+.job-stop-btn { align-self: flex-start; padding: 3px 10px; font-size: 12px; border-radius: 6px; background: transparent; border-color: color-mix(in srgb, var(--err) 50%, transparent); color: var(--err-text); }
+.job-stop-btn:hover { background: color-mix(in srgb, var(--err) 10%, transparent); border-color: var(--err); }
+.job-stop-btn[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .job-marker[data-state="running"]::before { animation: none; } }
 .job details.detail { max-width: 100%; }
 
@@ -214,14 +246,14 @@ table.ctable .cusd.saved { color: var(--ok); }
 .thread-all { display: flex; justify-content: flex-end; margin-top: 6px; }
 .thread-bulk { flex: none; padding: 1px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .thread-bulk:hover { border-color: var(--line); color: var(--err); }
-.thread-bulk.armed { border-color: var(--err); color: var(--err); }
+.thread-bulk.armed { border-color: var(--err); background: var(--err); color: var(--panel); }
 .thread-bulk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .thread-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; font-size: 12.5px; }
 .thread-row { display: flex; align-items: center; gap: 2px; }
 .thread-row .thread-item { flex: 1; min-width: 0; }
-.thread-del { flex: none; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
-.thread-del:hover { background: var(--hover); color: var(--err); }
-.thread-del:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.thread-del, .job-stop, .task-stop { flex: none; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.thread-del:hover, .job-stop:hover, .task-stop:hover { background: var(--hover); color: var(--err); }
+.thread-del:focus-visible, .job-stop:focus-visible, .task-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .thread-item:hover { background: var(--hover); border-color: var(--line); }
 .thread-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .thread-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--st-working-fill); }
@@ -247,6 +279,33 @@ table.ctable .cusd.saved { color: var(--ok); }
 .turn.queued .meta { align-self: flex-end; }
 .queued-remove { padding: 0; border: 0; background: transparent; font-size: 11px; color: var(--muted); cursor: pointer; }
 .queued-remove:hover { color: var(--accent); text-decoration: underline; }
+.held-note { font-size: 11px; color: var(--muted); }
 /* A comment typed or dictated in comment mode (web/cursor/commentOverlay.ts): its own bubble, marked as typed. */
 .turn.comment .bubble.user { border-left: 3px solid var(--accent); }
 .turn.comment:not(.queued) .bubble.user::before { content: "Comment"; display: block; font: 600 10px/14px ui-sans-serif, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; color: var(--indigo); font-style: normal; }
+
+/* What needs attention in the setup (web/chat/attention.ts): the Settings Dashboard's list, each line a link to its section. */
+.attention { flex: none; padding: 10px 12px; border-left-width: 3px; font-size: 12.5px; max-height: 40vh; overflow: auto; }
+.attention[hidden] { display: none; }
+.attention.bad { border-left-color: var(--err); }
+.attention.busy { border-left-color: var(--muted); }
+.attention.ok { border-left-color: var(--warn); }
+.attn-head { display: flex; align-items: center; gap: 8px; }
+.attn-head strong { flex: 1; min-width: 0; font-size: 13px; }
+.attention.bad .attn-head strong { color: var(--err-text); }
+.attn-light { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.attention.bad .attn-light { background: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 20%, transparent); }
+.attention.ok .attn-light { background: var(--warn); }
+.attention.busy .attn-light { animation: beat var(--st-beat) ease-in-out infinite; }
+.attn-open { flex: none; padding: 2px 8px; font-size: 12px; }
+.attn-close { flex: none; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 16px; line-height: 1; }
+.attn-close:hover { color: var(--text); background: var(--hover); }
+.attn-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.attn-list li { display: grid; grid-template-columns: 7px minmax(0, 1fr); column-gap: 8px; align-items: start; }
+.attn-dot { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--muted); }
+.attn-list li.bad .attn-dot { background: var(--err); }
+.attn-list li.warn .attn-dot { background: var(--warn); }
+.attn-text { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+.attn-link { grid-column: 2; justify-self: start; margin-top: 2px; padding: 0; border: 0; background: transparent; font-size: 12px; color: var(--accent); cursor: pointer; }
+.attn-link:hover { text-decoration: underline; }
+@media (prefers-reduced-motion: reduce) { .attention.busy .attn-light { animation: none; } }

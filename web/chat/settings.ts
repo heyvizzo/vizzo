@@ -3,6 +3,7 @@
 // its own keys; main merges them into the file and passes the result to the sidebar.
 import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, llmOf, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type SpeechLanguage, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
 import type { OrbPos } from "../cursor/pageBridge.ts";
+import { DEFAULT_HOTKEYS, normalizeHotkeys, type Hotkeys } from "../../shared/hotkeys.ts";
 import { clampHangMs, VAD_HANG_MS } from "../audio/vad.ts";
 import { DEFAULT_LISTEN_RMS, clampThreshold } from "./meter.ts";
 
@@ -25,7 +26,7 @@ export interface Settings {
   llmModels: Record<LlmTier, Partial<Record<LlmProvider, LlmChoice>>>;
   /** Chosen voice per TTS model (Piper / Kokoro / OpenAI). */
   ttsVoices: Partial<Record<TtsModel, string>>;
-  /** Open a turn from the mic level instead of holding Shift. */
+  /** Open a turn from the mic level instead of holding the talk key. */
   alwaysListen: boolean;
   /** Linear RMS of the always-listen line. */
   listenThreshold: number;
@@ -47,12 +48,14 @@ export interface Settings {
   showDebug: boolean;
   /** Where the conversation orb was dragged to on the page (fractions of the viewport); null: bottom center. */
   orbPos: OrbPos | null;
+  /** The keyboard shortcuts (shared/hotkeys.ts); main reads them from here too. */
+  hotkeys: Hotkeys;
 }
 
 /** What the Settings window changes. */
 export const PANEL_KEYS = [
   "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "language", "llm", "llmModels", "ttsVoices", "ttsStyle",
-  "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug",
+  "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug", "hotkeys",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
 export const SIDEBAR_KEYS = ["alwaysListen", "listenThreshold", "listenHangMs", "instant", "orbPos"] as const satisfies readonly (keyof Settings)[];
@@ -72,7 +75,7 @@ export function normalizeSettings(saved: unknown): Settings {
     routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, sttModel: DEFAULT_CONFIG.sttModel, longTaskSeconds: 20,
     taskTimeoutMinutes: DEFAULT_CONFIG.taskTimeoutMinutes,
     language: "auto", llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
-    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: true, showCost: true, showDebug: true, orbPos: null,
+    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showDebug: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
   };
   if (saved && typeof saved === "object") Object.assign(settings, saved);
   settings.ttsStyle = { ...DEFAULT_TTS_STYLE, ...settings.ttsStyle };
@@ -93,13 +96,14 @@ export function normalizeSettings(saved: unknown): Settings {
   settings.instant = settings.instant !== false;
   settings.debugOutlines = settings.debugOutlines === true;
   settings.hoverOutline = settings.hoverOutline === true;
-  settings.showRam = settings.showRam !== false;
-  settings.showCost = settings.showCost !== false;
-  settings.showDebug = settings.showDebug !== false;
+  settings.showRam = settings.showRam === true;
+  settings.showCost = settings.showCost === true;
+  settings.showDebug = settings.showDebug === true;
   const o = settings.orbPos;
   settings.orbPos = o && Number.isFinite(o.x) && Number.isFinite(o.y) ? { x: Math.min(1, Math.max(0, o.x)), y: Math.min(1, Math.max(0, o.y)) } : null;
   settings.listenThreshold = clampThreshold(settings.listenThreshold);
   settings.listenHangMs = clampHangMs(settings.listenHangMs);
+  settings.hotkeys = normalizeHotkeys(settings.hotkeys);
   return settings;
 }
 

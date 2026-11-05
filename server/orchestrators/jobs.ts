@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Background jobs (chat mode, RunConfig.backgroundLongTasks): a long task's the solver run continues after its
 // turn ends. When it finishes, the client gets a `job` update, the result joins the conversation, and it's
 // spoken as a notice once no turn is active, with the turn's TTS engine. The user can stop one (stopJob): its
@@ -6,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { isLocalTts, llmOf, taskTimeoutMs, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
 import { llmCostItem, PRICES } from "../cost.ts";
-import { getConversation, type ChatTurn } from "../conversation.ts";
+import { getConversation, retainConversationDrawings, type ChatTurn } from "../conversation.ts";
 import { tracer } from "./trace.ts";
 import { useVoiceCues } from "../adapters/voiceCues.ts";
 import type { ConnectionCache, ConnectionChannel, OrchestratorDeps } from "./types.ts";
@@ -15,6 +16,7 @@ const KEY = "jobs";
 const noMark = () => {};
 
 export interface JobSpec {
+  annotation?: DrawingAnnotation;
   turnId: string;
   config: RunConfig;
   intent: Intent;
@@ -96,7 +98,7 @@ export function startJob(
   deps.solveTask({
     signal: abort.signal, timeoutMs: taskTimeoutMs(spec.config),
     mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.solverFast,
-    history: spec.history, intent: spec.intent, pageContext: spec.pageContext, language: spec.language, llm: llmOf(spec.config).smart,
+    history: spec.history, intent: spec.intent, annotation: spec.annotation, pageContext: spec.pageContext, language: spec.language, llm: llmOf(spec.config).smart,
     voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
     ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId)(),
     onSpokenLine: (l) => { spoken = l.trim(); },
@@ -114,8 +116,9 @@ export function startJob(
       channel.send({ type: "job", job: { ...job } });
       getConversation(conn).push({
         turnId: job.jobId, approach: job.approach,
-        user: `(Background task finished: ${spec.question})`, assistant: job.spoken!, detail: text,
+        annotation: spec.annotation, user: `(Background task finished: ${spec.question})`, assistant: job.spoken!, detail: text,
       });
+      retainConversationDrawings();
       reg.notices = reg.notices
         .then(() => announce(channel, deps, spec.config, job, reg))
         .then((item) => {

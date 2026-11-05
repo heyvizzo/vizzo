@@ -2,8 +2,9 @@
 // samples, clicks and highlights are recorded there (electron/page-preload.ts) and relayed by electron/main.ts.
 // Each process has its own performance clock: times cross the bridge as epoch ms (performance.timeOrigin + t)
 // and each side converts to and from its own clock.
-import type { CursorRest, CursorSample, ElementDetails, PageEvents, PointingTarget } from "../../shared/protocol.ts";
-import type { ThreadInfo, ThreadSay } from "../../shared/threads.ts";
+import { isDrawingAnnotation, type DrawingAnnotation } from "../../shared/annotations.ts";
+import type { CursorRest, CursorSample, ElementDetails, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
+import type { ThreadAnchor, ThreadInfo, ThreadSay } from "../../shared/threads.ts";
 
 /** Chat → page. `start.t` is epoch ms. */
 export type PageCmd =
@@ -22,8 +23,10 @@ export type PageCmd =
   | { type: "orb"; state: OrbState; pos: OrbPos | null }
   /** The conversation as the sidebar shows it, for the orb's panel. */
   | { type: "conversation"; entries: ConvoEntry[] }
+  /** Comments typed in a thread's panel that wait for the current turn to end: shown at the bottom of that panel. */
+  | { type: "held"; items: HeldComment[] }
   /** Turn released: draw a provisional marker on the element under the pointer until `decision.threadId` arrives. */
-  | { type: "provisional"; turnId: string } | { type: "provisional.clear"; turnId: string }
+  | { type: "provisional"; turnId: string; anchor?: ThreadAnchor } | { type: "provisional.clear"; turnId: string }
   /**
    * Settings toggles, off until the sidebar says otherwise. outlines (debugging): draw the `overlay` outlines.
    * hover: the comment mode's hover box on the element under the pointer, outside the mode too.
@@ -33,7 +36,7 @@ export type PageCmd =
   /** The comment bubble (web/cursor/commentOverlay.ts): Send or Add to list, dictation running, its live words. */
   | { type: "comment.state"; state: CommentState }
   /** Dictated words to insert at the comment field's caret. */
-  | { type: "comment.insert"; text: string };
+  | { type: "comment.insert"; text: string; dictation?: DictationTranscript };
 
 export interface BubbleConfirm { confirmId: string; ms: number }
 
@@ -48,6 +51,8 @@ export interface ConvoEntry {
   id: string;
   /** What the user said (null: not a turn). */
   user: string | null;
+  /** Captured drawing attached to this request. */
+  annotation?: DrawingAnnotation;
   /** The assistant's reply ("" while there's none). */
   assistant: string;
   /** Whose line it is, when it isn't a turn's reply ("The red button · index.html", "Background task · 12 s"). */
@@ -58,9 +63,29 @@ export interface ConvoEntry {
   detail?: string;
   /** Shown dimmed: "not sent yet" (Instant off). */
   note?: string;
+  /** Waits for the current turn to end: the panel offers Interrupt and send and Remove (PageHeldAction, `id` is its turnId). */
+  held?: boolean;
+}
+
+/** A comment waiting for the current turn to end, typed in a thread's panel. */
+export interface HeldComment {
+  turnId: string;
+  threadId: string;
+  text: string;
+}
+
+/** One speech recording; word offsets remain seconds relative to the first audio sample. */
+export interface DictationTranscript {
+  id: string;
+  startedAt: number;
+  endedAt: number;
+  words: Word[];
 }
 
 export interface CommentState {
+  /** Locks the receiving form when this recording starts. Times are absolute epoch ms. */
+  dictationId?: string;
+  startedAt?: number;
   /** Instant feedback is on: the bubble's button sends now (off: adds it to the list). */
   instant: boolean;
   /** Dictating into the bubble (Record, Shift or always-listen). */
@@ -77,26 +102,38 @@ export interface CommentState {
 export type PageCommentAction =
   | { type: "comment.draft"; open: boolean }
   | { type: "comment.record"; on: boolean }
-  /** Send the comment (or add it to the list). `sample`: the clicked element, `t` in epoch ms. */
-  | { type: "comment.send"; text: string; sample: CursorSample };
+  /**
+   * Send the comment (or add it to the list). `sample`: the clicked element, `t` in epoch ms. `threadId`: from that
+   * thread's panel (the turn is that thread's).
+   */
+  | { type: "comment.send"; text: string; sample: CursorSample | null; threadId?: string; annotation?: DrawingAnnotation };
 
 export function isPageCommentAction(m: unknown): m is PageCommentAction {
-  const a = m as { type?: unknown; open?: unknown; on?: unknown; text?: unknown; sample?: { elementPath?: unknown } } | null;
+  const a = m as { type?: unknown; open?: unknown; on?: unknown; text?: unknown; sample?: { elementPath?: unknown }; threadId?: unknown; annotation?: unknown } | null;
   if (!a) return false;
   if (a.type === "comment.draft") return typeof a.open === "boolean";
   if (a.type === "comment.record") return typeof a.on === "boolean";
-  return a.type === "comment.send" && typeof a.text === "string" && typeof a.sample?.elementPath === "string";
+  if (a.type !== "comment.send" || typeof a.text !== "string") return false;
+  const drawing = a.annotation === undefined ? false : isDrawingAnnotation(a.annotation);
+  return (typeof a.sample?.elementPath === "string" || (a.sample === null && drawing))
+    && (a.annotation === undefined || drawing)
+    && (a.threadId === undefined || typeof a.threadId === "string");
 }
 
 /** Page → chat: one document's events for the current turn (epoch ms). `final`: the reply to a stop. */
 export interface PageEventsMsg { doc: string; events: PageEvents; final: boolean }
 
 /** Page → chat: the user acted on a thread in the page overlay (opened its panel / confirmed its deletion). Sent on as the ClientMsg. */
-export type PageThreadAction = { type: "thread.focus"; threadId: string } | { type: "thread.delete"; threadId: string };
+export type PageThreadAction =
+  | { type: "thread.focus"; threadId: string }
+  | { type: "thread.delete"; threadId: string }
+  /** The panel's "Always use the smart model" checkbox. */
+  | { type: "thread.smart"; threadId: string; on: boolean };
 
 export function isPageThreadAction(m: unknown): m is PageThreadAction {
-  const a = m as Partial<PageThreadAction> | null;
-  return !!a && (a.type === "thread.focus" || a.type === "thread.delete") && typeof a.threadId === "string" && !!a.threadId;
+  const a = m as { type?: unknown; threadId?: unknown; on?: unknown } | null;
+  if (!a || typeof a.threadId !== "string" || !a.threadId) return false;
+  return a.type === "thread.focus" || a.type === "thread.delete" || (a.type === "thread.smart" && typeof a.on === "boolean");
 }
 
 /**
@@ -124,6 +161,17 @@ export function isPagePanelAction(m: unknown): m is PagePanelAction {
   return !!a && a.type === "thread.panel" && (a.threadId === null || (typeof a.threadId === "string" && !!a.threadId));
 }
 
+/**
+ * Page → chat: a comment waiting for the current turn (HeldComment, ConvoEntry.held). `held.send`: interrupt the turn
+ * and send it now; `held.remove`: drop it. Relayed on the thread channel, not sent to the server.
+ */
+export type PageHeldAction = { type: "held.send" | "held.remove"; turnId: string };
+
+export function isPageHeldAction(m: unknown): m is PageHeldAction {
+  const a = m as { type?: unknown; turnId?: unknown } | null;
+  return !!a && (a.type === "held.send" || a.type === "held.remove") && typeof a.turnId === "string" && !!a.turnId;
+}
+
 export function isPageOrbAction(m: unknown): m is PageOrbAction {
   const a = m as { type?: unknown; pos?: { x?: unknown; y?: unknown } } | null;
   return !!a && a.type === "orb.move" && typeof a.pos?.x === "number" && typeof a.pos.y === "number"
@@ -142,7 +190,7 @@ export interface PageBridge {
   navigate?(url: string): void;
   /** Open a thread's panel on the page (and scroll its marker into view). */
   openThread?(threadId: string): void;
-  onThreadAction?(cb: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction) => void): void;
+  onThreadAction?(cb: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction | PageHeldAction) => void): void;
   /** The comment bubble's actions (comment mode, from the toolbar's pointer button). */
   onComment?(cb: (action: PageCommentAction) => void): void;
 }

@@ -1,3 +1,5 @@
+import { drawingContext } from "../adapters/drawing.ts";
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Element threads: one run queue per thread (docs/PLAN-threads.md, "Follow-up to a running thread", "Concurrent
 // edits to one file"). Each request runs in the thread's own harness session (deps.openThread, opened on first use;
 // it replays the thread's history itself when it has to reopen). A follow-up waits behind the current run; a
@@ -23,10 +25,12 @@ import { threadStore, type ThreadRecord, type ThreadRunState, type ThreadStore }
 const SUMMARY_MAX = 160;
 const noMark: Mark = () => {};
 
-export type RunKind = "request" | "followup" | "correction" | "reconcile";
+/** direct: typed in the panel of a thread that always uses the smart model (no router: the harness decides question or task). */
+export type RunKind = "request" | "followup" | "correction" | "reconcile" | "direct";
 type ThreadDeps = Pick<OrchestratorDeps, "openThread" | "solveInThread" | "openTts" | "voiceId">;
 
 export interface RunSpec {
+  annotation?: DrawingAnnotation;
   kind: RunKind;
   /** What the harness is asked. */
   question: string;
@@ -137,7 +141,7 @@ class ThreadRunner implements ThreadRunState {
       rec.handle = null;
     }
     this.replayCut = spec.messageId ?? null;
-    rec.handle ??= this.deps.openThread!({ role: "solver", choice, replay: () => replayText(store.info(this.threadId), this.replayCut) });
+    rec.handle ??= this.deps.openThread!({ role: "solver", choice, replay: () => replayText(store.info(this.threadId), this.replayCut), replayAnnotations: () => replayAnnotations(store.info(this.threadId), this.replayCut) });
     const kind = spec.kind;
     const win: RunWindow = { threadId: this.threadId, start: store.now(), end: null, files: [], kind };
     store.runLog.push(win);
@@ -148,7 +152,7 @@ class ThreadRunner implements ThreadRunState {
     try {
       const r = await this.deps.solveInThread!({
         thread: rec.handle, kind, mark: spec.inline?.mark ?? noMark, question: spec.question, pointing: spec.pointing ?? [],
-        pageContext: spec.pageContext, language: spec.language, intent: spec.intent, timeoutMs: taskTimeoutMs(spec.config),
+        annotation: spec.annotation, pageContext: spec.pageContext, language: spec.language, intent: spec.intent, timeoutMs: taskTimeoutMs(spec.config),
         voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
         ...trace(),
         onSpokenLine: (l) => { spoken = l.trim(); spec.inline?.onSpokenLine(l); },
@@ -283,10 +287,15 @@ export function replayText(t: ThreadInfo | undefined, cut: string | null = null)
     const who = m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : "System";
     const body = m.kind === "result" ? (m.detail || m.text) : m.text;
     const files = m.filesTouched?.length ? `\n(Edited: ${m.filesTouched.join(", ")})` : "";
-    return [`${who} (${m.kind}): ${body}${files}`];
+    return [`${who} (${m.kind}): ${body}${files}${m.annotation ? `\n${drawingContext(m.annotation)}` : ""}`];
   });
   if (!lines.length) return "";
   return `Earlier in this thread about ${t.title} (a session that has since been closed):\n${lines.join("\n\n")}`;
+}
+
+export function replayAnnotations(t: ThreadInfo | undefined, cut: string | null = null): DrawingAnnotation[] {
+  const i = cut ? t?.messages.findIndex(m => m.id === cut) ?? -1 : -1;
+  return (i >= 0 ? t!.messages.slice(0, i) : t?.messages ?? []).flatMap(m => m.annotation ? [m.annotation] : []).slice(-8);
 }
 
 function runnerOf(store: ThreadStore, threadId: string, deps: ThreadDeps): ThreadRunner | null {

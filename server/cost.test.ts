@@ -4,7 +4,7 @@ import { callCost, computeCost, costBreakdown, costItems, haikuCost, llmCallCost
 import { setPriceCatalog } from "./prices.ts";
 
 /** DEFAULT_CONFIG: both tiers on Claude Code (subscription). */
-const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...DEFAULT_CONFIG, ...o });
+const cfg = (o: Partial<RunConfig> = {}): RunConfig => ({ ...DEFAULT_CONFIG, ttsModel: "eleven_v4_turbo", sttModel: "scribe_v2", ...o });
 /** The fast tier on OhMyPi (billed through its API keys: calls carry their own llmCost), the smart one on Claude Code. */
 const OMP: RunConfig = cfg({ llm: { fast: { provider: "omp", model: "cerebras/gpt-oss-120b", level: "low" }, smart: DEFAULT_CONFIG.llm.smart } });
 const billed = (usd: number, o: Record<string, number> = {}) => ({ input_tokens: 300, output_tokens: 80, ...o, llmCost: { usd, billing: "api" } });

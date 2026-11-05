@@ -69,7 +69,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       return res.end(JSON.stringify(await scanHarnesses()));
     }
     if (url.pathname === "/api/llm/selection") {
-      const { currentSelection, setSelection } = await import("./llmSelection.ts");
+      const { settledSelection, setSelection } = await import("./llmSelection.ts");
       if (req.method === "POST") {
         let body = "";
         for await (const chunk of req) body += chunk;
@@ -80,7 +80,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       }
       if (req.method === "GET") {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify(currentSelection()));
+        return res.end(JSON.stringify(await settledSelection()));
       }
     }
     // On-device speech engines: the selected Voice / Speech models (POST: switch, which kills the old helper and

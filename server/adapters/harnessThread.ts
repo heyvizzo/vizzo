@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Element threads' harness sessions (docs/PLAN-threads.md): one agent per thread, kept across requests so the
 // harness keeps its own context (harnesses.ts `keep`: claude-code's process stays open, codex's thread takes more
 // turns, opencode's session more messages, pi/omp more prompts; grok is cold, so every request is a new agent).
@@ -45,10 +46,10 @@ class Thread implements HarnessThread {
 
   pid(): number | undefined { return this.live ? this.agent!.pid?.() : undefined; }
 
-  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<ThreadResult> {
+  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<ThreadResult> {
     if (this.closed) return Promise.reject(closedError());
     return new Promise<ThreadResult>((resolve, reject) => {
-      this.tail = this.tail.then(() => this.run(user, onText, timeoutMs, resolve, reject));
+      this.tail = this.tail.then(() => this.run(user, onText, timeoutMs, resolve, reject, annotations));
     });
   }
 
@@ -79,19 +80,21 @@ class Thread implements HarnessThread {
   /** One request; resolves (never rejects) once its agent is free for the next one. */
   private async run(
     user: string, onText: ((d: string) => void) | undefined, timeoutMs: number,
-    resolve: (r: ThreadResult) => void, reject: (e: unknown) => void,
+    resolve: (r: ThreadResult) => void, reject: (e: unknown) => void, annotations?: readonly DrawingAnnotation[],
   ): Promise<void> {
     if (this.closed) { reject(closedError()); return; }
     this.busy = true;
     this.lastUsed = ++useSeq;
     let reopened = false;
     let message = user;
+    let images = [...(annotations ?? [])];
     let agent: WarmAgent;
     try {
       if (!this.agent?.alive()) {
         this.drop();
         enforceCap(MAX_LIVE_THREAD_SESSIONS - 1, this);
         const replay = this.opts.replay().trim();
+        images = [...(this.opts.replayAnnotations?.() ?? []), ...images];
         this.agent = takeThreadAgent(this.opts.role, this.opts.choice);
         attached.add(this);
         if (replay) { reopened = true; message = withReplay(replay, user); }
@@ -103,8 +106,11 @@ class Thread implements HarnessThread {
       return;
     }
 
+    const seen = new Set<string>();
+    images = images.reverse().filter(a => { if (seen.has(a.id)) return false; seen.add(a.id); return true; }).reverse();
+    if (images.length) message += `\n\nAttached images, in order: ${images.map(a => a.id).join(", ")}. Match these IDs to the drawing context above.`;
     let aborted = false;
-    const inner = Promise.resolve().then(() => agent.request(message, (d) => { if (!aborted) onText?.(d); }, timeoutMs));
+    const inner = Promise.resolve().then(() => agent.request(message, (d) => { if (!aborted) onText?.(d); }, timeoutMs, images));
     const settled = inner.then(() => true, () => true);
     const stopped = new Promise<never>((_, rej) => { this.stop = () => { aborted = true; rej(abortError()); }; });
     stopped.catch(() => {});

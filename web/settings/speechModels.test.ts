@@ -67,7 +67,7 @@ describe("installView", () => {
     expect(installView(row("scribe_v2"), undefined)).toBeNull();
   });
   it("says what to do while the voice server isn't running", () => {
-    expect(installView(p, undefined)).toEqual({ text: "Choose a project folder to start the voice server." });
+    expect(installView(p, undefined)).toEqual({ text: "Waiting for the voice server…" });
   });
   it("built in: no button", () => {
     expect(installView(row("local_apple"), inst({ engine: "apple", builtin: true, installed: true }))).toEqual({ text: "Built into macOS" });

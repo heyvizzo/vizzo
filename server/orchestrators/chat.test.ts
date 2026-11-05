@@ -27,7 +27,7 @@ function setup(config: Partial<RunConfig>) {
     setNoticeAbort: () => {},
   };
   const ctx: TurnContext = {
-    turnId: "t1", config: { ...DEFAULT_CONFIG, ...CHAT, ...config }, mark: () => {},
+    turnId: "t1", config: { ...DEFAULT_CONFIG, ttsModel: "eleven_v4_turbo", sttModel: "scribe_v2", ...CHAT, ...config }, mark: () => {},
     send: (m) => events.push(m), sendAudio: () => {}, cursorSamples: () => [], tAudioStart: () => 1000,
     connection, channel,
   };

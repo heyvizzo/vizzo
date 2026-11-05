@@ -39,7 +39,7 @@ The only user is the developer (you), running locally on macOS.
 ## 6. Functional requirements
 
 ### Talking
-- FR1. Hold Shift or the talk button to talk, or turn on Always listen (level-based voice detection). Audio playback starts as soon as the first chunk arrives.
+- FR1. Hold the talk key (Control by default, set in Settings → Keyboard) or the talk button to talk, or turn on Always listen (level-based voice detection). Audio playback starts as soon as the first chunk arrives.
 - FR2. Pressing while the assistant talks interrupts it; Esc stops it.
 - FR3. English and Romanian, detected or pinned (Language setting).
 - FR4. The conversation is remembered across turns until "New conversation".
@@ -53,6 +53,7 @@ The only user is the developer (you), running locally on macOS.
 - FR8. Feedback on an element opens a thread with its own persistent solver session and a marker on the page showing its state (running, pending, idle, failed). Follow-ups and corrections go to the same thread.
 - FR9. A finished thread is spoken in full when it's the focused one, otherwise as a one-line reminder.
 - FR10. Comment mode: click an element and type (or dictate) feedback in a bubble on it. With Instant off, turns queue until Send.
+- FR15. Drawing mode: annotate a captured page with pen, arrows, boxes and ellipses, select and move marks, then type or dictate a request. Link spoken phrases from one recording or several voice notes to numbered marks, with editable timing suggestions and explicit selection links. Send the annotated screenshot, phrase links and captured element context as one turn, preserving it through queued feedback and thread messages. Reopen submitted drawings against their original image.
 
 ### Settings and visibility
 - FR11. Choose the router mode, the harness / model / level / speed per tier, the TTS and STT models (and voice), and the long-task threshold. Settings persist.

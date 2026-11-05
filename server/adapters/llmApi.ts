@@ -1,3 +1,5 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
+import { anthropicContent, openaiContent } from "./drawing.ts";
 // The fast tier (router and progress lines) called on a model API directly, instead of through a harness: one
 // streamed HTTP request with the role's system prompt and the turn's real messages, no tools, no process to warm.
 //   openrouter, fireworks, cerebras, openai, zai   OpenAI-style Chat Completions over SSE (fetch)
@@ -23,7 +25,7 @@ export const API_BASE_URL: Record<Exclude<ApiProviderId, "anthropic">, string> =
 /** Output cap: the router writes ~100 tokens, but a reasoning model's thinking counts against it too. */
 const MAX_OUTPUT_TOKENS = 4096;
 
-export interface ApiRequest { system: string; messages: ChatMessage[] }
+export interface ApiRequest { system: string; messages: ChatMessage[]; annotations?: readonly DrawingAnnotation[] }
 
 /** Tests: replace fetch (default: the global one) and the Anthropic client. */
 let doFetch: typeof fetch = (...a) => fetch(...a);
@@ -139,7 +141,7 @@ async function chatCompletions(
   if (!choice.model) throw new Error(`${label(p)}: no model chosen`);
   const body = {
     model: choice.model,
-    messages: [{ role: "system", content: req.system }, ...req.messages],
+    messages: [{ role: "system", content: req.system }, ...req.messages.map((m, i) => ({ ...m, content: i === req.messages.length - 1 && m.role === "user" ? openaiContent(m.content, req.annotations) : m.content }))],
     stream: true,
     stream_options: { include_usage: true },
     // OpenAI's reasoning models only take max_completion_tokens; the others take max_tokens.
@@ -209,7 +211,7 @@ async function anthropicMessages(choice: LlmChoice, req: ApiRequest, onText: ((d
       max_tokens: MAX_OUTPUT_TOKENS,
       // The system prompt is the same every turn: cached (it changes only when the prompt files do).
       system: [{ type: "text", text: req.system, cache_control: { type: "ephemeral" } }],
-      messages: req.messages,
+      messages: req.messages.map((m, i) => ({ ...m, content: i === req.messages.length - 1 && m.role === "user" ? anthropicContent(m.content, req.annotations) : m.content })),
       ...anthropicThinking(choice.level),
     }, { signal });
     stream.on("text", (d) => { text += d; onText?.(d); });
@@ -227,9 +229,14 @@ async function anthropicMessages(choice: LlmChoice, req: ApiRequest, onText: ((d
 export function apiRequest(
   provider: ApiProviderId, choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number,
 ): Promise<HarnessResult> {
-  return provider === "anthropic"
+  const request = provider === "anthropic"
     ? anthropicMessages(choice, req, onText, timeoutMs)
     : chatCompletions(provider, choice, req, onText, timeoutMs);
+  return req.annotations?.length ? request.catch(err => {
+    let detail = err instanceof Error ? err.message : String(err);
+    for (const a of req.annotations!) detail = detail.replaceAll(a.image.dataUrl, "[image attachment]").replaceAll(a.image.dataUrl.slice(a.image.dataUrl.indexOf(",") + 1), "[image bytes]");
+    throw new Error(`Drawing request to ${label(provider)} / ${choice.model} failed: ${detail}. Ensure the selected model supports image input.`);
+  }) : request;
 }
 
 /** How a request is sent, for the prompt inspector. */

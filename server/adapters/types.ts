@@ -1,3 +1,4 @@
+import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Adapter interfaces (ARCHITECTURE §4). Orchestrators depend only on these.
 import type { Mark } from "../clock.ts";
 import type { ChatTurn } from "../conversation.ts";
@@ -53,6 +54,7 @@ export interface OpenTtsOpts {
 export type OpenTts = (opts: OpenTtsOpts) => Promise<TtsStream>;
 
 export interface RouteTurnOpts {
+  annotation?: DrawingAnnotation;
   mark: Mark; transcript: string; pointing: PointingTarget[]; mode: RouterMode;
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
@@ -89,6 +91,14 @@ export interface RouteTurnOpts {
   threads?: ThreadBrief[];
   /** Element threads: what the user is pointing at this turn ("the red button", from the anchor), if anything. */
   anchorLabel?: string;
+  /** The user clicked the pointed element during a spoken turn: a marker is placed there unless they name another thread. */
+  clicked?: boolean;
+  /** Typed, with no speech: the marker stays on the click. */
+  typed?: boolean;
+  /** Typed in the conversation's message box (no pointer): it stays central (a tell can still read a thread's result). */
+  chat?: boolean;
+  /** Spoken with this task's panel open: the turn stays on that thread. */
+  panel?: string;
 }
 
 /** What the router is told about one element thread. */
@@ -143,6 +153,7 @@ export type GenerateFillers = (opts: {
 }) => Promise<{ lines: string[]; cutIn?: string; usage: unknown }>;
 
 export interface SolveTaskOpts {
+  annotation?: DrawingAnnotation;
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
@@ -183,7 +194,7 @@ export interface HarnessThread {
    * If the thread has no live session (first use, evicted, crashed), one is opened and `replay()` is sent first in
    * the same message, so the new session knows the thread's history.
    */
-  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult & {
+  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult & {
     /** Project-relative paths of files the run edited (best effort from the harness's tool events). */
     filesTouched: string[];
     /** A new session was opened for this request (and the replay was prepended). */
@@ -204,6 +215,7 @@ export interface OpenHarnessThreadOpts {
   choice: LlmChoice;
   /** The thread's history as plain text, prepended when a session has to be (re)opened. "" = nothing yet. */
   replay: () => string;
+  replayAnnotations?: () => DrawingAnnotation[];
 }
 /** Live sessions are capped (MAX_LIVE_THREAD_SESSIONS): the least recently used idle one is closed. */
 export type OpenHarnessThread = (opts: OpenHarnessThreadOpts) => HarnessThread;
@@ -212,6 +224,6 @@ export type OpenHarnessThread = (opts: OpenHarnessThreadOpts) => HarnessThread;
 export interface SolveInThreadOpts extends Omit<SolveTaskOpts, "history" | "fast" | "llm"> {
   thread: HarnessThread;
   /** How this request relates to the thread: the first one carries the full system framing. */
-  kind: "request" | "followup" | "correction" | "reconcile";
+  kind: "request" | "followup" | "correction" | "reconcile" | "direct";
 }
 export type SolveInThread = (opts: SolveInThreadOpts) => Promise<{ text: string; usage: unknown; filesTouched: string[] }>;

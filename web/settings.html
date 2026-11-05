@@ -13,6 +13,7 @@
     <a href="#models" data-section="models">Models</a>
     <a href="#stt" data-section="stt">Speech to text (STT)</a>
     <a href="#tts" data-section="tts">Text to speech (TTS)</a>
+    <a href="#keyboard" data-section="keyboard">Keyboard</a>
     <a href="#permissions" data-section="permissions">Permissions</a>
     <a href="#debugging" data-section="debugging">Debugging</a>
     <a href="#cookies" data-section="cookies">Browser cookies</a>
@@ -101,6 +102,30 @@
         <h2>Text to speech (TTS)</h2>
         <p class="note">Speaks the answers. On-device voices are free and run offline.</p>
         <div class="card models" id="tts-models"></div>
+      </section>
+
+      <section id="section-keyboard" data-section="keyboard" hidden>
+        <div class="head">
+          <h2>Keyboard</h2>
+          <button type="button" id="hotkeys-reset" title="Push to talk on Control, comment mode on ⌃M">Restore defaults</button>
+        </div>
+        <p class="note">Click a shortcut, then press the new keys (Esc cancels). A modifier on its own works too: press it and let go. Changes save at once.</p>
+        <div class="card hotkeys" id="hotkeys"></div>
+        <p class="field-error" id="hotkeys-error" role="alert" hidden></p>
+        <h3 class="sub-head">Other shortcuts</h3>
+        <div class="card hotkeys fixed">
+          <div class="hotkey"><span><span class="label">Stop</span> <span class="hint">Stops the voice and leaves comment or drawing mode. Three in a row also stop the running task.</span></span><kbd>Esc</kbd></div>
+          <div class="hotkey"><span><span class="label">Send a comment</span> <span class="hint">In a comment bubble or a thread's panel (⇧Return: a new line).</span></span><kbd>Return</kbd></div>
+          <div class="hotkey"><span><span class="label">Address bar</span></span><kbd>⌘L</kbd></div>
+          <div class="hotkey"><span><span class="label">Reload the page</span></span><kbd>⌘R</kbd></div>
+          <div class="hotkey"><span><span class="label">Choose project folder</span></span><kbd>⌘O</kbd></div>
+          <div class="hotkey"><span><span class="label">Settings</span></span><kbd>⌘,</kbd></div>
+          <div class="hotkey"><span><span class="label">Inspector</span> <span class="hint">The browser pane's developer tools.</span></span><kbd>⌥⌘I</kbd></div>
+          <div class="hotkey"><span><span class="label">Drawing: undo / redo</span></span><kbd>⌘Z / ⇧⌘Z</kbd></div>
+          <div class="hotkey"><span><span class="label">Drawing: select all marks</span> <span class="hint">With Select.</span></span><kbd>⌘A</kbd></div>
+          <div class="hotkey"><span><span class="label">Drawing: delete marks</span></span><kbd>Delete</kbd></div>
+          <div class="hotkey"><span><span class="label">Drawing: nudge marks</span> <span class="hint">1 px; with ⌥, 10 px.</span></span><kbd>Arrow keys</kbd></div>
+        </div>
       </section>
 
       <section id="section-permissions" data-section="permissions" hidden>

@@ -2,12 +2,12 @@
 // The click drops a pin and opens a bubble with an inline form (web/cursor/inlineForm.ts): a text field, a mic
 // (dictation into the field) and Send, or + with Instant feedback off. Send closes the bubble (the thread's marker
 // shows the comment), and so does + for the first comment on an element; reopened on an element with comments
-// queued, the bubble lists them above the form and + adds to them, the bubble staying open for more. While a bubble is open, Shift and always-listen dictate
+// queued, the bubble lists them above the form and + adds to them, the bubble staying open for more. While a bubble is open, the talk key and always-listen dictate
 // into it instead of starting a turn (the chat sidebar decides, web/chat/main.ts).
 // Runs in the page preload, in the overlay's closed shadow root (electron/page-preload.ts); `layer` sits at document
 // (0,0), so everything is placed in document coords. While the mode is on, clicks on the page are swallowed.
 import type { CursorSample } from "../../shared/protocol.ts";
-import type { FormHub, InlineForm } from "./inlineForm.ts";
+import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
 
 export { insertAtCaret } from "./inlineForm.ts";
 
@@ -59,7 +59,7 @@ export interface CommentOverlayOpts {
 }
 
 export interface CommentOverlay {
-  /** keepDraft: leaving the mode keeps an empty bubble open (Caps Lock let go after clicking an element). */
+  /** keepDraft: leaving the mode keeps an empty bubble open (the comment key let go after clicking an element). */
   setMode(on: boolean, keepDraft?: boolean): void;
   /** The queue or the dictation changed: redraw the open bubble. */
   refresh(): void;
@@ -282,7 +282,7 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     const d: Draft = {
       sample: hit.sample, el: hit.el, x: x + scrollX, y: y + scrollY, pin, bubble, queued,
       form: forms.create({
-        placeholder: "What should change? Type, or hold Shift to talk",
+        placeholder: `What should change? Type, or ${talkHint()} to talk`,
         submit: (text) => submit(d, text),
         escape: (empty) => { if (empty) closeDraft(); else d.form.field.blur(); },
       }),

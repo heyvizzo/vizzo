@@ -1,7 +1,7 @@
 // Approach B in threads mode: the router's target sends the turn to a new thread, an existing one, a tell or central.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG, type RunConfig } from "../../shared/config.ts";
-import type { ServerMsg } from "../../shared/protocol.ts";
+import type { CursorSample, ServerMsg } from "../../shared/protocol.ts";
 import type { ThreadAnchor } from "../../shared/threads.ts";
 import type { RouteTurnOpts } from "../adapters/types.ts";
 import { ConnectionState } from "../connection.ts";
@@ -25,6 +25,8 @@ const RED: ThreadAnchor = {
   role: null, tag: "button", bounds: { x: 0, y: 0, width: 100, height: 40 },
 };
 const FRAME = Buffer.alloc(960);
+/** A typed comment's pointer, resting on the clicked element. */
+const CLICKED: CursorSample = { t: 0, x: 50, y: 20, scrollX: 0, scrollY: 0, elementPath: "body > #red", dataSource: null, label: "Get started" };
 const THREADS: Partial<RunConfig> = { approach: "pipeline", memory: true, threads: true, fillers: false, backgroundLongTasks: true, longTaskSeconds: 20 };
 
 let store: ThreadStore;
@@ -155,6 +157,90 @@ describe("pipeline (B) with element threads", () => {
     expect(s.deps.log.threadSends).toEqual([]);
   });
 
+  it("a click: target central still opens a thread on the clicked element", async () => {
+    const s = setup({ target: { kind: "central" }, intent: "task", estimateS: 120 });
+    s.ctx.pageEvents = () => ({
+      clicks: [{ kind: "single", count: 1, t: 1, tEnd: 1, times: [1], x: 10, y: 10, elementPath: "#red", dataSource: null, label: "Get started" }],
+      preselected: null, highlights: [],
+    });
+    await run(s);
+    const [t] = store.list();
+    expect(t).toMatchObject({ title: "the red button" });
+    expect(s.decision()).toMatchObject({ threadId: t!.threadId, background: true, intent: "task" });
+    expect(s.routed[0]!.clicked).toBe(true);
+  });
+
+  it("a typed comment stays on the clicked element, even when the router names another thread", async () => {
+    const here = store.create(RED, "the red button", "task");
+    const other = store.create({ ...RED, selector: "#blue" }, "the blue button", "task");
+    const s = setup({ target: { kind: "thread", threadId: other.threadId, relation: "followup" }, intent: "task", estimateS: 30 });
+    s.ctx.typedText = "make the button bigger";
+    s.ctx.cursorSamples = () => [CLICKED];
+    await run(s);
+    expect(s.decision()?.threadId).toBe(here.threadId);
+    expect(s.routed[0]!.typed).toBe(true);
+    expect(s.routed[0]!.clicked).toBeUndefined();
+    expect(store.info(other.threadId)!.messages).toEqual([]);
+  });
+
+  it("message box: stays in the central conversation, even when the router names a thread", async () => {
+    const red = store.create(RED, "the red button", "task");
+    const s = setup({ target: { kind: "thread", threadId: red.threadId, relation: "followup" }, intent: "task", estimateS: 30 });
+    s.ctx.typedText = "make the red button bigger";
+    s.ctx.chat = true;
+    s.ctx.cursorSamples = () => [CLICKED]; // the pointer moving over the page while typing doesn't make it a comment
+    await run(s);
+    expect(s.routed[0]).toMatchObject({ chat: true });
+    expect(s.routed[0]!.typed).toBeUndefined();
+    expect(s.routed[0]!.clicked).toBeUndefined();
+    expect(s.decision()?.threadId).toBeUndefined();
+    expect(store.info(red.threadId)!.messages).toEqual([]);
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it("message box: a tell reads the thread's result in the conversation", async () => {
+    const t = store.create(RED, "the red button", "task");
+    store.addMessage(t.threadId, { turnId: "t0", role: "assistant", kind: "result", text: "It's bigger now." }, (x) => { x.state = "pending"; x.unread = true; });
+    const s = setup({ tell: t.threadId });
+    s.ctx.typedText = "what happened with the red button?";
+    s.ctx.chat = true;
+    const r = await run(s);
+    expect(s.decision()?.threadId).toBeUndefined();
+    expect(r.voiceText).toBe("It's bigger now.");
+    expect(store.info(t.threadId)).toMatchObject({ state: "idle", unread: false });
+  });
+
+  it("a panel whose thread is gone: an error, and the message isn't routed anywhere", async () => {
+    const s = setup({ target: { kind: "new" }, intent: "task", estimateS: 30 });
+    s.ctx.typedText = "make it bigger";
+    s.ctx.pinnedThread = "gone";
+    s.ctx.cursorSamples = () => [CLICKED];
+    await run(s);
+    expect(s.routed).toEqual([]);
+    expect(s.events.some((e) => e.type === "error" && e.source === "threads")).toBe(true);
+    expect(store.list()).toEqual([]);
+  });
+
+  it("message box: target new or central stays in the central conversation", async () => {
+    store.create(RED, "the red button", "task");
+    for (const target of [{ kind: "new" as const }, { kind: "central" as const }]) {
+      const s = setup({ target, intent: "question", estimateS: 5 });
+      s.ctx.typedText = "does the page load fonts lazily?";
+      s.ctx.chat = true;
+      await run(s);
+      expect(s.decision()?.threadId).toBeUndefined();
+    }
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it("pointing without a click: target central stays the central conversation", async () => {
+    const s = setup({ target: { kind: "central" }, intent: "task", estimateS: 120 });
+    await run(s);
+    expect(store.list()).toEqual([]);
+    expect(s.decision()?.threadId).toBeUndefined();
+    expect(s.routed[0]!.clicked).toBeUndefined();
+  });
+
   it("nothing pointed: target new goes to the central conversation (a background job when long)", async () => {
     pointed.anchor = null;
     const s = setup({ target: { kind: "new" }, intent: "task", estimateS: 120 });
@@ -165,17 +251,52 @@ describe("pipeline (B) with element threads", () => {
     await until(() => s.events.some((e) => e.type === "job" && e.job.state === "done"));
   });
 
-  it("a thread's panel is open: the turn goes to it, whatever the router or the cursor say", async () => {
+  it("spoken with a panel open: the open task keeps the turn, even when another thread is named", async () => {
     const open = store.create(RED, "the red button", "task");
     const other = store.create({ ...RED, selector: "#blue" }, "the blue button", "task");
-    pointed.anchor = { ...RED, selector: "#blue" };
     const s = setup({ target: { kind: "thread", threadId: other.threadId, relation: "followup" }, intent: "question", estimateS: 3 });
     s.ctx.pinnedThread = open.threadId;
     await run(s);
     expect(s.routed[0]!.threads!.map((t) => t.threadId)).toEqual([open.threadId]);
+    expect(s.routed[0]!.panel).toBe("the red button");
     expect(s.decision()?.threadId).toBe(open.threadId);
-    expect(store.info(open.threadId)!.messages.some((m) => m.role === "user")).toBe(true);
     expect(store.info(other.threadId)!.messages).toEqual([]);
+  });
+
+  it("spoken with a panel open: without another thread's name, the open task keeps the turn", async () => {
+    const open = store.create(RED, "the red button", "task");
+    store.create({ ...RED, selector: "#blue" }, "the blue button", "task");
+    const s = setup({ target: { kind: "central" }, intent: "question", estimateS: 3 });
+    s.ctx.pinnedThread = open.threadId;
+    await run(s);
+    expect(s.decision()?.threadId).toBe(open.threadId);
+  });
+
+  it("always the smart model, spoken: the router only acks (forced), the thread's harness does the work", async () => {
+    const open = store.create(RED, "the red button", "task");
+    store.update(open.threadId, (t) => { t.alwaysSmart = true; });
+    const s = setup({ target: { kind: "thread", threadId: open.threadId, relation: "followup" }, intent: "task", estimateS: 3 });
+    s.ctx.pinnedThread = open.threadId;
+    await run(s);
+    expect(s.routed[0]!.mode).toBe("forced");
+    expect(s.decision()).toMatchObject({ threadId: open.threadId, background: true });
+    await until(() => store.info(open.threadId)!.messages.some((m) => m.kind === "result"));
+    expect(s.deps.log.threadSends.map((x) => x.kind)).toEqual(["followup"]);
+  });
+
+  it("always the smart model, typed: no router, straight to the thread's harness", async () => {
+    const open = store.create(RED, "the red button", "task");
+    store.update(open.threadId, (t) => { t.alwaysSmart = true; });
+    const s = setup({ intent: "question" });
+    s.ctx.pinnedThread = open.threadId;
+    s.ctx.typedText = "make it bigger";
+    const r = await run(s);
+    expect(s.routed).toEqual([]);
+    expect(r.voiceText).toBe("");
+    expect(s.decision()).toMatchObject({ threadId: open.threadId, background: true, intent: "task" });
+    expect(store.info(open.threadId)!.messages[0]).toMatchObject({ role: "user", kind: "followup", text: "make it bigger" });
+    await until(() => store.info(open.threadId)!.messages.some((m) => m.kind === "result"));
+    expect(s.deps.log.threadSends.map((x) => x.kind)).toEqual(["direct"]);
   });
 
   it("threads off: no briefs to the router, no threads", async () => {

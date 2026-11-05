@@ -24,8 +24,8 @@ export interface SpeechDeps {
   onRender?(): void;
 }
 
-/** The picked model and what its row says, for the Dashboard. */
-export interface SpeechStatus { row: ModelRow; notes: RowNote[]; voice?: string }
+import type { SpeechStatus } from "./attention.ts";
+export type { SpeechStatus };
 
 /** GET /api/tts/voices. Piper: `installed: false` for a catalog voice that downloads when picked. */
 type VoiceOption = { id: string; label: string; default?: boolean; installed?: boolean; bytes?: number };
