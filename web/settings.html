@@ -11,6 +11,7 @@
     <h1>Settings</h1>
     <a href="#dashboard" data-section="dashboard">Dashboard <span class="nav-dot" id="nav-health" aria-hidden="true"></span></a>
     <a href="#models" data-section="models">Models</a>
+    <a href="#instructions" data-section="instructions">Instructions</a>
     <a href="#stt" data-section="stt">Speech to text (STT)</a>
     <a href="#tts" data-section="tts">Text to speech (TTS)</a>
     <a href="#keyboard" data-section="keyboard">Keyboard</a>
@@ -85,17 +86,37 @@
         </div>
       </section>
 
+      <section id="section-instructions" data-section="instructions" hidden>
+        <h2>Instructions</h2>
+        <p class="note">Preferences for the coding agent. Changes save automatically and apply to the next request, including existing conversations.</p>
+        <div class="card fields">
+          <label for="instructions-global">
+            <span class="label">All projects</span>
+            <span class="hint" id="instructions-global-hint">Used for every folder you open in Vizzo.</span>
+          </label>
+          <textarea id="instructions-global" rows="6" aria-describedby="instructions-global-hint instructions-global-status" placeholder="After making changes, run the relevant tests. When they pass, commit the changes you made." disabled></textarea>
+          <p class="hint" id="instructions-global-status" role="status"></p>
+        </div>
+        <div class="card fields" id="instructions-project-card" hidden>
+          <label for="instructions-project">
+            <span class="label">This project</span>
+            <span class="hint instruction-folder" id="instructions-folder">Loading project…</span>
+          </label>
+          <textarea id="instructions-project" rows="6" aria-describedby="instructions-folder instructions-project-status" placeholder="Use Tailwind utility classes for visual changes. Reuse existing components." disabled></textarea>
+          <p class="hint">Applies alongside All projects and takes priority when they conflict.</p>
+          <p class="hint" id="instructions-project-status" role="status"></p>
+        </div>
+        <p class="hint instructions-help">Your current request takes priority over saved instructions. Saved only on this Mac. Tests and commits require Shell to be enabled in Models.</p>
+        <button type="button" id="instructions-retry" hidden>Retry</button>
+      </section>
+
       <section id="section-stt" data-section="stt" hidden>
         <h2>Speech to text (STT)</h2>
         <p class="note">Transcribes what you say. Scribe streams while you talk; the OpenRouter models get the whole clip on release. On-device models are free and run offline.</p>
-        <div class="card fields">
-          <label>
-            <span class="label">Language</span>
-            <span class="hint">Transcription and the pointing words (“this”, “ăsta”…). Auto detects English or Romanian. Models that won't follow it are flagged below.</span>
-            <select id="language"></select>
-          </label>
-        </div>
         <div class="card models" id="stt-models"></div>
+        <h3 class="sub-head">Pointing words</h3>
+        <p class="note">The words that mean “the thing under my cursor” (“this”, “that”, “here”…), per language. When you say one, Vizzo notes which element the cursor was on. Each language starts with a list you can change.</p>
+        <div class="card pointing" id="pointing-words"></div>
       </section>
 
       <section id="section-tts" data-section="tts" hidden>

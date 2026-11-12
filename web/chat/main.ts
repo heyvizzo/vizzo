@@ -10,7 +10,7 @@ import { drawingAnchor } from "../../shared/anchor.ts";
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 import { drawingPreview, drawingPreviewOpen } from "../cursor/drawingPreview.ts";
 import { connectWithStatus } from "../common.ts";
-import { languagesFor } from "../../shared/pointing.ts";
+import { pointingMatcher, type PointingMatcher } from "../../shared/pointing.ts";
 import { DEFAULT_CONFIG, isLocalStt, llmOf, type RunConfig } from "../../shared/config.ts";
 import type { ClientMsg, CostItem, CursorRest, CursorSample, LlmPrompt, LlmResponse, PageEvents, JobInfo, MemorySnapshot, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, TaskRef, Word } from "../../shared/protocol.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
@@ -35,7 +35,7 @@ import { anchorKey, isQueuedId, queuedAnchor, queuedThreads as groupQueued, reco
 import { costBreakdown, fmtUsd, renderTurnCost, savingsOf, savingsText, type TurnCost } from "./costView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtBytes, fmtElapsed, fmtEstimate, groupThreads, jobHeadline, markerLabel, pageLabel, replyNeedsReply, runningLabel, spokenOf, threadsOnPage, type DecisionLike } from "./logic.ts";
 import { mountAttention, type AttentionBridge } from "./attention.ts";
-import { PANEL_KEYS, SIDEBAR_KEYS, fishVoice, loadSettings, normalizeSettings, saveSettingsKeys, type ChatSettingsBridge } from "./settings.ts";
+import { PANEL_KEYS, SIDEBAR_KEYS, fishVoice, languageConfig, loadSettings, normalizeSettings, saveSettingsKeys, type ChatSettingsBridge } from "./settings.ts";
 
 const PRE_ROLL_MS = 500;
 /** A held modifier talks only once it's held a moment (shared/hotkeys.ts TALK_HOLD_MS, a bubble's FIELD_HOLD_MS): its audio starts that far back. */
@@ -228,7 +228,7 @@ function config(): RunConfig {
     backgroundLongTasks: true,
     longTaskSeconds: settings.longTaskSeconds,
     taskTimeoutMinutes: settings.taskTimeoutMinutes,
-    language: settings.language,
+    ...languageConfig(settings),
     llm: settings.llm,
   };
 }
@@ -2067,6 +2067,12 @@ function enqueue(t: Turn): void {
 }
 
 /** With an on-device Speech model: transcribe a queued voice item now, and re-anchor it on the words. */
+/** The pointing words of a turn transcribed while queued: the chosen languages' lists (Auto: English, until it's sent). */
+function queuedPointingWords(): PointingMatcher {
+  const c = languageConfig(settings);
+  return pointingMatcher(c.languages?.length ? c.languages : ["en"], c.pointingWords);
+}
+
 function transcribeQueued(q: Queued): void {
   if (q.comment !== undefined || q.transcript || q.transcribing || !isLocalStt(settings.sttModel)) return;
   const pcm = recordedPcm(q.rec);
@@ -2074,7 +2080,7 @@ function transcribeQueued(q: Queued): void {
   q.transcribing = true;
   showQueued(q);
   publishQueue();
-  const qs = new URLSearchParams({ model: settings.sttModel, language: settings.language });
+  const qs = new URLSearchParams({ model: settings.sttModel, language: languageConfig(settings).language });
   fetch(`/api/stt/transcribe?${qs}`, { method: "POST", headers: { "content-type": "application/octet-stream" }, body: pcm.buffer })
     .then(async (r) => {
       const j = (await r.json()) as { text?: string; words?: Word[]; error?: string };
@@ -2083,7 +2089,7 @@ function transcribeQueued(q: Queued): void {
     })
     .then((t) => {
       q.transcript = t;
-      if (t.words.length) q.anchor = queuedAnchor(q.rec, t.words, languagesFor(settings.language));
+      if (t.words.length) q.anchor = queuedAnchor(q.rec, t.words, queuedPointingWords());
     })
     .catch((e) => console.warn("[queue] on-device transcription failed", e))
     .finally(() => {

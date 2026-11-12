@@ -10,12 +10,14 @@ import {
 } from "electron";
 import type { ViteDevServer } from "vite";
 import { dirname, join } from "node:path";
-import { readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { CookieReadError, chromeSafeStoragePassword, readBrowserCookies, toElectronCookie, type BrowserId, type ElectronCookie } from "./cookies.ts";
 import { applyEnv, ENV_FIELDS, SECRET_KEYS, sanitizeEnv } from "./settings.ts";
+import { editInstructions, instructionSnapshot } from "./instructions.ts";
+import type { StoredInstructions } from "../shared/instructions.ts";
 import { keychainService, openEnv, sealEnv, type Cipher } from "./secrets.ts";
 import { bundlePath, readBundleId, tildify, uninstallPaths } from "./uninstall.ts";
 import { startWebServer } from "./webServer.ts";
@@ -93,6 +95,7 @@ let turnFrom: number | null = null;
 // ── settings: the chosen project folder, the sidebar width and the browser pane's page, kept across launches ──
 
 interface Settings {
+  instructions?: StoredInstructions;
   projectDir?: string; sidebarWidth?: number; sidebarHidden?: boolean; lastUrl?: string;
   /** Where the Settings window was last left (it opens there again). */
   settingsBounds?: { x: number; y: number; width: number; height: number };
@@ -114,8 +117,16 @@ function readSettings(): Settings {
 }
 
 function saveSettings(patch: Settings) {
-  mkdirSync(dirname(settingsFile()), { recursive: true });
-  writeFileSync(settingsFile(), JSON.stringify({ ...readSettings(), ...patch }, null, 2));
+  const file = settingsFile();
+  const temp = `${file}.${process.pid}.tmp`;
+  mkdirSync(dirname(file), { recursive: true });
+  // The voice server reads instructions at dispatch: it must see a complete old or new settings file.
+  try {
+    writeFileSync(temp, JSON.stringify({ ...readSettings(), ...patch }, null, 2));
+    renameSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
 }
 
 function loadProjectFolder(): string | null {
@@ -175,7 +186,7 @@ function attentionChanged(): void {
 }
 
 /** Settings' sections (web/settings/attention.ts SECTIONS): the one it opens at, named in its URL hash. */
-const SETTINGS_SECTIONS = ["dashboard", "models", "stt", "tts", "keyboard", "permissions", "debugging", "cookies", "keys"];
+const SETTINGS_SECTIONS = ["dashboard", "models", "instructions", "stt", "tts", "keyboard", "permissions", "debugging", "cookies", "keys"];
 
 function openSettings(section?: string) {
   const hash = section && SETTINGS_SECTIONS.includes(section) ? `#${section}` : "";
@@ -263,6 +274,7 @@ function startServer(port: number): Promise<void> {
         } : {}),
         PORT: String(port),
         PROJECT_DIR: projectFolder ?? "",
+        VIZZO_SETTINGS_FILE: settingsFile(),
       },
       stdio: "inherit",
     });
@@ -608,6 +620,7 @@ function createWindow() {
 async function setProjectFolder(dir: string) {
   projectFolder = dir;
   saveProjectFolder(dir);
+  settingsWin?.webContents.send("project-changed", dir);
   // Started at launch (maybe without a folder, or still starting): it gets the folder once it's listening.
   await startVoiceServer();
   server?.postMessage({ type: "project", dir });
@@ -738,6 +751,15 @@ function registerIpc() {
     if (!fromSettings(e)) return null;
     const { values, unreadable } = storedEnv();
     return permissionStatuses().then((permissions) => ({ permissions, fields: ENV_FIELDS, values, unreadable }));
+  });
+  ipcMain.handle("instructions:get", (e) => {
+    if (!fromSettings(e)) throw new Error("Instructions are available in Settings.");
+    return instructionSnapshot(readSettings().instructions, projectFolder);
+  });
+  ipcMain.handle("instructions:save", (e, edit: unknown) => {
+    if (!fromSettings(e)) throw new Error("Instructions can only be edited in Settings.");
+    saveSettings({ instructions: editInstructions(readSettings().instructions, edit) });
+    server?.postMessage({ type: "instructions" });
   });
   ipcMain.handle("settings:refresh", (e) => {
     if (!fromSettings(e)) return [];
@@ -985,6 +1007,7 @@ function buildMenu() {
       submenu: [
         { label: "Address Bar", accelerator: "CmdOrCtrl+L", click: () => toolbar?.webContents.send("focus-address") },
         { label: "Choose Project Folder…", accelerator: "CmdOrCtrl+O", click: () => void pickProjectFolder() },
+        { label: "Project Instructions…", click: () => openSettings("instructions") },
         { label: "Settings…", accelerator: "CmdOrCtrl+,", click: () => openSettings() },
         { type: "separator" },
         { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => currentPage()?.reload() },

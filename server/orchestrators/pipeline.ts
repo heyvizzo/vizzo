@@ -290,6 +290,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           ...(tt.pinned && !tt.typed && tt.anchorLabel ? { panel: tt.anchorLabel } : {}),
         } : {}),
         onDecision: (d) => decide(d),
+        onLanguage: (l) => base.routerLanguage(l),
         ...trace(),
         onSpokenDelta: (d, kind) => {
           if (base.isFinished) return;

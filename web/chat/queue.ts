@@ -3,7 +3,7 @@
 // clock of the recording; the replay shifts them so the turn is released "now" (latency marks stay meaningful).
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 import { anchorTitle, drawingAnchor, inferAnchor } from "../../shared/anchor.ts";
-import { computeRests, resolvePointing, type PointingLanguage } from "../../shared/pointing.ts";
+import { computeRests, resolvePointing, type PointingWords } from "../../shared/pointing.ts";
 import type { ClientMsg, CursorSample, PageClick, PageEvents, Word } from "../../shared/protocol.ts";
 import type { ThreadAnchor, ThreadInfo } from "../../shared/threads.ts";
 
@@ -72,7 +72,7 @@ export function recordedPcm(rec: Recorded[]): Int16Array<ArrayBuffer> {
  * (an on-device transcript, made when it was queued) the rests and pointing words come from them, like a sent turn.
  * Null without a page or an element.
  */
-export function queuedAnchor(rec: Recorded[], words?: Word[], languages?: readonly PointingLanguage[]): ThreadAnchor | null {
+export function queuedAnchor(rec: Recorded[], words?: Word[], languages?: PointingWords): ThreadAnchor | null {
   let start: Extract<TurnMsg, { type: "turn.start" }> | undefined;
   let tAudioStart: number | undefined;
   let tRelease: number | undefined;

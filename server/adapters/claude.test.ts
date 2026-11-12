@@ -7,7 +7,7 @@ import type { MarkName } from "../../shared/marks.ts";
 import type { LlmChoice } from "../../shared/config.ts";
 import {
   ClaudeRefusalError, DEFAULT_LONG_TASK_SECONDS, flattenMessages, extractJsonObject, formatPointingForPrompt, generateFillers,
-  routeTurn, setLogger, solveInThread, solveTask, threadUserMessage, validateRouterInput,
+  projectNote, routeTurn, setLogger, solveInThread, solveTask, threadUserMessage, validateRouterInput,
 } from "./claude.ts";
 import type { HarnessThread, ThreadBrief } from "./types.ts";
 import type { AgentSpec, HarnessResult, WarmAgent } from "./harnesses.ts";
@@ -667,5 +667,22 @@ describe("request shaping", () => {
     expect(flattenMessages({ messages: [{ role: "user", content: "only" }] })).toBe("only");
     expect(extractJsonObject('```json\n{"intent":"clarify","say":"Which one?"}\n```')).toBe('{"intent":"clarify","say":"Which one?"}');
     expect(extractJsonObject("no json")).toBeNull();
+  });
+});
+
+describe("projectNote: what the solver is told about its harness's switches", () => {
+  it("Shell off: no git, use the git state block; Shell on: it can look things up, and doesn't commit", () => {
+    expect(projectNote("claude-code")).toContain("You have no shell");
+    expect(projectNote("claude-code", { shell: true })).toContain("You have a shell");
+    expect(projectNote("claude-code", { shell: true })).toContain("Don't commit");
+    // Codex's shell is on unless it's switched off.
+    expect(projectNote("codex")).toContain("You have a shell");
+    expect(projectNote("codex", { shell: false })).toContain("You have no shell");
+  });
+
+  it("Web: mentioned only when the harness has it switched on", () => {
+    expect(projectNote("claude-code")).not.toContain("search and fetch the web");
+    expect(projectNote("claude-code", { web: true })).toContain("search and fetch the web");
+    expect(projectNote("pi", { web: true })).not.toContain("search and fetch the web");
   });
 });

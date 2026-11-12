@@ -1,7 +1,8 @@
 // The chat's settings, kept in the app's settings file (electron/main.ts `chat`). Two windows edit them: the Settings
 // window (web/settings/main.ts) owns PANEL_KEYS, the chat sidebar (web/chat/main.ts) SIDEBAR_KEYS. Each saves only
 // its own keys; main merges them into the file and passes the result to the sidebar.
-import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, llmOf, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type SpeechLanguage, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
+import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, STT_LANGUAGE_SUPPORT, llmOf, sttLanguagesFor, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type RunConfig, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
+import { parsePointingWords } from "../../shared/languages.ts";
 import type { OrbPos } from "../cursor/pageBridge.ts";
 import { DEFAULT_HOTKEYS, normalizeHotkeys, type Hotkeys } from "../../shared/hotkeys.ts";
 import { clampHangMs, VAD_HANG_MS } from "../audio/vad.ts";
@@ -12,12 +13,18 @@ const STORE_KEY = "chat.settings.v1";
 export const LONG_TASK_MIN = 5;
 export const LONG_TASK_MAX = 600;
 export const validLongTask = (s: unknown): s is number => Number.isInteger(s) && (s as number) >= LONG_TASK_MIN && (s as number) <= LONG_TASK_MAX;
-export const LANGUAGES: { id: SpeechLanguage; label: string }[] = [
-  { id: "auto", label: "Auto (en/ro)" }, { id: "en", label: "English" }, { id: "ro", label: "Română" },
-];
 
 export interface Settings {
-  routerMode: RouterMode; ttsModel: TtsModel; sttModel: SttModel; longTaskSeconds: number; language: SpeechLanguage;
+  routerMode: RouterMode; ttsModel: TtsModel; sttModel: SttModel; longTaskSeconds: number;
+  /**
+   * The languages spoken with each speech-to-text model (its picker in Settings): none = Auto, for a model that says
+   * which language it heard. A model without an entry gets its default (sttLanguages).
+   */
+  sttLanguages: Partial<Record<SttModel, string[]>>;
+  /** The pointing-word lists the user edited, by language code: the textarea's text. A language left out uses its starting list. */
+  pointingWords: Record<string, string>;
+  /** From before the per-model pickers ("auto" | "en" | "ro"): what a model without a selection starts from. */
+  language?: string;
   /** How long (minutes) a task or a thread's run may take before it is stopped. */
   taskTimeoutMinutes: number;
   /** Harness or API + model per tier (fast: router and progress lines; smart: hard questions and tasks). */
@@ -54,7 +61,7 @@ export interface Settings {
 
 /** What the Settings window changes. */
 export const PANEL_KEYS = [
-  "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "language", "llm", "llmModels", "ttsVoices", "ttsStyle",
+  "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "sttLanguages", "pointingWords", "llm", "llmModels", "ttsVoices", "ttsStyle",
   "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug", "hotkeys",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
@@ -74,17 +81,26 @@ export function normalizeSettings(saved: unknown): Settings {
   const settings: Settings = {
     routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, sttModel: DEFAULT_CONFIG.sttModel, longTaskSeconds: 20,
     taskTimeoutMinutes: DEFAULT_CONFIG.taskTimeoutMinutes,
-    language: "auto", llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
+    sttLanguages: {}, pointingWords: {}, llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
     ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showDebug: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
   };
   if (saved && typeof saved === "object") Object.assign(settings, saved);
   settings.ttsStyle = { ...DEFAULT_TTS_STYLE, ...settings.ttsStyle };
   if (!validLongTask(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
   if (!validTaskTimeout(settings.taskTimeoutMinutes)) settings.taskTimeoutMinutes = DEFAULT_CONFIG.taskTimeoutMinutes;
-  if (!LANGUAGES.some((l) => l.id === settings.language)) settings.language = "auto";
+  if (typeof settings.language !== "string") delete settings.language;
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+  settings.sttLanguages = Object.fromEntries(
+    Object.entries(settings.sttLanguages && typeof settings.sttLanguages === "object" ? settings.sttLanguages : {})
+      .filter(([model, v]) => model in STT_LANGUAGE_SUPPORT && strings(v)),
+  );
+  settings.pointingWords = Object.fromEntries(
+    Object.entries(settings.pointingWords && typeof settings.pointingWords === "object" ? settings.pointingWords : {})
+      .filter(([, v]) => typeof v === "string"),
+  );
   // Saved before tiers (claudeBackend) or naming a removed API provider: the defaults. The server's saved
   // selection (GET /api/llm/selection) replaces this.
-  settings.llm = llmOf(settings);
+  settings.llm = llmOf({ llm: settings.llm });
   delete (settings as { claudeBackend?: string }).claudeBackend;
   // Saved when the sidebar could switch approach (A/B/C): only the pipeline is left.
   delete (settings as { approach?: string }).approach;
@@ -125,4 +141,23 @@ export function saveSettingsKeys(bridge: ChatSettingsBridge | undefined, setting
 /** The Drama 3 voice: the Voice ID field's value, or the predefined one. */
 export function fishVoice(settings: Settings): string {
   return settings.ttsVoices.fish_drama_3 || FISH_DEFAULT_VOICE;
+}
+
+/** The languages spoken with a speech-to-text model (default: the selected one): its picker's value, made valid. [] = Auto. */
+export function sttLanguages(settings: Pick<Settings, "sttModel" | "sttLanguages" | "language">, model: SttModel = settings.sttModel): string[] {
+  return sttLanguagesFor(model, settings.sttLanguages[model], settings.language);
+}
+
+/**
+ * A turn's language settings: the speech engine is pinned when one language is chosen, the chosen languages' pointing
+ * words are used together, and the lists the user edited go along.
+ */
+export function languageConfig(settings: Pick<Settings, "sttModel" | "sttLanguages" | "language" | "pointingWords">): Pick<RunConfig, "language" | "languages" | "pointingWords"> {
+  const languages = sttLanguages(settings);
+  const edited = Object.entries(settings.pointingWords);
+  return {
+    language: languages.length === 1 ? languages[0]! : "auto",
+    languages,
+    ...(edited.length ? { pointingWords: Object.fromEntries(edited.map(([code, text]) => [code, parsePointingWords(text)])) } : {}),
+  };
 }

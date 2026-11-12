@@ -102,24 +102,25 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       return res.end(JSON.stringify({ selection: currentSpeech(), engines: await speechEngineStates(), installs: speechInstaller().states() }));
     }
     // Settings' Install / Cancel / Uninstall for an on-device engine, and the download of one more voice (a picked
-    // Piper voice that isn't there). Body: { kind, engine, action, voice? }. Answers with
+    // Piper voice that isn't there). Body: { kind, engine, action, voice?, installUv? }. Answers with
     // every engine's install state (or 400 and the reason, e.g. uninstalling one that's installing).
     if (url.pathname === "/api/speech/install" && req.method === "POST") {
-      const { speechInstaller } = await import("./speechInstall.ts");
+      const { speechInstaller, UvRequiredError } = await import("./speechInstall.ts");
       let body = "";
       for await (const chunk of req) body += chunk;
       const installer = speechInstaller();
       try {
-        const { kind, engine, action, voice } = JSON.parse(body) as { kind: string; engine: string; action: string; voice?: string };
-        if (action === "install") installer.install(kind, engine);
+        const { kind, engine, action, voice, installUv } = JSON.parse(body) as { kind: string; engine: string; action: string; voice?: string; installUv?: boolean };
+        if (action === "install") installer.install(kind, engine, installUv === true);
         else if (action === "install-voice") installer.installVoice(kind, engine, String(voice));
         else if (action === "cancel-voice") installer.cancelVoice(kind, engine, String(voice));
         else if (action === "cancel") installer.cancel(kind, engine);
         else if (action === "uninstall") installer.uninstall(kind, engine);
         else throw new Error(`unknown action ${action}`);
       } catch (e) {
-        res.writeHead(400, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e), installs: installer.states() }));
+        res.writeHead(e instanceof UvRequiredError ? 409 : 400, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e),
+          ...(e instanceof UvRequiredError ? { missingDependency: "uv" } : {}), installs: installer.states() }));
       }
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ installs: installer.states() }));

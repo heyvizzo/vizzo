@@ -223,6 +223,8 @@ export interface RouteStreamEvents {
   onDecision(d: RouteDecisionLite): void;
   onSay(delta: string, kind: SpokenKind): void;
   onSayEnd(kind: SpokenKind): void;
+  /** The `language` field (the language of the user's words, as the router wrote it), before `say`. */
+  onLanguage?(language: string): void;
 }
 
 /** "ack" when a delegation follows (question/task), "answer" when `say` is the whole reply. */
@@ -235,7 +237,7 @@ export function parseEstimate(v: unknown): number | null {
   return Math.max(1, Math.round(n));
 }
 
-export interface RouteFields { intent?: unknown; estimate_seconds?: unknown; target?: unknown; relation?: unknown; tell?: unknown; say?: unknown; question?: unknown }
+export interface RouteFields { intent?: unknown; estimate_seconds?: unknown; language?: unknown; target?: unknown; relation?: unknown; tell?: unknown; say?: unknown; question?: unknown }
 
 /** The router's raw thread fields, as written. */
 export interface ThreadFields { target?: unknown; relation?: unknown; tell?: unknown }
@@ -358,6 +360,8 @@ export class RouteInputStream {
       this.raw[k] = v;
       if (k === "tell") this.tellSeen = true;
       if (!this._decision && this.ready()) this.decide(this.intent!);
+    } else if (k === "language") {
+      if (typeof v === "string" && v.trim()) this.ev.onLanguage?.(v.trim());
     } else if (k === "say" && this.sayActive) {
       this.sayActive = false;
       this.sayClosed = true;

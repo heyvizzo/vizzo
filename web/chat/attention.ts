@@ -2,7 +2,7 @@
 // the top of the sidebar so it's in view on the first run (a harness that isn't installed, a speech model missing its
 // key or still downloading, the microphone not allowed…). Each line opens Settings at its section. It hides when
 // nothing is wrong; × hides it until something else needs attention.
-import type { LlmChoice, LlmTier, SpeechLanguage, SttModel, TtsModel } from "../../shared/config.ts";
+import { sttLanguagesFor, type LlmChoice, type LlmTier, type SttModel, type TtsModel } from "../../shared/config.ts";
 import {
   SECTION_LABELS, SERVER_DOWN, keyProblems, permissionProblems, sortProblems, speechProblems, speechStatusOf, tierProblems, verdict,
   type EngineState, type InstallState, type PermissionRow, type Problem, type ProviderInfo,
@@ -18,7 +18,7 @@ export interface AttentionDeps {
   bridge: AttentionBridge | undefined;
   openSettings(section: string): void;
   /** The current picks (they change from Settings). */
-  current(): { llm: Record<LlmTier, LlmChoice>; sttModel: SttModel; ttsModel: TtsModel; language: SpeechLanguage };
+  current(): { llm: Record<LlmTier, LlmChoice>; sttModel: SttModel; ttsModel: TtsModel; sttLanguages: Partial<Record<SttModel, string[]>>; language?: string };
 }
 
 /** A loading-only state shows only if it lasts this long (an engine loading at every launch shouldn't flash the card). */
@@ -42,7 +42,7 @@ export function mountAttention(box: HTMLElement, deps: AttentionDeps): { refresh
     if (serverDown) out.push(SERVER_DOWN);
     if (providers) out.push(...tierProblems("fast", cur.llm.fast, providers), ...tierProblems("smart", cur.llm.smart, providers));
     if (!serverDown && providers && app) {
-      const ctx = { env: Object.fromEntries(app.set.map((k) => [k, "1"])), language: cur.language, engines, installs, pending: false };
+      const ctx = { env: Object.fromEntries(app.set.map((k) => [k, "1"])), languages: (model: SttModel) => sttLanguagesFor(model, cur.sttLanguages[model], cur.language), engines, installs, pending: false };
       out.push(...speechProblems("stt", speechStatusOf("stt", cur.sttModel, ctx, keyLabel)));
       out.push(...speechProblems("tts", speechStatusOf("tts", cur.ttsModel, ctx, keyLabel)));
     }

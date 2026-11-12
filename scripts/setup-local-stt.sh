@@ -4,6 +4,7 @@
 # .models/{parakeet,moonshine,whisperkit}. Apple SpeechTranscriber needs nothing: macOS installs its model on first use.
 # Idempotent.   npm run setup:local-stt [parakeet] [moonshine] [whisperkit]   (no engine: all; Settings → Install runs it for one)
 set -euo pipefail
+source "$(dirname "$0")/ensure-uv.sh"
 # SPEECH_DATA_DIR: where the env and .models/ go (the packaged app's Application Support folder); else the repo.
 cd "${SPEECH_DATA_DIR:-$(dirname "$0")/..}"
 
@@ -11,7 +12,7 @@ ENGINES="${*:-parakeet moonshine whisperkit}"
 want() { [[ " $ENGINES " == *" $1 "* ]]; }
 
 if want parakeet || want moonshine; then
-  command -v uv >/dev/null || { echo "uv is required (https://docs.astral.sh/uv/)"; exit 1; }
+  ensure_uv
   echo "Setting up Python"
   [ -x .venv-stt/bin/python ] || uv venv .venv-stt --python 3.12
   PKGS="numpy scipy"

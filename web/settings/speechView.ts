@@ -5,9 +5,11 @@
 // being typed in keeps its focus while the engine states are polled.
 import type { SttModel, TtsModel } from "../../shared/config.ts";
 import type { EngineState, InstallState } from "../../shared/protocol.ts";
-import { fishVoice, type Settings } from "../chat/settings.ts";
+import { fishVoice, sttLanguages, type Settings } from "../chat/settings.ts";
+import { languagePicker } from "./languageView.ts";
 import { fmtBytes } from "../chat/logic.ts";
 import { STT_ROWS, TTS_ROWS, canSelect, installView, rowNotes, voiceNotes, type ModelRow, type RowNote, type SpeechKind } from "./speechModels.ts";
+import { requestSpeechInstall } from "./speechInstall.ts";
 
 export interface SpeechDeps {
   settings: Settings;
@@ -100,6 +102,13 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
   /** The fields next to a model: what it can be told besides the text. */
   function params(r: RowEls): HTMLElement[] {
     const id = r.row.id;
+    if (r.row.kind === "stt") {
+      // Each speech-to-text model has its own languages: what it offers and whether it can detect them differ.
+      const picker = languagePicker(id as SttModel, settings, () => { deps.save(); picker.fill(); render(); });
+      const fill = r.fill;
+      r.fill = () => { fill(); picker.fill(); };
+      return [picker.el];
+    }
     if (id === "eleven_v4_turbo" || id === "eleven_flash_v2_5") {
       const input = envInput(r, "ELEVENLABS_VOICE_ID", "voice id");
       input.title = "The ElevenLabs voice (both ElevenLabs models use it).";
@@ -138,7 +147,7 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
     }
     if (id === "openai_tts_1" || id === "kokoro" || id === "piper") {
       const select = el("select");
-      select.title = "The voice for English. Romanian uses the model's own Romanian voice.";
+      select.title = "The voice for English. Other languages use the model's own voice for them, where it has one.";
       select.onchange = () => {
         const opt = voices[id]?.find((v) => v.id === select.value);
         if (opt?.installed === false) {
@@ -204,7 +213,7 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
     r.radio.disabled = !canSelect(row, install, selected);
     r.radio.title = r.radio.disabled ? "Install it first" : "";
     const notes = rowNotes(row, {
-      selected, env: deps.env(), language: settings.language, install, engines, pending: pending[row.kind as SpeechKind],
+      selected, env: deps.env(), languages: (m) => sttLanguages(settings, m), install, engines, pending: pending[row.kind as SpeechKind],
     }, deps.keyLabel);
     if (r.failed) notes.unshift({ tone: "error", text: r.failed });
     notes.push(...voiceNotes(install, (v) => voices[row.id]?.find((o) => o.id === v)?.label ?? v));
@@ -339,9 +348,9 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
     const button = r.install!.button;
     button.disabled = true;
     r.failed = undefined;
-    fetch("/api/speech/install", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: r.row.kind, engine: r.row.engine, action }) })
-      .then((res) => res.json() as Promise<{ installs: InstallState[]; error?: string }>)
+    requestSpeechInstall({ kind: r.row.kind, engine: r.row.engine, action }, r.row.name)
       .then((j) => {
+        if (!j) return;
         installs = j.installs;
         if (j.error) r.failed = j.error;
         if (action === "uninstall") loadVoices();

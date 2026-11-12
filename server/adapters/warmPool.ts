@@ -7,7 +7,7 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // without a pool (a turn sent with another config) starts one on the spot, so only its first request is cold.
 // Element threads take their agents here too (`takeThreadAgent`): kept across requests, never back in a pool.
 // A fast tier on a model API (llmApi.ts) has nothing to warm: its roles get no pool.
-import { cleanToggles, isHarness, LLM_PROVIDER_LABELS, type HarnessId, type LlmChoice, type LlmTier } from "../../shared/config.ts";
+import { cleanToggles, isHarness, LLM_PROVIDER_LABELS, type HarnessId, type HarnessToggles, type LlmChoice, type LlmTier } from "../../shared/config.ts";
 import type { CliRole } from "./claudeCli.ts";
 import { AGENT_FACTORIES, KEEPS_POOLED, stopSharedServers, type AgentFactory, type AgentSpec, type HarnessResult, type WarmAgent } from "./harnesses.ts";
 
@@ -20,8 +20,8 @@ export const ROLE_TIER: Record<CliRole, LlmTier> = { router: "fast", fillers: "f
 let log: (msg: string) => void = (msg) => console.info(msg);
 export function setWarmLogger(fn: (msg: string) => void): void { log = fn; }
 
-/** The system prompt and project folder of each role on a harness (registered by claude.ts). */
-type SpecSource = (role: CliRole, harness: HarnessId) => { system: string; project?: string };
+/** The system prompt and project folder of each role on a harness with these toggles (registered by claude.ts). */
+type SpecSource = (role: CliRole, harness: HarnessId, toggles?: HarnessToggles) => { system: string; project?: string };
 let specSource: SpecSource | null = null;
 export function registerRoleSpecs(fn: SpecSource): void { specSource = fn; }
 
@@ -35,8 +35,8 @@ export function agentSpec(role: CliRole, choice: LlmChoice): AgentSpec {
   if (!specSource) throw new Error("role prompts not registered");
   const harness = choice.provider;
   if (!isHarness(harness)) throw new Error(`${LLM_PROVIDER_LABELS[harness]} is a model API, not a harness: it can't run the ${role}`);
-  const { system, project } = specSource(role, harness);
   const toggles = cleanToggles(harness, choice.toggles);
+  const { system, project } = specSource(role, harness, toggles);
   return {
     role, harness, model: choice.model,
     ...(choice.level ? { level: choice.level } : {}), ...(choice.speed === "fast" ? { speed: "fast" as const } : {}),

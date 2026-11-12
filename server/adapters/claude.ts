@@ -6,8 +6,9 @@ import { attachmentSummary, drawingContext, redactImagePayloads } from "./drawin
 // call through a harness), streamed and acted on as it arrives; the solver answers in the SPOKEN:-first format.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_CONFIG, isApiProvider, LLM_PROVIDER_LABELS, type LlmChoice, type LlmProvider, type RouterMode } from "../../shared/config.ts";
+import { DEFAULT_CONFIG, isApiProvider, isHarness, LLM_PROVIDER_LABELS, toggleOn, type HarnessToggles, type LlmChoice, type LlmProvider, type RouterMode } from "../../shared/config.ts";
 import { formatPointingLine } from "../../shared/pointing.ts";
+import { languageName } from "../../shared/languages.ts";
 import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent } from "../../shared/protocol.ts";
 import {
   kindFor, NarrationGate, parseEstimate, resolveThreadRoute, RouteInputStream, SpokenLineParser, type RouteFields, type ThreadRouteContext,
@@ -19,6 +20,7 @@ import { describeAgent, type HarnessResult } from "./harnesses.ts";
 import { agentSpec, harnessRequest, registerRoleSpecs, ROLE_TIER } from "./warmPool.ts";
 import { apiRequest, describeApi } from "./llmApi.ts";
 import { projectDir } from "../project.ts";
+import { appendInstructions } from "../instructions.ts";
 import { gitContext } from "../gitContext.ts";
 import { SERVER_DIR } from "../paths.ts";
 import { FISH_ACK_CUES, FISH_FILLER_CUES, FISH_SOLVER_CUES } from "./voiceCues.ts";
@@ -115,8 +117,7 @@ export function errorResponseInfo(target: LlmPrompt["target"], t0: number, err: 
 
 // ── Spoken language ─────────────────────────────────────────────────────────
 
-const LANGUAGE_NAMES: Record<string, string> = { en: "English", ro: "Romanian" };
-export const languageName = (code: string): string => LANGUAGE_NAMES[code] ?? code;
+export { languageName };
 /** A per-turn instruction line when the user didn't speak English ("" otherwise). */
 export function languageLine(language: string | undefined, what: string): string {
   return language ? `The user spoke ${languageName(language)}: write ${what} in ${languageName(language)}.` : "";
@@ -129,22 +130,32 @@ const ROUTER_FORMAT = `
 
 ## Output format
 Reply with ONLY one JSON object (no code fences, no other text), keys in exactly this order:
-{"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "say": "<what to speak now>", "question": "<the delegated request, or empty>"}
-"intent" and "estimate_seconds" come first because the reply is streamed and acted on as it arrives.`;
+{"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "language": "<ISO 639-1 code of the language the user spoke or wrote: en, de, ro…>", "say": "<what to speak now>", "question": "<the delegated request, or empty>"}
+"intent" and "estimate_seconds" come first because the reply is streamed and acted on as it arrives; "language" comes before "say" because it picks the voice that speaks it.`;
 
 const FILLERS_FORMAT = `
 
 ## Output format
 Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…", "…", "…"], "cut_in": "…"}`;
 
-/** Added to the solver's system prompt when it works in the project folder (Claude Code's tool names). */
-const PROJECT_NOTE = `Your working directory is the project you're answering about. Find the code behind the pointed elements with Glob, Grep and Read: start from the \`selector\` line (tag, ids, classes, text), then read the markup, CSS and script that render it, and the project's DECISIONS.md. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, make the change with Edit or Write, keep it to what was asked, and read the file back to check it. Never read or edit .env files. Without a shell you can't run git, and the files under .git/ are compressed: don't read them or hunt for other copies of a file. Use the request's git state block (status, recent commits, uncommitted changes), and say plainly when an answer needs history it doesn't show.`;
+/**
+ * Added to the solver's system prompt when it works in the project folder: how to find and change the code, and
+ * what its harness's switches (Settings: Shell, Web) give it. Claude Code's tools are named; the other harnesses'
+ * file tools have other names.
+ */
+export function projectNote(harness: LlmProvider, toggles?: HarnessToggles): string {
+  const claude = harness === "claude-code";
+  const has = (id: "shell" | "web"): boolean => isHarness(harness) && toggleOn(harness, toggles, id);
+  return [
+    `Your working directory is the project you're answering about. Find the code behind the pointed elements ${claude ? "with Glob, Grep and Read" : "with your file search and read tools"}: start from what identifies the element (its JSX location or data-source when given, else its \`selector\` line, data-testid, classes and text), then read the markup, styles and script that render it. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, ${claude ? "make the change with Edit or Write" : "make the change with your file editing tools"}, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`,
+    has("shell")
+      ? `You have a shell. Use it to look things up when the request needs it (git log, blame and diff, the project's own type check or tests); the request's git state block shows where things stood when it was sent. Don't commit, push, switch branches, install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served, and the user decides what gets committed.`
+      : `You have no shell, so you can't run git, builds or tests, and the files under .git/ are compressed: don't read them or hunt for other copies of a file. Use the request's git state block (status, recent commits, uncommitted changes), and say plainly when an answer needs history it doesn't show, or when a change should be checked by running something.`,
+    ...(has("web") ? [`You can search and fetch the web: use it for documentation the project doesn't contain, never for what the project's own code answers.`] : []),
+  ].join(" ");
+}
 /** Added to the solver's system prompt when there's no project folder (no tools). */
 const NO_TOOLS_NOTE = `You have no tools in this session: no files, no shell, no web. Answer from the request and the conversation alone, in the format above, and never write a tool call.`;
-/** PROJECT_NOTE for the other harnesses (their file tools have other names). */
-const PROJECT_NOTE_ANY_HARNESS = PROJECT_NOTE
-  .replace("with Glob, Grep and Read", "with your file search and read tools")
-  .replace("make the change with Edit or Write", "make the change with your file editing tools");
 
 const readText = (p: string): string => readFileSync(join(SERVER_DIR, p), "utf8");
 
@@ -166,13 +177,13 @@ function prompts(): { router: string; routerThreads: string; solver: string; fil
 }
 
 /** Each role's system prompt on a harness; the solver works in the project folder when there is one. */
-export function roleSystem(role: CliRole, harness: LlmProvider): { system: string; project?: string } {
+export function roleSystem(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { system: string; project?: string } {
   if (role === "router") return { system: routerSystem() + ROUTER_FORMAT };
   if (role === "fillers") return { system: prompts().fillers + FILLERS_FORMAT };
   const dir = projectDir();
   // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
-  if (!dir) return { system: `${prompts().solver}\n\n${NO_TOOLS_NOTE}` };
-  return { system: `${prompts().solver}\n\n${harness === "claude-code" ? PROJECT_NOTE : PROJECT_NOTE_ANY_HARNESS}`, project: dir };
+  if (!dir) return { system: appendInstructions(`${prompts().solver}\n\n${NO_TOOLS_NOTE}`) };
+  return { system: appendInstructions(`${prompts().solver}\n\n${projectNote(harness, toggles)}`), project: dir };
 }
 registerRoleSpecs(roleSystem);
 
@@ -285,7 +296,7 @@ const MODE_LINE: Record<RouterMode, string> = {
 
 /** Threads mode's output format: the thread fields between `estimate_seconds` and `say`. */
 const THREADS_FORMAT = `Output format for this turn (instead of the one in your instructions), keys in exactly this order:
-{"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "target": "new" | "<thread id>" | "central", "relation": "followup" | "correction" | null, "tell": "<thread id>" | null, "say": "<what to speak now>", "question": "<the delegated request, or empty>"}`;
+{"intent": "question" | "task" | "clarify" | "answer", "estimate_seconds": <integer or null>, "target": "new" | "<thread id>" | "central", "relation": "followup" | "correction" | null, "tell": "<thread id>" | null, "language": "<ISO 639-1 code of the language the user spoke or wrote>", "say": "<what to speak now>", "question": "<the delegated request, or empty>"}`;
 
 /** One line per thread: `- t1: the 'Get started' button (running, under the cursor): Making it bigger.` */
 export function formatThreadBriefs(threads: readonly ThreadBrief[]): string {
@@ -347,7 +358,7 @@ function validateThreadsInput(v: unknown, ctx: ThreadRouteContext): RouterInput 
 }
 
 export const routeTurn: RouteTurn = async ({
-  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, voiceCues, onDecision, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, llm,
+  mark, transcript, pointing, mode, history, pageContext, longTaskSeconds, language, voiceCues, onDecision, onLanguage, onSpokenDelta, onSpokenEnd, onPrompt, onResponse, llm,
   threads, anchorLabel, clicked, typed, chat, panel, annotation,
 }) => {
   const choice = choiceFor(llm, "router");
@@ -361,6 +372,7 @@ export const routeTurn: RouteTurn = async ({
       onDecision: (d) => onDecision?.(d),
       onSay: (d, kind) => onSpokenDelta(d, kind),
       onSayEnd: (kind) => onSpokenEnd?.(kind),
+      onLanguage: (l) => onLanguage?.(l),
     },
     // Threads mode: `answer` streams in any mode (a tell); resolveThreadRoute turns a forced-mode answer without it into clarify.
     mode === "forced" && !ctx ? ROUTE_INTENTS_FORCED : ROUTE_INTENTS_AUTO,

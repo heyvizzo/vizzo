@@ -7,10 +7,10 @@ import type { EngineState, InstallState } from "../../shared/protocol.ts";
 import { STT_ROWS, TTS_ROWS, rowNotes, voiceNotes, type ModelRow, type RowContext, type RowNote, type SpeechKind } from "./speechModels.ts";
 
 export type Tone = "ok" | "bad" | "warn" | "busy";
-export type Section = "dashboard" | "models" | "stt" | "tts" | "keyboard" | "permissions" | "debugging" | "cookies" | "keys";
-export const SECTIONS: readonly Section[] = ["dashboard", "models", "stt", "tts", "keyboard", "permissions", "debugging", "cookies", "keys"];
+export type Section = "dashboard" | "models" | "instructions" | "stt" | "tts" | "keyboard" | "permissions" | "debugging" | "cookies" | "keys";
+export const SECTIONS: readonly Section[] = ["dashboard", "models", "instructions", "stt", "tts", "keyboard", "permissions", "debugging", "cookies", "keys"];
 export const SECTION_LABELS: Record<Section, string> = {
-  dashboard: "Dashboard", models: "Models", stt: "Speech to text (STT)", tts: "Text to speech (TTS)", keyboard: "Keyboard", permissions: "Permissions",
+  dashboard: "Dashboard", models: "Models", instructions: "Instructions", stt: "Speech to text (STT)", tts: "Text to speech (TTS)", keyboard: "Keyboard", permissions: "Permissions",
   debugging: "Debugging", cookies: "Browser cookies", keys: "API Keys",
 };
 export const isSection = (s: unknown): s is Section => (SECTIONS as readonly unknown[]).includes(s);

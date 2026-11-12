@@ -59,6 +59,24 @@ afterEach(() => { for (const t of sessionsLeft.splice(0)) t.close(); });
 const open = (replay = () => "") => { const t = openHarnessThread({ role: "solver", choice: SMART, replay }); sessionsLeft.push(t); return t; };
 
 describe("harness threads", () => {
+  it("finishes in-flight work with its original instructions and reopens the next request with history", async () => {
+    const t = open(() => "Earlier conversation");
+    const first = t.send("first", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    registerRoleSpecs((role) => ({ system: `${role} updated instructions`, project: "/proj" }));
+    const next = t.send("next", undefined, 1000);
+    expect(made[0]!.dead).toBe(false);
+    expect(made).toHaveLength(1);
+    made[0]!.answer("first finished");
+    expect((await first).text).toBe("first finished");
+    await until(() => !!made[1]?.pending.length);
+    expect(made[0]!.dead).toBe(true);
+    expect(made[1]!.spec.system).toBe("solver updated instructions");
+    expect(made[1]!.messages[0]).toBe(withReplay("Earlier conversation", "next"));
+    made[1]!.answer("next finished");
+    expect(await next).toMatchObject({ text: "next finished", reopened: true });
+  });
+
   it("replays historical images only when reopening and preserves each queued request's own drawing", async () => {
     const previous = { ...annotation, id: "previous" };
     const current = { ...annotation, id: "current" };

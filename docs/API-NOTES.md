@@ -216,6 +216,20 @@ Same 9 s clip (Drama 3 output, 24 kHz) and `verbose_json` + `timestamp_granulari
 - Nothing on OpenRouter's STT endpoint streams. Live partials stay with ElevenLabs Scribe (WebSocket). Streaming Nemotron would need DeepInfra's own API, which this app doesn't use.
 - "Fish Audio S2" isn't in OpenRouter's STT catalog. The Fish models are Transcribe 1 and Transcribe 1 Pro; Transcribe 1 is the one wired in.
 
+## STT: which engines report the language they heard ✅ (live, 2026-11-11)
+
+German, Spanish, French, Japanese and Romanian clips (macOS `say`, 24 kHz), nothing pinned. This decides each model's language picker (`shared/config.ts` `STT_LANGUAGE_SUPPORT`).
+
+| Engine | `language` in the result | Notes |
+|---|---|---|
+| `openai/whisper-large-v3` (OpenRouter) | ✅ a code: `de`, `es`, `fr`, `ja`, `ro` | |
+| `fish-audio/transcribe-1` (OpenRouter) | ✅ a code, right on all five | Still ignores a pinned language (above) |
+| `nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b` (OpenRouter) | ❌ the literal string `"auto"` | Empty text for the French and Romanian clips; the Japanese clip came back as one word (no word timing to point with) |
+| Scribe v2 Realtime | ❌ `language_code: null` on `committed_transcript_with_timestamps` | Transcribed all five |
+| WhisperKit (on-device) | ✅ a code | |
+| Parakeet (on-device) | ❌ | `parakeet_mlx`'s result has no language field: text and timed tokens only |
+| Apple SpeechTranscriber | n/a | Has to be given a locale; its locales cover en, zh, fr, de, it, ja, ko, pt, es (`{"ready":true,"locales":[…]}` from tools/macstt) |
+
 ## Local TTS: Kokoro and Piper ✅ (installed and run locally)
 
 - Setup: `npm run setup:local-tts` → `.venv-tts` (Python 3.12 via uv: `kokoro-onnx` 0.6, `onnxruntime` 1.31, `piper-tts` 1.8) and `.models/` (gitignored).

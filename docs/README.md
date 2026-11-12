@@ -27,6 +27,8 @@ The chat is the sidebar: each turn is classified question / task / clarify / ans
 
 Checks: `npm run typecheck`, `npm test`, `npm run smoke:{scribe,tts,claude,e2e}` (each SKIPs without its keys), `npm run smoke:e2e -- --fake` (whole server path, fake vendors), `npm run smoke:chat -- a.wav b.wav c.wav` (real multi-turn chat).
 
+Settings → **Instructions** has two textareas: **All projects** applies to every folder, and **This project** applies only to the selected folder. They save automatically in the app's local settings file; project entries use the folder's canonical path. Project instructions take precedence over global preferences where they conflict, and an explicit current request takes precedence over both. They apply to the coding agent's next request, including an existing conversation, without interrupting running work. View → Project Instructions opens this section directly. Tests and commits still require the model's Shell toggle. The prompt inspector includes both labeled scopes. `VIZZO_SETTINGS_FILE` selects a settings file when running the server separately; by default it reads the development desktop settings.
+
 ### Drawing feedback
 
 Click the pencil beside Comment to capture the current page. Use Pen, Arrow, Box or Ellipse, then type or hold Control to dictate the request. Send submits the image and element details together; with Instant off, it joins the feedback queue. Click a message's drawing thumbnail to reopen its original image.

@@ -3,7 +3,7 @@ import type { InstallState } from "../../shared/protocol.ts";
 import { STT_ROWS, TTS_ROWS, canSelect, installView, rowNotes, voiceNotes, type ModelRow, type RowContext } from "./speechModels.ts";
 
 const row = (id: string): ModelRow => [...STT_ROWS, ...TTS_ROWS].find((r) => r.id === id)!;
-const ctx = (over: Partial<RowContext> = {}): RowContext => ({ selected: false, env: {}, language: "auto", engines: [], pending: false, ...over });
+const ctx = (over: Partial<RowContext> = {}): RowContext => ({ selected: false, env: {}, languages: () => [], engines: [], pending: false, ...over });
 const label = (key: string) => ({ OPENROUTER_API_KEY: "OpenRouter API key", ELEVENLABS_API_KEY: "ElevenLabs API key" })[key] ?? key;
 const inst = (over: Partial<InstallState>): InstallState => ({ kind: "stt", engine: "parakeet", installed: false, state: "idle", ...over });
 
@@ -32,7 +32,7 @@ describe("speech model rows", () => {
   });
 
   it("warns about a speech model that won't follow the pinned language", () => {
-    const notes = rowNotes(row("local_moonshine"), ctx({ language: "ro", install: inst({ engine: "moonshine", installed: true }) }), label);
+    const notes = rowNotes(row("openrouter_nemotron_asr"), ctx({ languages: () => ["en", "ro"], env: { OPENROUTER_API_KEY: "k" } }), label);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toMatchObject({ tone: "warn" });
     expect(notes[0]?.text).toContain("Romanian");

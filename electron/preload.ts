@@ -51,6 +51,10 @@ contextBridge.exposeInMainWorld("shell", {
     allowKeychain: () => ipcRenderer.invoke("settings:allow-keychain"),
     openPrivacy: (pane: string) => ipcRenderer.invoke("settings:open-privacy", pane),
   },
+  instructions: {
+    get: () => ipcRenderer.invoke("instructions:get"),
+    save: (edit: unknown) => ipcRenderer.invoke("instructions:save", edit),
+  },
   onState: (cb: (state: unknown) => void) => ipcRenderer.on("nav-state", (_e, state) => cb(state)),
   onFocusAddress: (cb: () => void) => ipcRenderer.on("focus-address", () => cb()),
   onPtt: (cb: (down: boolean) => void) => ipcRenderer.on("ptt", (_e, down) => cb(down === true)),

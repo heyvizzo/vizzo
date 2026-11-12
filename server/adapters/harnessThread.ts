@@ -10,7 +10,7 @@ import type { LlmChoice } from "../../shared/config.ts";
 import { MAX_LIVE_THREAD_SESSIONS } from "../../shared/threads.ts";
 import type { WarmAgent } from "./harnesses.ts";
 import type { HarnessThread, OpenHarnessThread, OpenHarnessThreadOpts } from "./types.ts";
-import { releaseThreadAgent, takeThreadAgent } from "./warmPool.ts";
+import { agentSpec, releaseThreadAgent, takeThreadAgent } from "./warmPool.ts";
 
 type ThreadResult = Awaited<ReturnType<HarnessThread["send"]>>;
 
@@ -32,6 +32,7 @@ let useSeq = 0;
 class Thread implements HarnessThread {
   readonly id = `hthread-${++seq}`;
   private agent: WarmAgent | null = null;
+  private specKey = "";
   /** Requests run one after another: each waits for this. */
   private tail: Promise<void> = Promise.resolve();
   private stop: (() => void) | null = null;
@@ -90,12 +91,16 @@ class Thread implements HarnessThread {
     let images = [...(annotations ?? [])];
     let agent: WarmAgent;
     try {
+      const specKey = JSON.stringify(agentSpec(this.opts.role, this.opts.choice));
+      // A prompt change takes effect between requests, never by interrupting work in flight.
+      if (this.agent && this.specKey !== specKey) this.drop();
       if (!this.agent?.alive()) {
         this.drop();
         enforceCap(MAX_LIVE_THREAD_SESSIONS - 1, this);
         const replay = this.opts.replay().trim();
         images = [...(this.opts.replayAnnotations?.() ?? []), ...images];
         this.agent = takeThreadAgent(this.opts.role, this.opts.choice);
+        this.specKey = specKey;
         attached.add(this);
         if (replay) { reopened = true; message = withReplay(replay, user); }
       }

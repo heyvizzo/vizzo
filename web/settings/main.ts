@@ -4,10 +4,14 @@
 // displays, the browser pane's cookies and the API keys. Chat settings save on every change (web/chat/settings.ts)
 // and apply from the sidebar's next turn; the API keys save with the Save bar, which shows only while they're edited.
 import "./settings.css";
-import { API_PROVIDERS, HARNESSES, HARNESS_TOGGLES, LLM_DEFAULT_MODELS, LLM_PROVIDER_LABELS, TASK_TIMEOUT_MAX, TASK_TIMEOUT_MIN, cleanToggles, defaultLevel, isHarness, llmOf, toggleOn, type LlmProvider, type HarnessScan, type LlmChoice, type LlmModelInfo, type LlmTier, type RouterMode, type RunConfig, type SpeechLanguage } from "../../shared/config.ts";
+import { API_PROVIDERS, HARNESSES, HARNESS_TOGGLES, LLM_DEFAULT_MODELS, LLM_PROVIDER_LABELS, TASK_TIMEOUT_MAX, TASK_TIMEOUT_MIN, cleanToggles, defaultLevel, isHarness, llmOf, toggleOn, type LlmProvider, type HarnessScan, type LlmChoice, type LlmModelInfo, type LlmTier, type RouterMode, type RunConfig } from "../../shared/config.ts";
 import { attachCombo, type Combo } from "../chat/combo.ts";
-import { LANGUAGES, LONG_TASK_MAX, LONG_TASK_MIN, PANEL_KEYS, loadSettings, saveSettingsKeys, type ChatSettingsBridge } from "../chat/settings.ts";
+import { LONG_TASK_MAX, LONG_TASK_MIN, PANEL_KEYS, loadSettings, saveSettingsKeys, sttLanguages, type ChatSettingsBridge } from "../chat/settings.ts";
+import { languageName } from "../../shared/languages.ts";
+import { mountPointingWords } from "./languageView.ts";
 import { mountSpeech } from "./speechView.ts";
+import { mountInstructions } from "./instructions.ts";
+import type { InstructionsBridge } from "../../shared/instructions.ts";
 import { DEFAULT_HOTKEYS, HOTKEY_LABELS, hotkeyLabel, hotkeyProblem, isModifierCode, normalizeCode, sameHotkey, type Hotkey, type HotkeyAction } from "../../shared/hotkeys.ts";
 import type { SpeechKind } from "./speechModels.ts";
 import {
@@ -17,6 +21,8 @@ import {
 interface EnvField { key: string; label: string; hint: string; secret?: boolean; param?: boolean }
 /** electron/preload.ts: what this window uses. */
 const shell = (window as unknown as { shell: {
+  instructions: InstructionsBridge;
+  onProject(cb: () => void): void;
   chatSettings: ChatSettingsBridge;
   importCookies(browser: string): Promise<{ imported: number; failed: number; message: string }>;
   clearCookies(): Promise<{ cleared: number; message: string }>;
@@ -34,6 +40,12 @@ const settings = loadSettings(shell.chatSettings);
 const saveSettings = () => saveSettingsKeys(shell.chatSettings, settings, PANEL_KEYS);
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+
+mountInstructions(shell.instructions, shell.onProject, {
+  global: $("instructions-global"), project: $("instructions-project"), folder: $("instructions-folder"),
+  projectCard: $("instructions-project-card"),
+  globalStatus: $("instructions-global-status"), projectStatus: $("instructions-project-status"), retry: $("instructions-retry"),
+});
 
 // ── sections ───────────────────────────────────────
 const sectionOf = (hash: string): Section => SECTIONS.find((x) => `#${x}` === hash) ?? "dashboard";
@@ -78,12 +90,10 @@ function dashboardChanged(): void {
   queueMicrotask(() => { dashboardQueued = false; renderDashboard(); });
 }
 
-$("language").innerHTML = LANGUAGES.map((l) => `<option value="${l.id}">${l.label}</option>`).join("");
 
 // ── conversation ───────────────────────────────────
 const router = $<HTMLSelectElement>("router");
 const longTask = $<HTMLInputElement>("long-task");
-const language = $<HTMLSelectElement>("language");
 router.onchange = () => { settings.routerMode = router.value as RouterMode; saveSettings(); dashboardChanged(); };
 // The long-task threshold: whole seconds in range, saved as typed; anything else is flagged and not saved.
 const longTaskError = $("long-task-error");
@@ -129,12 +139,13 @@ taskTimeout.oninput = () => {
   dashboardChanged();
 };
 taskTimeout.onblur = () => { if (checkTaskTimeout() === null) { taskTimeout.value = String(settings.taskTimeoutMinutes); checkTaskTimeout(); } };
-language.onchange = () => { settings.language = language.value as SpeechLanguage; saveSettings(); speech.render(); };
 
 // ── speech to text, text to speech ─────────────────
 // The saved API keys and voice IDs (the API keys form below edits the keys): the rows flag a model whose key is missing.
 let envFields: EnvField[] = [];
 let envValues: Record<string, string> = {};
+// mountSpeech calls onRender during setup, so its language controls must already exist.
+const pointingWords = mountPointingWords($("pointing-words"), settings, saveSettings);
 const speech = mountSpeech({
   settings,
   save: saveSettings,
@@ -145,7 +156,8 @@ const speech = mountSpeech({
   },
   keyLabel,
   focusKey,
-  onRender: dashboardChanged,
+  // A model's languages changed (or anything else in the rows): the pointing-word tabs follow.
+  onRender: () => { pointingWords.render(); dashboardChanged(); },
 }, { stt: $("stt-models"), tts: $("tts-models") });
 
 // ── models ─────────────────────────────────────────
@@ -464,7 +476,6 @@ function renderSettings(): void {
   router.value = settings.routerMode;
   longTask.value = String(settings.longTaskSeconds);
   taskTimeout.value = String(settings.taskTimeoutMinutes);
-  language.value = settings.language;
   renderTier("fast");
   renderTier("smart");
   speech.render();
@@ -718,7 +729,7 @@ function speechLine(kind: SpeechKind): { text: string; detail: string; tone: Ton
   const probs = speechProblems(kind);
   const tone: Tone = probs.some((p) => p.tone === "bad") ? "bad" : probs.some((p) => p.tone === "busy") ? "busy" : probs.length ? "warn" : "ok";
   const ok = st.notes.find((n) => n.tone === "ok")?.text;
-  const lang = kind === "stt" ? `Language: ${LANGUAGES.find((l) => l.id === settings.language)?.label ?? settings.language}` : undefined;
+  const lang = kind === "stt" ? `Language: ${sttLanguages(settings).map(languageName).join(", ") || "Auto-detect"}` : undefined;
   const voice = st.voice ? `Voice: ${st.voice}` : undefined;
   const where = st.row.group === "device" ? "On-device" : "API";
   return {

@@ -8,7 +8,7 @@
 // Everything goes into SPEECH_ROOT (the repo for `npm run dev`; Application Support in the packaged app).
 // GET /api/speech/engines carries every engine's state; POST /api/speech/install starts, cancels or uninstalls one.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InstallState } from "../shared/protocol.ts";
@@ -60,7 +60,8 @@ export interface InstallerOptions {
   root?: string;
   specs?: readonly EngineSpec[];
   /** Run the install script with `args` (default: bash scripts/setup-local-<kind>.sh <args>). */
-  run?: (spec: EngineSpec, root: string, args: string[]) => ChildProcess;
+  run?: (spec: EngineSpec, root: string, args: string[], installUv: boolean) => ChildProcess;
+  hasUv?: () => boolean;
   hasTool?: (tool: "whisperkit-cli") => boolean;
   /** Kill an engine's helper before its models are deleted. */
   stop?: (kind: Kind, engine: string) => void;
@@ -134,12 +135,23 @@ export function toolPath(path = process.env.PATH ?? ""): string {
   return [...dirs, ...extra.filter((d) => !dirs.includes(d))].join(":");
 }
 
-function runScript(spec: EngineSpec, root: string, args: string[]): ChildProcess {
+export function hasUv(path = toolPath()): boolean {
+  return path.split(":").some((dir) => {
+    try { const file = join(dir, "uv"); accessSync(file, constants.X_OK); return statSync(file).isFile(); } catch { return false; }
+  });
+}
+
+export class UvRequiredError extends Error {
+  constructor() { super("uv is required to install this model."); }
+}
+
+function runScript(spec: EngineSpec, root: string, args: string[], installUv: boolean): ChildProcess {
   // The script ships with the app (unpacked from the asar); it installs into SPEECH_DATA_DIR. Its own process group,
   // so Cancel also stops the curl / python / brew it runs.
   mkdirSync(root, { recursive: true });
   return spawn("bash", [`${APP_ROOT}scripts/setup-local-${spec.kind}.sh`, ...args], {
-    cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PATH: toolPath(), SPEECH_DATA_DIR: root },
+    cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PATH: toolPath(), SPEECH_DATA_DIR: root, VIZZO_INSTALL_UV: installUv ? "1" : "0" },
   });
 }
 
@@ -177,6 +189,7 @@ interface Task {
   spec: EngineSpec;
   key: string;
   args: string[];
+  installUv?: boolean;
   /** Marked unfinished while it runs (an engine's model folder). */
   sentinelDir?: string;
   /** The size of what it has downloaded into place so far. */
@@ -191,6 +204,7 @@ export function createInstaller(opts: InstallerOptions = {}) {
   const root = opts.root ?? SPEECH_ROOT;
   const specs = opts.specs ?? ENGINE_SPECS;
   const run = opts.run ?? runScript;
+  const uvAvailable = opts.hasUv ?? hasUv;
   const hasTool = opts.hasTool ?? (() => !!whisperKitCli());
   const progressMs = opts.progressMs ?? 1000;
   const meter = opts.meter ?? processTreeMeter;
@@ -249,7 +263,7 @@ export function createInstaller(opts: InstallerOptions = {}) {
       writeFileSync(`${task.sentinelDir}/${SENTINEL}`, "");
     }
     diskCache.delete(task.spec.engine);
-    const proc = run(task.spec, root, task.args);
+    const proc = run(task.spec, root, task.args, task.installUv === true);
     job.proc = proc;
     const net = proc.pid ? meter(proc.pid) : null;
     /** The network bytes before the first download (Python packages don't count towards the models). */
@@ -333,13 +347,14 @@ export function createInstaller(opts: InstallerOptions = {}) {
     },
 
     /** Queue an engine's install (a no-op while it's queued or running, or for a built-in one). */
-    install(kind: string, engine: string): InstallState {
+    install(kind: string, engine: string, installUv = false): InstallState {
       const spec = requireSpec(kind, engine);
       const k = key(spec.kind, spec.engine);
       if (spec.builtin || active(jobs.get(k))) return state(spec);
+      if (spec.venv && !uvAvailable() && !installUv) throw new UvRequiredError();
       const dir = `${models}${spec.dir}`;
       queue({
-        spec, key: k, args: [spec.engine], sentinelDir: dir,
+        spec, key: k, args: [spec.engine], installUv, sentinelDir: dir,
         fileBytes: () => dirBytes(dir), totalBytes: spec.modelBytes ?? 0,
         done: () => installed(spec),
         onDone: () => opts.onInstalled?.(spec.kind, spec.engine),

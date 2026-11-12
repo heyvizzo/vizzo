@@ -1,3 +1,5 @@
+import { LANGUAGE_CODES } from "./languages.ts";
+
 /** "pipeline" = the voice assistant (Scribe → router → TTS); "cursor-only" = speech-to-text + pointing, no LLM or TTS (dictating into a comment). */
 export type Approach = "pipeline" | "cursor-only";
 /**
@@ -43,22 +45,59 @@ export const STT_OPENROUTER_MODEL: Partial<Record<SttModel, string>> = {
   openrouter_nemotron_asr: "nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b",
 };
 /**
- * Pinned languages each STT model actually transcribes in (chat logs, 2026-10-14..17). The pin is sent to all of them,
- * but Fish Transcribe ignores it (Chinese / Macedonian / Italian text with en or ro pinned), and Romanian only comes back
- * right from Scribe (Nemotron returned nothing). On-device (tested with macOS `say` clips, 2026-10-17): Parakeet
- * detects the language itself (25 European ones, Romanian included); Apple has no on-device Romanian model (ro-RO
- * dictation lists it but never installs it); Moonshine is English only; WhisperKit (Whisper) does Romanian, pinned or detected.
+ * How each STT model deals with languages (live check, 2026-11-11, on German, Spanish, French, Japanese and Romanian
+ * clips with nothing pinned; docs/API-NOTES.md):
+ * - "auto": it says which language it heard (a code: Whisper on OpenRouter, Fish Transcribe, WhisperKit), so the
+ *   choice is Auto or one language.
+ * - "multi": it transcribes whatever it hears but doesn't say which language that was (Scribe's realtime API returns
+ *   null, Nemotron the word "auto", Parakeet nothing), so the user says which languages they speak (one or more).
+ * - "single": it needs to be told one language (Apple) or only has one (Moonshine).
+ * `languages`: the ones it offers (omitted: all of shared/languages.ts). Apple's are its SpeechTranscriber locales;
+ * Parakeet's are the 25 European ones of its model card.
  */
-export const STT_PINNED_LANGUAGES: Record<SttModel, readonly ("en" | "ro")[]> = {
-  scribe_v2: ["en", "ro"],
-  openrouter_whisper_large_v3: ["en"],
-  openrouter_fish_transcribe_1: [],
-  openrouter_nemotron_asr: ["en"],
-  local_parakeet: ["en", "ro"],
-  local_apple: ["en"],
-  local_whisperkit: ["en", "ro"],
-  local_moonshine: ["en"],
+export type SttLanguageMode = "auto" | "multi" | "single";
+export const STT_LANGUAGE_SUPPORT: Record<SttModel, { mode: SttLanguageMode; languages?: readonly string[] }> = {
+  scribe_v2: { mode: "multi" },
+  openrouter_whisper_large_v3: { mode: "auto" },
+  openrouter_fish_transcribe_1: { mode: "auto" },
+  openrouter_nemotron_asr: { mode: "multi" },
+  local_parakeet: {
+    mode: "multi",
+    languages: ["en", "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk"],
+  },
+  local_apple: { mode: "single", languages: ["en", "zh", "fr", "de", "it", "ja", "ko", "pt", "es"] },
+  local_whisperkit: { mode: "auto" },
+  local_moonshine: { mode: "single", languages: ["en"] },
 };
+/**
+ * What went wrong in use (chat logs, 2026-10-14..17, and the live check): Fish Transcribe ignores a pinned language
+ * (Chinese / Macedonian / Italian text with en or ro pinned); Romanian came back wrong from Whisper on OpenRouter and
+ * empty from Nemotron, which also returned nothing for French.
+ */
+export const STT_LANGUAGE_ISSUES: Partial<Record<SttModel, { ignoresPin?: boolean; unreliable?: readonly string[] }>> = {
+  openrouter_whisper_large_v3: { unreliable: ["ro"] },
+  openrouter_fish_transcribe_1: { ignoresPin: true },
+  openrouter_nemotron_asr: { unreliable: ["ro", "fr"] },
+};
+/** The languages a model offers in Settings, in the catalog's order. */
+export function sttLanguageOptions(model: SttModel): readonly string[] {
+  const own = STT_LANGUAGE_SUPPORT[model].languages;
+  return own ? LANGUAGE_CODES.filter((c) => own.includes(c)) : LANGUAGE_CODES;
+}
+/**
+ * A model's language selection made valid: known languages it offers, without repeats. "auto" models: none (Auto) or
+ * one. "multi": at least one. "single": exactly one. `legacy`: the setting from before the per-model pickers
+ * ("auto" was English + Romanian), used when the model has no selection yet; without either, English.
+ */
+export function sttLanguagesFor(model: SttModel, selection: readonly string[] | undefined, legacy?: string): string[] {
+  const { mode } = STT_LANGUAGE_SUPPORT[model];
+  const offered = sttLanguageOptions(model);
+  const from = selection ?? (mode === "auto" && (legacy === undefined || legacy === "auto") ? [] : legacy === undefined ? ["en"] : legacy === "auto" ? ["en", "ro"] : [legacy]);
+  const picked = [...new Set(from)].filter((c) => offered.includes(c));
+  if (mode === "auto") return picked.slice(0, 1);
+  const first = picked[0] ?? offered[0] ?? "en";
+  return mode === "single" ? [first] : picked.length ? picked : [first];
+}
 /** The API key each paid speech model needs (electron/settings.ts ENV_FIELDS). The on-device ones need none. */
 export const STT_API_KEYS: Partial<Record<SttModel, string>> = {
   scribe_v2: "ELEVENLABS_API_KEY",
@@ -222,8 +261,8 @@ export function defaultLevel(info: LlmModelInfo | undefined, tier: LlmTier): str
   const pref = tier === "fast" ? ["low", "minimal", "medium"] : ["medium", "high"];
   return pref.find((l) => info.levels.includes(l)) ?? info.defaultLevel ?? info.levels[0];
 }
-/** Spoken language: "auto" lets Scribe detect it (en or ro expected); "en"/"ro" pin it. */
-export type SpeechLanguage = "auto" | "en" | "ro";
+/** What the speech engine is told: "auto" (nothing: it detects the language) or the code of one language (shared/languages.ts). */
+export type SpeechLanguage = string;
 
 export interface RunConfig {
   approach: Approach;
@@ -257,8 +296,16 @@ export interface RunConfig {
    * thread (their results and reminders show as bubbles). Typed comments (shared/comment.ts) set it.
    */
   silent?: boolean;
-  /** Speech language for Scribe and the pointing word lists (benchmarks stay pinned to "en"). */
+  /** The language the speech engine is pinned to, or "auto" (benchmarks stay pinned to "en"). */
   language: SpeechLanguage;
+  /**
+   * The languages the user may be speaking (Settings: the STT model's language picker): their pointing-word lists
+   * are used together, and the reply language is one of them. Empty: whatever the speech engine reports. Left out
+   * (benchmarks, configs from before the pickers): `language`, with "auto" meaning English + Romanian.
+   */
+  languages?: string[];
+  /** The pointing-word lists the user edited (Settings), by language: each replaces that language's starting list. */
+  pointingWords?: Record<string, string[]>;
   /** Harness or API + model for each tier: fast = router and progress lines, smart = hard questions and tasks. */
   llm: Record<LlmTier, LlmChoice>;
   /** Voice for the chosen TTS model, when it has several (Piper / Kokoro / OpenAI voice name); default = the engine's. */
@@ -298,6 +345,12 @@ export function llmOf(config: Partial<RunConfig>): Record<LlmTier, LlmChoice> {
     fast: llm.fast && isLlmProvider(llm.fast.provider) ? llm.fast : DEFAULT_CONFIG.llm.fast,
     smart: llm.smart && isHarness(llm.smart.provider) ? llm.smart : DEFAULT_CONFIG.llm.smart,
   };
+}
+
+/** The languages a turn's user may be speaking (RunConfig.languages); [] = whatever the speech engine reports. */
+export function turnLanguages(config: Pick<RunConfig, "language" | "languages">): string[] {
+  if (config.languages) return config.languages.filter((c) => typeof c === "string" && c);
+  return !config.language || config.language === "auto" ? ["en", "ro"] : [config.language];
 }
 
 /** The solver time limit (Settings → Models → Turns): whole minutes in this range. */

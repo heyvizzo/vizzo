@@ -41,7 +41,7 @@ The only user is the developer (you), running locally on macOS.
 ### Talking
 - FR1. Hold the talk key (Control by default, set in Settings → Keyboard) or the talk button to talk, or turn on Always listen (level-based voice detection). Audio playback starts as soon as the first chunk arrives.
 - FR2. Pressing while the assistant talks interrupts it; Esc stops it.
-- FR3. English and Romanian, detected or pinned (Language setting).
+- FR3. Any of 50 languages, chosen per speech-to-text model: auto-detected where the model reports the language, otherwise the languages you speak (one or more). Each language has an editable list of pointing words.
 - FR4. The conversation is remembered across turns until "New conversation".
 
 ### Pointing

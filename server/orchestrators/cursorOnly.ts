@@ -1,6 +1,6 @@
 // cursor-only approach (TASKS T9): STT (the configured Speech model) + pointing resolution, no LLM, no TTS.
-import { SAMPLE_RATE } from "../../shared/config.ts";
-import { computeRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
+import { SAMPLE_RATE, turnLanguages } from "../../shared/config.ts";
+import { computeRests, normalizeLanguage, pointingMatcher, resolvePointing } from "../../shared/pointing.ts";
 import type { PointingTarget } from "../../shared/protocol.ts";
 import { openStt } from "./deps.ts";
 import { sttUsage } from "../cost.ts";
@@ -48,7 +48,7 @@ export function createCursorOnlyOrchestrator(open: OpenScribe = openStt): Orches
         let pointing: PointingTarget[] = [];
         let error: string | undefined;
         if (tAudioStart === undefined) error = "no turn.audioStart received; pointing skipped";
-        else pointing = resolvePointing(words, tAudioStart, ctx.cursorSamples(), { preMs: config.preMs, postMs: config.postMs }, languagesFor(config.language));
+        else pointing = resolvePointing(words, tAudioStart, ctx.cursorSamples(), { preMs: config.preMs, postMs: config.postMs }, pointingMatcher(turnLanguages(config).length ? turnLanguages(config) : [lang ?? "en"], config.pointingWords));
         const rests = computeRests(words, tAudioStart, ctx.cursorSamples(), pointing);
         ctx.mark("pointing.resolved", { targets: pointing.length, rests: rests.length });
         ctx.send({ type: "pointing.resolved", turnId, targets: pointing, rests });

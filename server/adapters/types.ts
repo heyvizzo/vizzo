@@ -77,6 +77,8 @@ export interface RouteTurnOpts {
    * `say` streams, so the caller knows whether the spoken text is an ack or the whole reply.
    */
   onDecision?: (d: RouteDecision) => void;
+  /** The router's `language` field (the language of the user's words), as soon as it streams in: before `say`. */
+  onLanguage?: (language: string) => void;
   /**
    * Text to speak right away (the router's `say` field). `kind`: "ack" when a delegation follows
    * (intent question/task), "answer" when the text is the whole reply (intent clarify/answer).

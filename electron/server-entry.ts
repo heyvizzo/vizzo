@@ -23,7 +23,14 @@ function useProject(dir: string | null) {
 const running = await startServer(Number(process.env.PORT ?? 0), { host: "127.0.0.1" });
 process.parentPort.postMessage({ type: "ready", port: running.port });
 
+let instructionsTimer: ReturnType<typeof setTimeout> | undefined;
 process.parentPort.on("message", (e: { data: { type: string; dir?: string | null; url?: string | null; env?: Record<string, string> } }) => {
+  if (e.data.type === "instructions") {
+    // Saving text is immediate; wait for a typing pause before replacing idle warm agents.
+    // Dispatch reads the saved text directly, and active threads refresh only before their next request.
+    clearTimeout(instructionsTimer);
+    instructionsTimer = setTimeout(() => warmSaved(), 500);
+  }
   if (e.data.type === "project") useProject(e.data.dir ?? null);
   if (e.data.type === "page") {
     setBrowserUrl(e.data.url ?? null);

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInstaller, dirBytes, downloadProgress, toolPath, type EngineSpec } from "./speechInstall.ts";
+import { createInstaller, dirBytes, downloadProgress, toolPath, UvRequiredError, type EngineSpec } from "./speechInstall.ts";
 
 const SPECS: EngineSpec[] = [
   { kind: "tts", engine: "macos", builtin: true },
@@ -28,15 +28,17 @@ afterEach(() => {
   roots = [];
 });
 
-function setup(script: Record<string, string> = INSTALL, extra: { hasTool?: boolean; netBytes?: () => number } = {}) {
+function setup(script: Record<string, string> = INSTALL, extra: { hasTool?: boolean; hasUv?: boolean; netBytes?: () => number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "speech-install-")) + "/";
   roots.push(root);
   const stop = vi.fn();
   const onInstalled = vi.fn();
+  const run = vi.fn((_spec: EngineSpec, cwd: string, args: string[], _installUv: boolean) => spawn("bash", ["-c", script[args[0]!] ?? "exit 0"], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] }));
   const installer = createInstaller({
     root,
     specs: SPECS,
-    run: (_spec, cwd, args) => spawn("bash", ["-c", script[args[0]!] ?? "exit 0"], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] }),
+    run,
+    hasUv: () => extra.hasUv ?? true,
     hasTool: () => extra.hasTool ?? true,
     stop,
     onInstalled,
@@ -45,10 +47,35 @@ function setup(script: Record<string, string> = INSTALL, extra: { hasTool?: bool
     meter: () => ({ received: extra.netBytes ?? (() => 0), stop: () => {} }),
   });
   const state = (engine: string) => installer.states().find((s) => s.engine === engine)!;
-  return { root, installer, state, stop, onInstalled };
+  return { root, installer, state, stop, onInstalled, run };
 }
 
 describe("speech installer", () => {
+  it("requires consent for missing uv before queuing or touching model files", async () => {
+    const { root, installer, state, run } = setup(INSTALL, { hasUv: false });
+    expect(() => installer.install("tts", "kokoro")).toThrow(UvRequiredError);
+    await installer.idle();
+    expect(run).not.toHaveBeenCalled();
+    expect(state("kokoro").state).toBe("idle");
+    expect(existsSync(`${root}.models`)).toBe(false);
+    installer.install("tts", "kokoro", true);
+    await installer.idle();
+    expect(run).toHaveBeenCalledWith(SPECS[1], root, ["kokoro"], true);
+    expect(state("kokoro").installed).toBe(true);
+  });
+
+  it("doesn't require uv for built-in engines, WhisperKit, or additional Piper voices", async () => {
+    const { installer, state } = setup(INSTALL, { hasUv: false });
+    installer.install("tts", "macos");
+    installer.install("stt", "whisperkit");
+    installer.install("tts", "piper", true);
+    await installer.idle();
+    installer.installVoice("tts", "piper", "ryan");
+    await installer.idle();
+    expect(state("whisperkit").installed).toBe(true);
+    expect(state("piper").voices).toBeUndefined();
+  });
+
   it("lists built-in engines as installed and the rest with their download size (models + the Python env)", () => {
     const { state } = setup();
     expect(state("macos")).toMatchObject({ builtin: true, installed: true, state: "idle" });

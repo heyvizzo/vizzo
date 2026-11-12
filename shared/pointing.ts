@@ -1,45 +1,76 @@
 // Pointing resolution (ARCHITECTURE §6). Pure functions.
 import type { CursorRest, CursorSample, ElementRef, PageClick, PageEvents, PointingTarget, Word } from "./protocol.ts";
 import { formatCoords } from "./clickCoords.ts";
+import { DEFAULT_POINTING_WORDS, languageCode, pointingWordsFor } from "./languages.ts";
 
 /** @deprecated English only; use POINTING_LEXICON / isPointingWord. */
 export const POINTING_WORDS = /^(this|that|these|those|here|there)$/i;
 
-export type PointingLanguage = "en" | "ro";
+/** A language code (shared/languages.ts). */
+export type PointingLanguage = string;
+/** The lists used when a caller names none: English and Romanian (benchmarks, configs from before the language pickers). */
 export const POINTING_LANGUAGES: readonly PointingLanguage[] = ["en", "ro"];
 
+/** Each language's starting list of pointing words (shared/languages.ts DEFAULT_POINTING_WORDS). */
+export const POINTING_LEXICON = DEFAULT_POINTING_WORDS;
+
+/** Tells which language's pointing word a word is. Built once per set of lists (pointingMatcher). */
+export interface PointingMatcher {
+  readonly languages: readonly PointingLanguage[];
+  /** The first of `languages` whose list has this word (null if none). */
+  language(text: string): PointingLanguage | null;
+}
+/** What the pointing functions take: language codes (their lists, as edited or the starting ones), or a matcher. */
+export type PointingWords = readonly PointingLanguage[] | PointingMatcher;
+
 /**
- * Deictic words per language, written without diacritics (matching strips them, so "această",
- * "aceasta", "ăsta" and "asta" all match). Romanian: near / far demonstratives in standard and
- * colloquial forms (incl. oblique cases) and place adverbs.
+ * A word as it is compared with the lists: lowercase, punctuation dropped, accents kept ("Această," → "această").
+ * Romanian's old cedilla letters count as the comma-below ones.
  */
-export const POINTING_LEXICON: Record<PointingLanguage, ReadonlySet<string>> = {
-  en: new Set(["this", "that", "these", "those", "here", "there"]),
-  ro: new Set([
-    // near: acesta/această/aceștia/acestea, acest/aceste, ăsta/asta/ăștia/astea (+ oblique)
-    "acesta", "aceasta", "acestia", "acestea", "acest", "aceste", "acestui", "acestei", "acestor",
-    "asta", "astia", "astea", "astuia", "asteia", "astora",
-    // far: acela/aceea/aceia/acelea, acel/acea/acei/acele, ăla/aia/ăia/alea (+ oblique)
-    "acela", "aceea", "aceia", "acelea", "acel", "acea", "acei", "acele", "acelui", "acelei", "acelor",
-    "ala", "aia", "alea", "aluia", "aleia", "alora",
-    // place
-    "aici", "aicea", "acilea", "acolo", "acolea", "colo",
-  ]),
+export function canonWord(text: string): string {
+  return text.normalize("NFC").toLowerCase().replace(/ş/g, "ș").replace(/ţ/g, "ț").replace(/[^\p{L}\p{M}]/gu, "");
+}
+
+/**
+ * A matcher for these languages' lists (`overrides`: the lists the user edited, which replace the starting ones).
+ * A word matches an entry when they are the same ignoring case and punctuation; an entry ending in `*` matches
+ * every word that starts with it. Hyphenated and apostrophe'd words count by their parts too ("ăsta-i" → "ăsta",
+ * "d'ici" → "ici").
+ */
+export function pointingMatcher(
+  languages: readonly PointingLanguage[], overrides?: Readonly<Record<string, readonly string[] | undefined>>,
+): PointingMatcher {
+  const lists = languages.map((code) => {
+    const exact = new Set<string>();
+    const prefixes: string[] = [];
+    for (const entry of pointingWordsFor(code, overrides)) {
+      const w = canonWord(entry);
+      if (!w) continue;
+      if (entry.trim().endsWith("*")) prefixes.push(w); else exact.add(w);
+    }
+    return { code, exact, prefixes };
+  });
+  return {
+    languages,
+    language(text) {
+      const parts = [text, ...text.split(/[-‑'’]/)].map(canonWord).filter(Boolean);
+      for (const l of lists) if (parts.some((p) => l.exact.has(p) || l.prefixes.some((x) => p.startsWith(x)))) return l.code;
+      return null;
+    },
+  };
+}
+
+const defaultMatchers = new Map<string, PointingMatcher>();
+const matcherOf = (words: PointingWords): PointingMatcher => {
+  if (!Array.isArray(words)) return words as PointingMatcher;
+  const key = words.join(",");
+  let m = defaultMatchers.get(key);
+  if (!m) defaultMatchers.set(key, m = pointingMatcher(words as readonly PointingLanguage[]));
+  return m;
 };
 
-/** Pointing word lists for a language setting: auto → both (people mix English terms into Romanian). */
-export function languagesFor(setting: "auto" | "en" | "ro" | undefined): PointingLanguage[] {
-  return setting === "en" ? ["en"] : setting === "ro" ? ["ro"] : ["en", "ro"];
-}
-
-/** Scribe/ISO language codes → "en" / "ro" / other 2-letter code ("eng" → "en", "ron"/"rum" → "ro"). */
-export function normalizeLanguage(code: string | null | undefined): string | undefined {
-  if (!code) return undefined;
-  const c = code.toLowerCase().split(/[-_]/)[0]!;
-  if (c === "eng" || c === "en") return "en";
-  if (c === "ron" || c === "rum" || c === "ro" || c === "mol") return "ro";
-  return c.length === 3 ? c : c.slice(0, 2);
-}
+/** Speech engines' and models' language values → a code ("eng" → "en", "ron" → "ro", "german" → "de"; shared/languages.ts). */
+export const normalizeLanguage = languageCode;
 
 const RO_DIACRITICS = /[ăâîșşțţ]/giu;
 const RO_WORDS = new Set([
@@ -76,14 +107,9 @@ export function foldWord(text: string): string {
   return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}]/gu, "");
 }
 
-/**
- * The language whose pointing word this is (null if none). Hyphenated clitics count by their parts
- * ("ăsta-i" → "asta"). `languages` limits the lists (default: all).
- */
-export function pointingLanguage(text: string, languages: readonly PointingLanguage[] = POINTING_LANGUAGES): PointingLanguage | null {
-  const parts = [text, ...text.split(/[-‑]/)].map(foldWord).filter(Boolean);
-  for (const lang of languages) if (parts.some((p) => POINTING_LEXICON[lang].has(p))) return lang;
-  return null;
+/** The language whose pointing word this is (null if none). `languages` limits the lists (default: English and Romanian). */
+export function pointingLanguage(text: string, languages: PointingWords = POINTING_LANGUAGES): PointingLanguage | null {
+  return matcherOf(languages).language(text);
 }
 
 export type Resolver = (word: Word, tAudioStart: number, samples: CursorSample[], opts?: WindowOpts) => CursorSample | null;
@@ -103,7 +129,7 @@ export function normalizeWord(text: string): string {
   return text.toLowerCase().replace(/[^\p{L}]/gu, "");
 }
 
-export function isPointingWord(text: string, languages: readonly PointingLanguage[] = POINTING_LANGUAGES): boolean {
+export function isPointingWord(text: string, languages: PointingWords = POINTING_LANGUAGES): boolean {
   return pointingLanguage(text, languages) !== null;
 }
 
@@ -218,7 +244,7 @@ export const ALGORITHMS = Object.keys(RESOLVERS);
  */
 export function resolvePointing(
   words: Word[], tAudioStart: number, samples: CursorSample[], opts: WindowOpts = DEFAULT_WINDOW,
-  languages: readonly PointingLanguage[] = POINTING_LANGUAGES,
+  languages: PointingWords = POINTING_LANGUAGES,
 ): PointingTarget[] {
   const sorted = sortByT(samples);
   const out: PointingTarget[] = [];

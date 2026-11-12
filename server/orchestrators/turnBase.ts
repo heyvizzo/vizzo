@@ -4,7 +4,8 @@ import { isMarkedSegment } from "../../shared/marks.ts";
 import type { MarkName } from "../../shared/marks.ts";
 import { browserUrl } from "../browserPage.ts";
 import { formatElementDetails, referencedElements } from "../../shared/elementDetails.ts";
-import { annotateTranscript, computeRests, detectLanguage, formatPageContext, formatRests, languagesFor, normalizeLanguage, resolvePointing } from "../../shared/pointing.ts";
+import { annotateTranscript, computeRests, detectLanguage, formatPageContext, formatRests, normalizeLanguage, pointingMatcher, resolvePointing, type PointingMatcher } from "../../shared/pointing.ts";
+import { turnLanguages } from "../../shared/config.ts";
 import type { CursorRest, PointingTarget, Segment, Usage, Word } from "../../shared/protocol.ts";
 import type { Mark } from "../clock.ts";
 import type { TurnContext, TurnResult } from "./types.ts";
@@ -189,21 +190,47 @@ export class TurnBase {
   /** Words of the final transcript (for aligning clicks). */
   words: Word[] = [];
 
-  /** Detected spoken language ("en", "ro", …), or the pinned one; undefined until known. */
+  /** The language the user spoke (a code: "en", "ro", "de"…); undefined until known. */
   language: string | undefined = undefined;
+  /** `language` came from the settings (one language chosen) or the speech engine: the router's guess doesn't replace it. */
+  private languageFirm = false;
   /** Where the cursor rested while the user spoke (language-agnostic pointing hints). */
   rests: CursorRest[] = [];
 
   sttFinal(text: string, words: Word[], detected?: string): void {
     this.transcript = text;
     this.words = words;
-    // Pinned setting, else Scribe's code (null in auto mode so far), else a guess from the text.
-    const pinned = this.ctx.config.language;
-    this.language = (pinned && pinned !== "auto" ? pinned : undefined) ?? normalizeLanguage(detected) ?? detectLanguage(text);
+    // One language chosen in Settings: that one. Else what the speech engine reported, when it does (and it's one of
+    // the chosen ones, if any). Else a guess from the text when the choice is between English and Romanian; any other
+    // case waits for the router (routerLanguage).
+    const chosen = turnLanguages(this.ctx.config);
+    const heard = normalizeLanguage(detected);
+    const firm = chosen.length === 1 ? chosen[0] : heard && (!chosen.length || chosen.includes(heard)) ? heard : undefined;
+    this.languageFirm = firm !== undefined;
+    this.language = firm ?? (chosen.length && chosen.every((c) => c === "en" || c === "ro") ? detectLanguage(text) : undefined);
     if (this.language) this.ctx.connection.set("language", this.language);
     if (!this.finished) {
       this.ctx.send({ type: "stt.final", turnId: this.ctx.turnId, text, words, ...(this.language ? { language: this.language } : {}) });
     }
+  }
+
+  /**
+   * The language the router read in the user's words (its `language` field, before `say`): the reply's language when
+   * neither the settings nor the speech engine settled it. One the user didn't choose is ignored.
+   */
+  routerLanguage(raw: string | undefined): void {
+    if (this.languageFirm || this.finished) return;
+    const code = normalizeLanguage(raw);
+    const chosen = turnLanguages(this.ctx.config);
+    if (!code || (chosen.length && !chosen.includes(code))) return;
+    this.language = code;
+    this.ctx.connection.set("language", code);
+  }
+
+  /** The pointing-word lists of this turn: the chosen languages', else the heard one's (English when unknown). */
+  pointingWords(): PointingMatcher {
+    const chosen = turnLanguages(this.ctx.config);
+    return pointingMatcher(chosen.length ? chosen : [this.language ?? "en"], this.ctx.config.pointingWords);
   }
 
   /** The transcript with pointing [n] and cursor-rest [@n] markers, or the plain transcript. */
@@ -217,7 +244,7 @@ export class TurnBase {
     const tAudioStart = this.ctx.tAudioStart();
     const { preMs, postMs } = this.ctx.config;
     const samples = this.ctx.cursorSamples();
-    const targets = tAudioStart === undefined ? [] : resolvePointing(words, tAudioStart, samples, { preMs, postMs }, languagesFor(this.ctx.config.language));
+    const targets = tAudioStart === undefined ? [] : resolvePointing(words, tAudioStart, samples, { preMs, postMs }, this.pointingWords());
     this.pointing = targets;
     this.rests = computeRests(words, tAudioStart, samples, targets);
     this.mark("pointing.resolved", { targets: targets.length, rests: this.rests.length, ...(tAudioStart === undefined ? { noAudioStart: true } : {}), ...meta });

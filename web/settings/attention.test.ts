@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { keyProblems, permissionProblems, sortProblems, speechProblems, speechStatusOf, tierProblems, verdict, type Problem } from "./attention.ts";
 
-const ctx = { env: {}, language: "auto" as const, engines: [], pending: false };
+const ctx = { env: {}, languages: () => [], engines: [], pending: false };
 
 describe("attention", () => {
   it("flags a tier whose harness isn't installed", () => {

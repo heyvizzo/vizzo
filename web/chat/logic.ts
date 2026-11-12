@@ -1,7 +1,8 @@
 // Pure helpers for the chat page: decision badges, estimates, job labels, the solver detail extraction,
 // and a rough "is audio still playing" estimate. No DOM here (unit-tested in logic.test.ts).
 import type { EngineState, JobInfo, RouteIntent } from "../../shared/protocol.ts";
-import { STT_LABELS, STT_PINNED_LANGUAGES, type SpeechLanguage, type SttModel } from "../../shared/config.ts";
+import { STT_LABELS, STT_LANGUAGE_ISSUES, STT_LANGUAGE_SUPPORT, sttLanguageOptions, type SttModel } from "../../shared/config.ts";
+import { languageName } from "../../shared/languages.ts";
 import { normalizePageUrl, type ThreadInfo } from "../../shared/threads.ts";
 
 /** Seconds → "~8 s", "~1.5 min", "~2 min", "~1 h". null/invalid → "". */
@@ -172,11 +173,16 @@ export function pageLabel(pageUrl: string): string {
   }
 }
 
-/** Why the chosen speech model won't follow the chosen language, or undefined when it does (or the language is auto). */
-export function sttLanguageWarning(model: SttModel, language: SpeechLanguage): string | undefined {
-  if (language === "auto" || STT_PINNED_LANGUAGES[model].includes(language)) return undefined;
-  const name = language === "ro" ? "Romanian" : "English";
-  const ok = (Object.keys(STT_PINNED_LANGUAGES) as SttModel[]).filter((m) => STT_PINNED_LANGUAGES[m].includes(language)).map((m) => STT_LABELS[m]);
-  const why = STT_PINNED_LANGUAGES[model].length ? `doesn't transcribe ${name} reliably` : "ignores the Language setting and may transcribe in another language";
-  return `${STT_LABELS[model]} ${why}. ${name} works with ${ok.join(", ")}.`;
+/** Why the speech model won't follow the languages chosen for it, or undefined when it does (or none is chosen: Auto). */
+export function sttLanguageWarning(model: SttModel, languages: readonly string[]): string | undefined {
+  const issues = STT_LANGUAGE_ISSUES[model];
+  if (!issues || !languages.length) return undefined;
+  if (issues.ignoresPin) return `${STT_LABELS[model]} ignores the language chosen and may transcribe in another one.`;
+  const bad = languages.filter((l) => issues.unreliable?.includes(l));
+  if (!bad.length) return undefined;
+  const ok = (Object.keys(STT_LANGUAGE_SUPPORT) as SttModel[])
+    .filter((m) => !STT_LANGUAGE_ISSUES[m]?.ignoresPin && bad.every((l) => sttLanguageOptions(m).includes(l) && !STT_LANGUAGE_ISSUES[m]?.unreliable?.includes(l)))
+    .map((m) => STT_LABELS[m]);
+  const names = bad.map(languageName).join(" and ");
+  return `${STT_LABELS[model]} doesn't transcribe ${names} reliably.${ok.length ? ` ${names} work${bad.length === 1 ? "s" : ""} with ${ok.join(", ")}.` : ""}`;
 }

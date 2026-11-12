@@ -1,5 +1,5 @@
 // Cursor-lab sessions and their fixture files (ARCHITECTURE §6.1): Uxx.wav, Uxx.cursor.json, Uxx.labels.json.
-import { isPointingWord, normalizeWord, POINTING_LANGUAGES, type PointingLanguage } from "../../shared/pointing.ts";
+import { isPointingWord, normalizeWord, POINTING_LANGUAGES, type PointingWords } from "../../shared/pointing.ts";
 import type { CursorRest, CursorSample, PageClick, PageEvents, PageHighlight, PageSelection, PointingTarget, Word } from "../../shared/protocol.ts";
 import { clickKind } from "./pageContext.ts";
 
@@ -96,7 +96,7 @@ export function toRelativeSamples(samples: readonly CursorSample[], tAudioStart:
  * wordIndex still matches.
  */
 export function labelsFor(
-  words: readonly Word[], existing: readonly PointingLabel[] = [], languages: readonly PointingLanguage[] = POINTING_LANGUAGES,
+  words: readonly Word[], existing: readonly PointingLabel[] = [], languages: PointingWords = POINTING_LANGUAGES,
 ): PointingLabel[] {
   const out: PointingLabel[] = [];
   words.forEach((w, i) => {

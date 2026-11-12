@@ -5,14 +5,15 @@
 # No argument: Kokoro and Piper. Settings → Install runs it for one engine, and picking a Piper voice that isn't
 # downloaded runs it with piper/<voice id> (e.g. piper/en_US-ryan-high; the ids are server/ttsVoices.ts PIPER_CATALOG).
 set -euo pipefail
+source "$(dirname "$0")/ensure-uv.sh"
 # SPEECH_DATA_DIR: where the env and .models/ go (the packaged app's Application Support folder); else the repo.
 cd "${SPEECH_DATA_DIR:-$(dirname "$0")/..}"
-command -v uv >/dev/null || { echo "uv is required (https://docs.astral.sh/uv/)"; exit 1; }
 
 ENGINES="${*:-kokoro piper}"
 want() { [[ " $ENGINES " == *" $1 "* ]]; }
 
 if want kokoro || want piper; then
+  ensure_uv
   echo "Setting up Python"
   [ -x .venv-tts/bin/python ] || uv venv .venv-tts --python 3.12
   PKGS="onnxruntime numpy"

@@ -1,7 +1,7 @@
 // What Settings lists under Speech to text and Text to speech: every model, grouped API / On-device, and what each row
 // says (a missing API key or voice ID, the language it won't follow, the engine loading) and offers (Install,
 // Cancel, Uninstall). No DOM here: web/settings/speechView.ts draws it.
-import { STT_API_KEYS, TTS_API_KEYS, type SpeechLanguage, type SttModel, type TtsModel } from "../../shared/config.ts";
+import { STT_API_KEYS, TTS_API_KEYS, type SttModel, type TtsModel } from "../../shared/config.ts";
 import type { EngineState, InstallState } from "../../shared/protocol.ts";
 import { engineStatus, fmtBytes, sttLanguageWarning } from "../chat/logic.ts";
 
@@ -30,12 +30,12 @@ const tts = (id: TtsModel, group: ModelRow["group"], name: string, vendor: strin
 });
 
 export const STT_ROWS: readonly ModelRow[] = [
-  stt("scribe_v2", "api", "Scribe v2 Realtime", "ElevenLabs", "Streams while you talk. English and Romanian."),
+  stt("scribe_v2", "api", "Scribe v2 Realtime", "ElevenLabs", "Streams while you talk."),
   stt("openrouter_whisper_large_v3", "api", "Whisper large v3", "OpenRouter", "Gets the whole clip on release."),
   stt("openrouter_fish_transcribe_1", "api", "Fish Audio Transcribe 1", "OpenRouter", "Gets the whole clip on release."),
   stt("openrouter_nemotron_asr", "api", "Nemotron 3.5 ASR", "OpenRouter", "Gets the whole clip on release."),
   stt("local_parakeet", "device", "Parakeet TDT 0.6B v3", "MLX", "Re-transcribes while you talk. 25 European languages, Romanian included."),
-  stt("local_apple", "device", "Apple SpeechTranscriber", "macOS", "Streams while you talk. English. macOS downloads its model on first use."),
+  stt("local_apple", "device", "Apple SpeechTranscriber", "macOS", "Streams while you talk. macOS downloads each language's model on first use."),
   stt("local_whisperkit", "device", "WhisperKit large-v3 turbo", "Core ML", "Gets the whole clip on release. Installs whisperkit-cli with Homebrew; the first load compiles the model (a few minutes)."),
   stt("local_moonshine", "device", "Moonshine medium", "ONNX", "Re-transcribes while you talk. English only."),
 ];
@@ -54,7 +54,8 @@ export interface RowContext {
   selected: boolean;
   /** The saved API keys and voice IDs (blank or missing: not set). */
   env: Record<string, string>;
-  language: SpeechLanguage;
+  /** The languages chosen for a speech-to-text model ([] = Auto). */
+  languages(model: SttModel): readonly string[];
   /** Undefined while the voice server isn't running (no project folder yet). */
   install?: InstallState;
   engines: readonly EngineState[];
@@ -86,7 +87,7 @@ export function rowNotes(row: ModelRow, ctx: RowContext, keyLabel: (key: string)
     notes.push({ tone: "error", text: "Not installed: install it, or pick another model." });
   }
   if (row.kind === "stt") {
-    const why = sttLanguageWarning(row.id as SttModel, ctx.language);
+    const why = sttLanguageWarning(row.id as SttModel, ctx.languages(row.id as SttModel));
     if (why) notes.push({ tone: "warn", text: why });
   }
   if (ctx.selected && row.engine && (!install || install.installed)) {
