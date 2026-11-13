@@ -258,6 +258,26 @@ Only the selected Speech model's helper runs (server/speechEngines.ts: saved in 
 - **Apple** (`tools/macstt/main.swift`, compiled once like mactts): word times come from the `audioTimeRange` attribute on the result's `AttributedString` runs. Without `.fastResults`, volatile results only arrive after the input ends. No TCC prompt for a CLI helper. `SpeechTranscriber.supportedLocales` has no Romanian; `DictationTranscriber` lists ro-RO, but its asset never installs ("transcription.ro asset unavailable after attempted download, final state: Not Installing", even after `AssetInventory.reserve`). The helper still falls back to DictationTranscriber for locales SpeechTranscriber lacks.
 - **WhisperKit**: `whisperkit-cli serve --model-path … --word-timestamps --host 127.0.0.1 --port <free port>` (picked at launch; `WHISPERKIT_PORT` pins it) is OpenAI-compatible: multipart `POST /v1/audio/transcriptions`, `response_format=verbose_json`, `timestamp_granularities[]=word` → `words[{word,start,end}]` with a leading space. The first load compiles the model for the Neural Engine (a few minutes, once); later starts take ~1 s. Ready when it logs "Server started".
 
+## Harness sessions: resume, fork, interrupt, takeover ✅ (live, 2026-11-12, `npm run smoke:sessions`)
+Installed: claude 2.1.322, codex-cli 0.167.1, grok 1.0.77, opencode 1.19.3, pi 0.73.1, omp 18.2.1. Each check ran a real session in a throwaway project folder: **new** (reads a file, answers with a SPOKEN line), **stop** (interrupted mid-answer; the next request continues the same live session and still knows an earlier code word), **resume** (process gone; the next request continues the saved session by id), **fork** (a new session with the first one's history), **takeover** (Vizzo lets go; the harness's own resume command, run as a user would, knows the code word).
+
+| harness | model used | new / save | resume | fork | interrupt | takeover command | result |
+|---|---|---|---|---|---|---|---|
+| Claude Code | claude-haiku-5-5 | `--session-id <uuid>` (drop `--no-session-persistence`) | `--resume <id>` | `--resume <id> --fork-session` | stdin `{"type":"control_request","request":{"subtype":"interrupt"}}`: the turn ends (`result` subtype `error_during_execution`) 13 ms later, the process stays | `claude --resume <id>` | all ok |
+| Codex | gpt-6-luna | `thread/start` `ephemeral: false` | `thread/resume {threadId}` | `thread/fork {threadId}` | `turn/interrupt` | `codex resume <id>` | all ok (after `thread/unsubscribe` on close; without it: "thread-store conflict … already has an active writer") |
+| Grok | grok-4.7-build-fast | `-p … -s <uuid>` | `-p … -r <id>` | `-r <id> --fork-session` (new id in the init event) | none in `-p`: the process is ended; the next request resumes | `grok -r <id>` | all ok |
+| opencode | cerebras/gpt-oss-120b | `POST /session` (always saved) | `GET /session/:id` then messages | `POST /session/:id/fork` | `POST /session/:id/abort` | `opencode -s <id>` (in the project folder: it goes by `$PWD`) | all ok |
+| OhMyPi | cerebras/qwen-3.8-27b | drop `--no-session`; `get_state` gives `sessionId` and `sessionFile` (written with the first message) | `--session <file or id>` | `--fork <file>` | RPC `abort` | `omp --session <file>` | all ok |
+| Pi | – | same flags as OhMyPi (`docs/rpc.md`) | `--session` | `--fork` | RPC `abort` | `pi --session <file>` | **not run**: no provider login on this machine (`pi --list-models`: "No models available") |
+
+- A resumed session keeps the system prompt it started with: Claude Code records it (`--system-prompt-snapshot`, on by default, "every later request and resume sends the record as-is, even when a later launch passes different text"), Grok kept its first `--rules` on `-r` without them being passed again. Vizzo fixes a session's prompt when it opens anyway, so this matches.
+- `--append-system-prompt` exists on Claude Code, Pi and OhMyPi; a test rule ("end every reply with PINEAPPLE") was followed, also after a resume.
+- Claude Code `--tools default` gives its default set (25 tools here); `--tools default Glob Grep` does *not* add to it (it means only those two), so tools are removed with `--disallowedTools`. Without Bash, Claude Code includes Glob and Grep itself.
+- Start-up cost of the full setup (Claude Code, Haiku, trivial prompt, two runs): boot 0.19–0.28 s with `--safe-mode` and 5 tools vs 0.44–0.63 s with the user's setup and 25 tools; first text 1.3–1.4 s vs 1.4–1.7 s; input 6.2k vs 26.7k tokens per request (one MCP server configured here, which failed to connect).
+- OhMyPi 18 refuses `notebook` and `lsp` in `--tools` (as it does `python`, `fetch`, `browser`): a native solver with every tool switch on passes no `--tools` at all.
+- Pi / OhMyPi extensions can open dialogs over RPC (`extension_ui_request` select / confirm / input / editor); nobody answers them, so Vizzo cancels them (`extension_ui_response` `cancelled: true`).
+- Codex narrates before its answer even in a session ("I'll read the project's index.html…SPOKEN: …"); the turn pipeline's `NarrationGate` holds that back.
+
 ## Sources
 - Anthropic: bundled `claude-api` skill (models, Haiku 5.5 / Opus 5.5 migration notes)
 - OpenAI pricing: https://developers.openai.com/api/docs/pricing

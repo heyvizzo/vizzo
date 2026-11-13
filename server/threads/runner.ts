@@ -2,7 +2,8 @@ import { drawingContext } from "../adapters/drawing.ts";
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Element threads: one run queue per thread (docs/PLAN-threads.md, "Follow-up to a running thread", "Concurrent
 // edits to one file"). Each request runs in the thread's own harness session (deps.openThread, opened on first use;
-// it replays the thread's history itself when it has to reopen). A follow-up waits behind the current run; a
+// it resumes its harness's saved session when its process is gone, and replays the thread's history as text only when
+// there is none to resume). A follow-up waits behind the current run; a
 // correction aborts it and runs the combined request first. When a run finishes, its result joins the thread and
 // the central conversation and is announced by the notice policy (in full, or a reminder) on the speaking floor.
 //
@@ -21,6 +22,7 @@ import type { OrchestratorDeps } from "../orchestrators/types.ts";
 import { ttsSpeaker } from "./floor.ts";
 import { failureText, finishedLine, finishMode, reconcileText, reminderText } from "./policy.ts";
 import { threadStore, type ThreadRecord, type ThreadRunState, type ThreadStore } from "./store.ts";
+import { fitLines } from "../conversation.ts";
 
 const SUMMARY_MAX = 160;
 const noMark: Mark = () => {};
@@ -34,6 +36,8 @@ export interface RunSpec {
   kind: RunKind;
   /** What the harness is asked. */
   question: string;
+  /** The user's own words, when `question` is the router's reading of them (SolveTaskOpts.original). */
+  original?: string;
   /** The turn that asked (null for system follow-ups). */
   turnId: string | null;
   config: RunConfig;
@@ -135,23 +139,22 @@ class ThreadRunner implements ThreadRunState {
     const store = this.store;
     const rec = store.get(this.threadId);
     if (!rec) return q.resolve(null);
-    const choice = spec.config.llm.smart;
-    if (rec.handle?.choice && (rec.handle.choice.provider !== choice.provider || rec.handle.choice.model !== choice.model)) {
-      rec.handle.close(); // the smart tier changed: a new session, which replays the thread's history
-      rec.handle = null;
-    }
     this.replayCut = spec.messageId ?? null;
-    rec.handle ??= this.deps.openThread!({ role: "solver", choice, replay: () => replayText(store.info(this.threadId), this.replayCut), replayAnnotations: () => replayAnnotations(store.info(this.threadId), this.replayCut) });
+    // The thread's session keeps the harness, model and prompt it was opened with: a change of the smart tier (or of
+    // the saved instructions) in Settings applies to threads started after it.
+    rec.handle ??= this.deps.openThread!({ role: "solver", choice: spec.config.llm.smart, replay: () => replayText(store.info(this.threadId), this.replayCut), replayAnnotations: () => replayAnnotations(store.info(this.threadId), this.replayCut) });
     const kind = spec.kind;
     const win: RunWindow = { threadId: this.threadId, start: store.now(), end: null, files: [], kind };
     store.runLog.push(win);
     if (store.runLog.length > 200) store.runLog.splice(0, store.runLog.length - 200);
     let spoken = "";
     let text = "";
-    const trace = spec.inline?.trace ?? tracer((m: ServerMsg) => store.broadcast(m), spec.turnId ?? this.threadId, this.threadId);
+    const trace = spec.inline?.trace ?? tracer((m: ServerMsg) => store.broadcast(m), spec.turnId ?? this.threadId, this.threadId, spec.config.captureTrace);
+    // Costs are counted for the model the session runs on, which may no longer be the one Settings names.
+    const config: RunConfig = rec.handle.choice ? { ...spec.config, llm: { ...spec.config.llm, smart: rec.handle.choice } } : spec.config;
     try {
       const r = await this.deps.solveInThread!({
-        thread: rec.handle, kind, mark: spec.inline?.mark ?? noMark, question: spec.question, pointing: spec.pointing ?? [],
+        thread: rec.handle, kind, mark: spec.inline?.mark ?? noMark, question: spec.question, original: spec.original, pointing: spec.pointing ?? [],
         annotation: spec.annotation, pageContext: spec.pageContext, language: spec.language, intent: spec.intent, timeoutMs: taskTimeoutMs(spec.config),
         voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
         ...trace(),
@@ -162,7 +165,7 @@ class ThreadRunner implements ThreadRunState {
       win.files = r.filesTouched ?? [];
       if (this.current?.abortedBy || this.stopped) return q.resolve(null);
       const result: RunResult = { text: r.text || text, spoken: spoken || spokenFallback(r.text || text) || "Done.", usage: r.usage, filesTouched: win.files };
-      this.finished(spec, kind, result);
+      this.finished({ ...spec, config }, kind, result);
       q.resolve(result);
       if (kind !== "reconcile") this.reconcile(win, spec);
     } catch (e) {
@@ -282,13 +285,13 @@ function oneLine(s: string): string {
 export function replayText(t: ThreadInfo | undefined, cut: string | null = null): string {
   if (!t) return "";
   const i = cut ? t.messages.findIndex((m) => m.id === cut) : -1;
-  const lines = (i >= 0 ? t.messages.slice(0, i) : t.messages).flatMap((m) => {
+  const lines = fitLines((i >= 0 ? t.messages.slice(0, i) : t.messages).flatMap((m) => {
     if (m.kind === "reminder" || m.kind === "ack") return [];
     const who = m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : "System";
     const body = m.kind === "result" ? (m.detail || m.text) : m.text;
     const files = m.filesTouched?.length ? `\n(Edited: ${m.filesTouched.join(", ")})` : "";
     return [`${who} (${m.kind}): ${body}${files}${m.annotation ? `\n${drawingContext(m.annotation)}` : ""}`];
-  });
+  }));
   if (!lines.length) return "";
   return `Earlier in this thread about ${t.title} (a session that has since been closed):\n${lines.join("\n\n")}`;
 }

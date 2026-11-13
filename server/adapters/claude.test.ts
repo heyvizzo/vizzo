@@ -671,18 +671,17 @@ describe("request shaping", () => {
 });
 
 describe("projectNote: what the solver is told about its harness's switches", () => {
-  it("Shell off: no git, use the git state block; Shell on: it can look things up, and doesn't commit", () => {
-    expect(projectNote("claude-code")).toContain("You have no shell");
-    expect(projectNote("claude-code", { shell: true })).toContain("You have a shell");
-    expect(projectNote("claude-code", { shell: true })).toContain("Don't commit");
-    // Codex's shell is on unless it's switched off.
+  it("Shell on (the solver's default): it can look things up, and doesn't commit; Shell off: no git, use the git state block", () => {
+    expect(projectNote("claude-code")).toContain("You have a shell");
+    expect(projectNote("claude-code")).toContain("Don't commit");
+    expect(projectNote("claude-code", { shell: false })).toContain("You have no shell");
     expect(projectNote("codex")).toContain("You have a shell");
     expect(projectNote("codex", { shell: false })).toContain("You have no shell");
   });
 
-  it("Web: mentioned only when the harness has it switched on", () => {
-    expect(projectNote("claude-code")).not.toContain("search and fetch the web");
-    expect(projectNote("claude-code", { web: true })).toContain("search and fetch the web");
-    expect(projectNote("pi", { web: true })).not.toContain("search and fetch the web");
+  it("Web: mentioned only when the harness has it and it isn't switched off", () => {
+    expect(projectNote("claude-code")).toContain("search and fetch the web");
+    expect(projectNote("claude-code", { web: false })).not.toContain("search and fetch the web");
+    expect(projectNote("pi")).not.toContain("search and fetch the web"); // Pi has no web tool
   });
 });

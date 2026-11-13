@@ -1,7 +1,7 @@
 import { isDrawingAnnotation, type DrawingAnnotation } from "./annotations.ts";
 // Browser ↔ server protocol (ARCHITECTURE §3). One WebSocket at /ws.
 // Binary frames carry PCM16 mono 24 kHz audio for the active turn; text frames are JSON.
-import type { RunConfig } from "./config.ts";
+import type { LlmChoice, RunConfig } from "./config.ts";
 import type { MarkName, Metrics } from "./marks.ts";
 import type { ThreadInfo, ThreadSay } from "./threads.ts";
 
@@ -380,6 +380,11 @@ export type ServerMsg =
 
 export interface Usage {
   anthropic?: unknown;
+  /**
+   * The harness + model the solver ran on, when it isn't the turn's smart tier (a session opened earlier keeps the
+   * model it was opened with): the solver's call is priced and labelled with it.
+   */
+  solverLlm?: LlmChoice;
   elevenChars?: number;
   /** Characters spoken by on-device TTS (macOS): not billed. */
   localTtsChars?: number;

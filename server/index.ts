@@ -68,6 +68,28 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify(await scanHarnesses()));
     }
+    if (url.pathname === "/api/traces" || url.pathname === "/api/traces/reveal") {
+      // The local trace log (Settings → Debugging → Traces): what's saved (GET), delete it all (DELETE), open its folder.
+      const { deleteTraces, traceDir, traceStatus } = await import("./traceStore.ts");
+      if (url.pathname === "/api/traces/reveal" && req.method === "POST") {
+        const { mkdirSync } = await import("node:fs");
+        const { spawn } = await import("node:child_process");
+        mkdirSync(traceDir(), { recursive: true });
+        spawn("open", [traceDir()], { stdio: "ignore", detached: true }).unref();
+        res.writeHead(204);
+        return res.end();
+      }
+      if (req.method === "DELETE") deleteTraces();
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(traceStatus()));
+    }
+    if (url.pathname === "/api/llm/notice") {
+      // What the one-time move to the new switch defaults turned on (null: nothing to say). POST: seen.
+      const { dismissSelectionNotice, selectionNotice } = await import("./llmSelection.ts");
+      if (req.method === "POST") dismissSelectionNotice();
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(req.method === "POST" ? null : selectionNotice()));
+    }
     if (url.pathname === "/api/llm/selection") {
       const { settledSelection, setSelection } = await import("./llmSelection.ts");
       if (req.method === "POST") {

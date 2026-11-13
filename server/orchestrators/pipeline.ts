@@ -14,6 +14,8 @@
 // go to the router; its target sends the turn to a new thread (a short new question still answers inline, recorded
 // in the thread), an existing one (follow-up queued / correction restarts, after the ack), a tell (the thread's
 // latest result is this turn's answer) or the central conversation (as without threads).
+// The central conversation's delegated turns run on its own harness session (server/centralSession.ts), which holds
+// the history; a long task (a background job) runs on a fork of it, so the conversation stays free meanwhile.
 // A thread that always uses the smart model (ThreadInfo.alwaysSmart), from its open panel: a spoken turn goes to the
 // router in forced mode (it only speaks the ack); a typed one skips it and goes straight to the thread's harness session.
 //
@@ -30,9 +32,10 @@ import { useVoiceCues } from "../adapters/voiceCues.ts";
 import { sttUsage } from "../cost.ts";
 import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
+import { centralSession, solveCentral } from "../centralSession.ts";
 import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
-import { isLocalTts, taskTimeoutMs } from "../../shared/config.ts";
+import { isLocalTts, taskTimeoutMs, type LlmChoice } from "../../shared/config.ts";
 import { startJob } from "./jobs.ts";
 import { browserUrl } from "../browserPage.ts";
 import { threadStore } from "../threads/store.ts";
@@ -152,6 +155,8 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
     let routerUsage: unknown = undefined;
     let solverUsage: unknown = undefined;
     let fillerUsage: unknown = undefined;
+    /** The conversation's session runs on the model it was opened with, which may not be the turn's smart tier. */
+    let solverLlm: LlmChoice | undefined;
 
     const base = new TurnBase(ctx, {
       timeoutMs: deps.turnTimeoutMs,
@@ -172,6 +177,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
               ? { fishTtsChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }
               : { elevenChars: ttsStreams.reduce((n, t) => n + t.chars, 0) }),
         elevenSegments: ttsStreams.filter((t) => t.chars > 0).map((t) => ({ label: t.label ?? "tts", chars: t.chars })),
+        ...(solverLlm ? { solverLlm } : {}),
         ...sttUsage(cfg.sttModel, scribe.seconds),
       }),
     });
@@ -221,7 +227,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         }
         return spoken;
       };
-      const trace = tracer((m) => { if (!base.isFinished) ctx.send(m); }, ctx.turnId);
+      const trace = tracer((m) => { if (!base.isFinished) ctx.send(m); }, ctx.turnId, undefined, cfg.captureTrace);
       const smart = ctx.pinnedThread && threadsEnabled(cfg, deps, ctx) ? threadStore().info(ctx.pinnedThread) : undefined;
       if (smart?.alwaysSmart && typed !== undefined) {
         if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // nothing is said in this turn
@@ -319,6 +325,8 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
 
       let answerDone: Promise<void> = Promise.resolve();
       const delegate = route.delegate;
+      // What the user said or typed, with the pointing markers: the solver gets it next to the router's reading.
+      const own = base.markedTranscript();
       const plan = th.plan;
       const store = threadStore();
       const sep = () => (base.voiceText && !/\s$/.test(base.voiceText) ? " " : "");
@@ -335,7 +343,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         }
         if (delegate) {
           threadSpec = {
-            kind, question: delegate.question, turnId: ctx.turnId, config: cfg, intent: delegate.intent, pointing,
+            kind, question: delegate.question, original: own, turnId: ctx.turnId, config: cfg, intent: delegate.intent, pointing,
             annotation: ctx.annotation, pageContext: solverContext, language: base.language, messageId: msg?.id,
           };
         }
@@ -370,7 +378,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       } else if (delegate && background) {
         // Long task: the ack said "I'll get back to you"; the solver runs as a job that outlives this turn.
         const job = startJob(ctx.connection, ctx.channel!, deps, {
-          turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question,
+          turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question, original: own,
           estimateS: delegate.estimateS, pointing, history: history ?? [], annotation: ctx.annotation, pageContext: solverContext, language: base.language,
         });
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
@@ -416,9 +424,25 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
             ...threadSpec, inline: { mark: base.mark, trace, onSpokenLine, onDelta, active: () => !base.isFinished },
           }, deps));
           if (r) solverUsage = r.usage;
+        } else if (cfg.memory && deps.openThread && deps.solveInThread) {
+          // The conversation's own harness session: it holds the earlier turns itself (what it read and changed too).
+          // A turn that is cancelled or fails stops its request there, so the session is free for the next one.
+          let asking = true;
+          base.onCleanup((reason) => { if (reason !== "done" && asking) centralSession()?.abort(); });
+          const solved = await tag("solver", solveCentral({ openThread: deps.openThread, solveInThread: deps.solveInThread }, cfg.llm.smart, ctx.turnId, {
+            mark: base.mark, question: delegate.question, original: own, pointing, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language,
+            timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
+            onDelta,
+            ...trace(),
+            onSpokenLine,
+          }).finally(() => { asking = false; }));
+          solverUsage = solved.usage;
+          const ran = centralSession()?.choice;
+          if (ran && JSON.stringify(ran) !== JSON.stringify(cfg.llm.smart)) solverLlm = ran;
         } else {
+          // No memory: one request on a fresh agent.
           const solved = await tag("solver", deps.solveTask({
-            mark: base.mark, question: delegate.question, pointing, fast: cfg.solverFast, history, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
+            mark: base.mark, question: delegate.question, original: own, pointing, fast: cfg.solverFast, history, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
             timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
             onDelta,
             ...trace(),

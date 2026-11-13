@@ -106,8 +106,11 @@ export interface ThreadSay {
   needsReply: boolean;
 }
 
-/** At most this many threads keep a live harness session; the least recently used idle one is closed (replayed when needed). */
-export const MAX_LIVE_THREAD_SESSIONS = 10;
+/**
+ * At most this many sessions (the central conversation's, the threads', long jobs') keep a live harness process; the
+ * least recently used idle one is stopped. Its saved session stays: the next request resumes it.
+ */
+export const MAX_LIVE_THREAD_SESSIONS = 15;
 
 /** A thread's title shown on its own ("The red button"); titles are kept lowercase for use mid-sentence. */
 export function displayTitle(title: string): string {

@@ -68,11 +68,12 @@ describe("re-warming on a new selection", () => {
   it("a changed toggle re-warms the tier; one set back to its default doesn't", () => {
     configureWarm(CLAUDE);
     const solver = made.find((a) => a.spec.role === "solver")!;
-    configureWarm({ ...CLAUDE, smart: { ...CLAUDE.smart, toggles: { shell: false, web: false } } });
+    // The solver's switches start on: naming them on changes nothing, turning one off does.
+    configureWarm({ ...CLAUDE, smart: { ...CLAUDE.smart, toggles: { shell: true, web: true } } });
     expect(solver.killed).toBe(false);
-    configureWarm({ ...CLAUDE, smart: { ...CLAUDE.smart, toggles: { shell: true } } });
+    configureWarm({ ...CLAUDE, smart: { ...CLAUDE.smart, toggles: { shell: false } } });
     expect(solver.killed).toBe(true);
-    expect(made.at(-1)!.spec).toMatchObject({ role: "solver", toggles: { shell: true } });
+    expect(made.at(-1)!.spec).toMatchObject({ role: "solver", toggles: { shell: false }, persist: true });
   });
 
   it("Grok keeps no agents waiting (it can't be started ahead)", () => {

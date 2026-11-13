@@ -1,13 +1,16 @@
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Background jobs (chat mode, RunConfig.backgroundLongTasks): a long task's the solver run continues after its
-// turn ends. When it finishes, the client gets a `job` update, the result joins the conversation, and it's
-// spoken as a notice once no turn is active, with the turn's TTS engine. The user can stop one (stopJob): its
-// solver is killed and nothing is announced.
+// turn ends. It runs on a harness session of its own, forked from the conversation's where the harness can
+// (server/centralSession.ts), so the conversation's session stays free for the next turn. When it finishes, the
+// client gets a `job` update, the result joins the conversation (the conversation's session hears it as a note), and
+// it's spoken as a notice once no turn is active, with the turn's TTS engine. The user can stop one (stopJob): its
+// solver is stopped and nothing is announced. The job's session is closed when the job is over.
 import { randomUUID } from "node:crypto";
 import { isLocalTts, llmOf, taskTimeoutMs, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
 import { llmCostItem, PRICES } from "../cost.ts";
 import { getConversation, retainConversationDrawings, type ChatTurn } from "../conversation.ts";
+import { openJobSession } from "../centralSession.ts";
 import { tracer } from "./trace.ts";
 import { useVoiceCues } from "../adapters/voiceCues.ts";
 import type { ConnectionCache, ConnectionChannel, OrchestratorDeps } from "./types.ts";
@@ -21,6 +24,8 @@ export interface JobSpec {
   config: RunConfig;
   intent: Intent;
   question: string;
+  /** The user's own words (SolveTaskOpts.original). */
+  original?: string;
   estimateS: number | null;
   pointing: PointingTarget[];
   history: ChatTurn[];
@@ -95,19 +100,36 @@ export function startJob(
   // Stopped (stopJob): what the solver says after that is dropped.
   const live = () => !reg.cancelled && job.state === "running";
 
-  deps.solveTask({
-    signal: abort.signal, timeoutMs: taskTimeoutMs(spec.config),
-    mark: noMark, question: spec.question, pointing: spec.pointing, fast: spec.config.solverFast,
-    history: spec.history, intent: spec.intent, annotation: spec.annotation, pageContext: spec.pageContext, language: spec.language, llm: llmOf(spec.config).smart,
+  const common = {
+    timeoutMs: taskTimeoutMs(spec.config),
+    mark: noMark, question: spec.question, original: spec.original, pointing: spec.pointing,
+    intent: spec.intent, annotation: spec.annotation, pageContext: spec.pageContext, language: spec.language,
     voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
-    ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId)(),
-    onSpokenLine: (l) => { spoken = l.trim(); },
-    onDelta: (d) => { text += d; },
-  }).finally(() => reg.aborts.delete(job.jobId)).then(
+    ...tracer((m) => { if (!reg.cancelled) channel.send(m); }, spec.turnId, job.jobId, spec.config.captureTrace)(),
+    onSpokenLine: (l: string) => { spoken = l.trim(); },
+    onDelta: (d: string) => { text += d; },
+  };
+  let run: Promise<{ text: string; usage: unknown }>;
+  // Costs are counted for the model the job's session runs on (a fork keeps the conversation's).
+  let costConfig = spec.config;
+  if (deps.openThread && deps.solveInThread) {
+    // Its own session, forked from the conversation's when there is one to fork.
+    const session = openJobSession(deps.openThread, llmOf(spec.config).smart, spec.history);
+    if (session.choice) costConfig = { ...spec.config, llm: { ...llmOf(spec.config), smart: session.choice } };
+    const stop = (): void => { try { session.abort(); } catch { /* ignore */ } };
+    abort.signal.addEventListener("abort", stop, { once: true });
+    run = deps.solveInThread({ ...common, thread: session, kind: "request" }).finally(() => {
+      abort.signal.removeEventListener("abort", stop);
+      try { session.close(); } catch { /* ignore */ }
+    });
+  } else {
+    run = deps.solveTask({ ...common, signal: abort.signal, fast: spec.config.solverFast, history: spec.history, llm: llmOf(spec.config).smart });
+  }
+  run.finally(() => reg.aborts.delete(job.jobId)).then(
     (r) => {
       if (!live()) return;
       text = r.text || text;
-      const item = llmCostItem(spec.config, "smart", r.usage, "Background solver");
+      const item = llmCostItem(costConfig, "smart", r.usage, "Background solver");
       Object.assign(job, {
         state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0),
         costUsd: item.usd,

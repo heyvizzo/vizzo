@@ -5,7 +5,7 @@ import type { ChatTurn } from "../conversation.ts";
 import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent, Word } from "../../shared/protocol.ts";
 import type { LlmChoice, RouterMode, SttModel, TtsModel, TtsStyle } from "../../shared/config.ts";
 import type { ThreadState } from "../../shared/threads.ts";
-import type { HarnessResult } from "./harnesses.ts";
+import type { AgentSpec, HarnessResult, SessionRef } from "./harnesses.ts";
 
 export type { Mark };
 
@@ -157,6 +157,11 @@ export type GenerateFillers = (opts: {
 export interface SolveTaskOpts {
   annotation?: DrawingAnnotation;
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
+  /**
+   * The user's own words (the transcript with its pointing markers, or what they typed), when `question` is the
+   * router's reading of them: the solver gets both, and the user's own decide.
+   */
+  original?: string;
   /** Chat mode: earlier turns, oldest first. */
   history?: ChatTurn[];
   /** Clicks / highlighted text from the turn, preformatted (shared/pointing.ts formatPageContext). */
@@ -184,42 +189,83 @@ export interface SolveTaskOpts {
 }
 export type SolveTask = (opts: SolveTaskOpts) => Promise<{ text: string; usage: unknown }>;
 
-// ── Element threads: persistent harness sessions (docs/PLAN-threads.md) ──
+// ── Sessions: persistent harness sessions (docs/PLAN-threads.md, docs/ARCHITECTURE.md "Harness sessions") ──
 
-/** One element thread's harness session: successive requests share the harness's own context. */
+/**
+ * How a request reached its session. live: the session's process was waiting. new: the session's first request.
+ * resumed: its process was gone and the harness's saved session was continued by id. forked: a new session started
+ * with another's history (a long job off the central conversation). replayed: a new session that was given Vizzo's
+ * own record of the history as text (nothing to resume natively, or the resume didn't take): the harness's
+ * intermediate tool results are not in it.
+ */
+export type SessionMode = "live" | "new" | "resumed" | "forked" | "replayed";
+
+/** What went to the session for one request, as sent (debug trace). */
+export interface SessionDispatch {
+  mode: SessionMode;
+  /** The harness's own session id, when it is known as the message goes out (a new session's may only come after). */
+  sessionId?: string;
+  /** The message after the history, the notes and the attachment line were added. */
+  message: string;
+  /** Why the saved session wasn't continued natively (mode replayed after a resume or fork that didn't take). */
+  fallback?: string;
+}
+
+/**
+ * One harness session: the central conversation's, an element thread's or a long job's. Successive requests share
+ * the harness's own context. What it runs with (harness, model, level, switches, prompt and saved instructions) is
+ * fixed when it is opened: later changes in Settings apply to new sessions only.
+ */
 export interface HarnessThread {
   readonly id: string;
   /** The harness + model the session runs on (always set by openHarnessThread; test fakes may leave it out). */
   readonly choice?: LlmChoice;
+  /** What its agents start with, fixed at its first request (absent before; test fakes leave it out). */
+  readonly spec?: AgentSpec;
   /**
-   * Send the next user message and stream the reply. Requests on one thread are serialized (a second send waits).
-   * If the thread has no live session (first use, evicted, crashed), one is opened and `replay()` is sent first in
-   * the same message, so the new session knows the thread's history.
+   * Send the next user message and stream the reply. Requests on one session are serialized (a second send waits).
+   * Without a live process (first use, evicted, crashed) one is started on the harness's saved session; only when
+   * there is none to continue is `replay()` sent first in the same message. `onDispatch`: called with the message
+   * as it goes out.
    */
-  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult & {
+  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void): Promise<HarnessResult & {
     /** Project-relative paths of files the run edited (best effort from the harness's tool events). */
     filesTouched: string[];
-    /** A new session was opened for this request (and the replay was prepended). */
+    /** The history was replayed as text into a new session for this request (mode "replayed"). */
     reopened: boolean;
+    /** How the request reached the session (absent from test fakes). */
+    session?: { mode: SessionMode; id?: string; file?: string; fallback?: string };
   }>;
   /** The process its live session runs in alone (see WarmAgent.pid), for RAM per thread. Absent: none. */
   pid?(): number | undefined;
-  /** Stop the in-flight request (its send() rejects with an AbortError-named error). The thread stays usable. */
+  /** Stop the in-flight request (its send() rejects with an AbortError-named error). The session stays, with its context. */
   abort(): void;
-  /** Close the session for good (thread deleted). */
+  /**
+   * Stop the session's process for good (thread deleted, new conversation). The harness's saved session stays on
+   * disk, so the user can still open it with the harness's own resume command.
+   */
   close(): void;
-  /** A session is attached right now. */
+  /** A process is attached right now. */
   readonly live: boolean;
+  /** The harness's own saved session, once it has one (what `claude --resume` and the like take). */
+  session?(): SessionRef | undefined;
 }
 
 export interface OpenHarnessThreadOpts {
   role: "solver";
   choice: LlmChoice;
-  /** The thread's history as plain text, prepended when a session has to be (re)opened. "" = nothing yet. */
+  /** The history as plain text, prepended when a session starts with none of its own. "" = nothing yet. */
   replay: () => string;
   replayAnnotations?: () => DrawingAnnotation[];
+  /**
+   * What happened outside the session since it last heard (the conversation's other turns), prepended to a request
+   * on a session that has its own history (live, resumed or forked). "" = nothing.
+   */
+  notes?: () => string;
+  /** Start as a fork of this session's saved one when it has one (same harness); otherwise new, with `replay()`. */
+  forkOf?: HarnessThread;
 }
-/** Live sessions are capped (MAX_LIVE_THREAD_SESSIONS): the least recently used idle one is closed. */
+/** Live processes are capped (MAX_LIVE_THREAD_SESSIONS): the least recently used idle one is stopped, and resumed when needed. */
 export type OpenHarnessThread = (opts: OpenHarnessThreadOpts) => HarnessThread;
 
 /** One request on an element thread: like SolveTaskOpts, but the history lives in the thread's session. */

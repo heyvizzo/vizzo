@@ -35,11 +35,16 @@ export interface CliHandlers {
   onEvent?: (ev: Record<string, unknown>) => void;
 }
 
-/** `claude -p` flags every agent gets: stream-json both ways, nothing saved. What it loads is up to its toggles (claudeArgs). */
+/**
+ * `claude -p` flags every agent gets: stream-json both ways. What it loads is up to its toggles, and whether its
+ * conversation is saved (so it can be resumed) to its spec (claudeArgs).
+ */
 export const CLAUDE_BASE_ARGS = [
   "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-  "--no-session-persistence",
 ];
+
+/** After an interrupt (stop, time limit), how long a kept agent has to end its turn before the process is killed. */
+const INTERRUPT_GRACE_MS = 5000;
 
 /** Where agents run by default: an empty directory, so no project settings or CLAUDE.md are picked up. */
 export const EMPTY_CWD = join(tmpdir(), "vizzo-agents");
@@ -52,6 +57,11 @@ export class CliAgent {
   private stderr = "";
   exited = false;
   readonly exit: Promise<number | null>;
+  /** The CLI's session id, from its events (every one carries it). */
+  sessionId: string | undefined;
+  /** The `system` / `init` event came: the conversation (new, resumed or forked) is attached. */
+  attached = false;
+  private controlSeq = 0;
 
   /** `role`: a label for errors ("router", "grok solver"…). */
   constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD, env: NodeJS.ProcessEnv = process.env) {
@@ -73,13 +83,16 @@ export class CliAgent {
       if (!line) continue;
       let ev: Record<string, unknown>;
       try { ev = JSON.parse(line); } catch { continue; }
+      if (typeof ev.session_id === "string" && ev.session_id) this.sessionId = ev.session_id;
+      if (ev.type === "system" && ev.subtype === "init") this.attached = true;
       for (const l of this.listeners) l(ev);
     }
   }
 
   /**
    * Send one user message (`null`: the prompt was in the arguments) and stream the reply until the `result`
-   * event. The process exits afterwards, unless `keep`: then it waits for the next message (a timeout still kills it).
+   * event. The process exits afterwards, unless `keep`: then it waits for the next message. A kept agent that runs
+   * out of time is interrupted (it stays, with its conversation); it is only killed if it doesn't stop.
    */
   request(user: string | (ImageBlockParam | TextBlockParam)[] | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
     return new Promise<CliResult>((resolve, reject) => {
@@ -88,6 +101,7 @@ export class CliAgent {
       let assistant: unknown = null;
       const done = (fn: () => void, end = !keep) => {
         clearTimeout(timer);
+        clearTimeout(grace);
         this.listeners.delete(listener);
         if (end) {
           try { this.proc.stdin.end(); } catch { /* already closed */ }
@@ -95,7 +109,16 @@ export class CliAgent {
         }
         fn();
       };
-      const timer = setTimeout(() => done(() => reject(new Error(`${this.bin} (${this.role}) timed out after ${timeoutMs} ms`)), true), timeoutMs);
+      const timedOut = (): Error => new Error(`${this.bin} (${this.role}) timed out after ${timeoutMs} ms`);
+      let overtime = false;
+      let grace: NodeJS.Timeout | undefined;
+      const timer = setTimeout(() => {
+        if (!keep) { done(() => reject(timedOut()), true); return; }
+        overtime = true;
+        this.interrupt();
+        grace = setTimeout(() => done(() => reject(timedOut()), true), INTERRUPT_GRACE_MS);
+        grace.unref();
+      }, timeoutMs);
       const listener = (ev: Record<string, unknown>): void => {
         handlers.onEvent?.(ev);
         if (ev.type === "stream_event") {
@@ -110,6 +133,8 @@ export class CliAgent {
           assistant = ev.message ?? ev;
         } else if (ev.type === "result") {
           const r = ev as { subtype?: string; is_error?: boolean; result?: string; usage?: unknown; total_cost_usd?: number; duration_ms?: number; duration_api_ms?: number; modelUsage?: Record<string, unknown> };
+          clearTimeout(grace);
+          if (overtime) { done(() => reject(timedOut())); return; }
           if (r.is_error || (r.subtype && r.subtype !== "success")) {
             done(() => reject(new Error(`${this.bin} (${this.role}) failed: ${r.subtype ?? "error"}: ${String(r.result ?? "").slice(0, 300)}`)));
             return;
@@ -124,11 +149,23 @@ export class CliAgent {
       };
       this.listeners.add(listener);
       this.exit.then((code) => {
-        if (this.listeners.has(listener)) done(() => reject(new Error(`${this.bin} (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`)));
+        // `exitedEarly`: the process went before a result (a session that couldn't be resumed ends this way).
+        if (this.listeners.has(listener)) done(() => reject(Object.assign(new Error(`${this.bin} (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`), { exitedEarly: true })));
       });
       if (user === null) this.proc.stdin.end();
       else this.proc.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: user } }) + "\n");
     });
+  }
+
+  /**
+   * Stop the turn in flight (Claude Code's control request, as its SDK sends it): the turn ends with an error
+   * `result`, the process and its conversation stay. Checked live on claude 2.1.322 (docs/API-NOTES.md).
+   */
+  interrupt(): void {
+    if (this.exited) return;
+    try {
+      this.proc.stdin.write(JSON.stringify({ type: "control_request", request_id: `interrupt-${++this.controlSeq}`, request: { subtype: "interrupt" } }) + "\n");
+    } catch { /* stdin closed: the process is going */ }
   }
 
   kill(): void {

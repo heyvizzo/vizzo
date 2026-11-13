@@ -161,6 +161,7 @@ export interface LlmChoice { provider: LlmProvider; model: string; level?: strin
 export type HarnessToggleId = "shell" | "web" | "subagents" | "images" | "mcp" | "skills" | "hooks" | "plugins" | "instructions";
 /** A tier's switches as chosen; an id left out is at its default. */
 export type HarnessToggles = Partial<Record<HarnessToggleId, boolean>>;
+/** `default`: the switch's starting value on the fast tier (toggleDefault: the smart tier starts with all of them on). */
 export interface HarnessToggle { id: HarnessToggleId; label: string; hint: string; default: boolean }
 const toggle = (id: HarnessToggleId, label: string, hint: string, on = false): HarnessToggle => ({ id, label, hint, default: on });
 export const HARNESS_TOGGLES: Record<HarnessId, HarnessToggle[]> = {
@@ -218,16 +219,34 @@ export const HARNESS_TOGGLES: Record<HarnessId, HarnessToggle[]> = {
     toggle("instructions", "Rules", "Rules discovery"),
   ],
 };
-/** Whether `id` is on for `harness` under `toggles` (a toggle the harness doesn't list is off). */
-export function toggleOn(harness: HarnessId, toggles: HarnessToggles | undefined, id: HarnessToggleId): boolean {
-  const t = HARNESS_TOGGLES[harness].find((x) => x.id === id);
-  return t ? (toggles?.[id] ?? t.default) : false;
+/**
+ * A switch's starting value on a tier. The smart tier runs the solver, which starts with everything its harness has
+ * (the user's normal coding setup); the fast tier runs the router and the progress lines, which need none of it.
+ */
+export function toggleDefault(t: HarnessToggle, tier: LlmTier): boolean {
+  return tier === "smart" ? true : t.default;
 }
-/** `toggles` reduced to the ones `harness` lists that differ from their default (undefined: all at default). */
-export function cleanToggles(harness: HarnessId, toggles: HarnessToggles | undefined): HarnessToggles | undefined {
+/** Whether `id` is on for `harness` on `tier` under `toggles` (a toggle the harness doesn't list is off). */
+export function toggleOn(harness: HarnessId, toggles: HarnessToggles | undefined, id: HarnessToggleId, tier: LlmTier): boolean {
+  const t = HARNESS_TOGGLES[harness].find((x) => x.id === id);
+  return t ? (toggles?.[id] ?? toggleDefault(t, tier)) : false;
+}
+/** `toggles` reduced to the ones `harness` lists that differ from the tier's default (undefined: all at default). */
+export function cleanToggles(harness: HarnessId, toggles: HarnessToggles | undefined, tier: LlmTier): HarnessToggles | undefined {
   const out: HarnessToggles = {};
-  for (const t of HARNESS_TOGGLES[harness]) if (toggles?.[t.id] !== undefined && toggles[t.id] !== t.default) out[t.id] = toggles[t.id];
+  for (const t of HARNESS_TOGGLES[harness]) if (toggles?.[t.id] !== undefined && toggles[t.id] !== toggleDefault(t, tier)) out[t.id] = toggles[t.id];
   return Object.keys(out).length ? out : undefined;
+}
+/**
+ * The saved selection's version. 2: the smart tier's switches start on (toggleDefault). A selection saved before
+ * that is moved over once (migrateSelection): its smart tier's switches all start on, whatever they were.
+ */
+export const SELECTION_VERSION = 2;
+/** A tier's choice from before SELECTION_VERSION 2, with the smart tier's switches back at their (new) defaults. */
+export function migrateChoice(tier: LlmTier, choice: LlmChoice): LlmChoice {
+  if (tier !== "smart" || !choice.toggles) return choice;
+  const { toggles: _old, ...rest } = choice;
+  return rest;
 }
 /**
  * What a harness or API offers for one model (GET /api/llm/models). `fastLevel`: the level the fast tier starts
@@ -312,6 +331,11 @@ export interface RunConfig {
   ttsVoice?: string;
   /** Delivery for Fish Audio Drama 3 (direction, speed, volume); ignored by the other engines. */
   ttsStyle: TtsStyle;
+  /**
+   * Save every model call of this turn (and of the runs it starts) to the local trace log: the prompt as dispatched
+   * and the raw response (Settings → Debugging; server/traceStore.ts).
+   */
+  captureTrace?: boolean;
 }
 
 export const DEFAULT_CONFIG: RunConfig = {

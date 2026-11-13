@@ -13,14 +13,14 @@ import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent } from
 import {
   kindFor, NarrationGate, parseEstimate, resolveThreadRoute, RouteInputStream, SpokenLineParser, type RouteFields, type ThreadRouteContext,
 } from "./claudeParse.ts";
-import type { GenerateFillers, RouteDecision, RouteTurn, SolveInThread, SolveTask, ThreadBrief } from "./types.ts";
-import { trimDetail, type ChatTurn } from "../conversation.ts";
+import type { GenerateFillers, RouteDecision, RouteTurn, SessionDispatch, SessionMode, SolveInThread, SolveTask, ThreadBrief } from "./types.ts";
+import { fitHistory, type ChatTurn } from "../conversation.ts";
 import type { CliRole } from "./claudeCli.ts";
-import { describeAgent, type HarnessResult } from "./harnesses.ts";
+import { describeAgent, type AgentSpec, type HarnessResult } from "./harnesses.ts";
 import { agentSpec, harnessRequest, registerRoleSpecs, ROLE_TIER } from "./warmPool.ts";
 import { apiRequest, describeApi } from "./llmApi.ts";
 import { projectDir } from "../project.ts";
-import { appendInstructions } from "../instructions.ts";
+import { solverInstructions } from "../instructions.ts";
 import { gitContext } from "../gitContext.ts";
 import { SERVER_DIR } from "../paths.ts";
 import { FISH_ACK_CUES, FISH_FILLER_CUES, FISH_SOLVER_CUES } from "./voiceCues.ts";
@@ -69,8 +69,19 @@ export function extractJsonObject(text: string): string | null {
 
 const ROLE_PROMPT_LABEL: Record<CliRole, string> = { router: "router.md + JSON output format", fillers: "fillers.md + JSON output format", solver: "solver.md" };
 
-/** What a call was sent, for the prompt inspector. */
-export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: ChatParams): LlmPrompt {
+/**
+ * How Vizzo's prompt reaches the model. The solver in a project runs as its harness: ours is appended to the
+ * harness's own system prompt, which the harness puts together itself and Vizzo never sees.
+ */
+const compositionOf = (spec: AgentSpec): string => spec.role === "solver" && spec.project
+  ? `appended to ${LLM_PROVIDER_LABELS[spec.harness]}'s own system prompt (kept as it is; not captured: the harness assembles it)`
+  : "the whole system prompt (the harness's own is replaced)";
+
+/**
+ * What a call was sent, for the prompt inspector: Vizzo's side of it, as handed to the harness. `spec`: a session's
+ * own (fixed when it was opened), which may be older than what Settings would give a new session now.
+ */
+export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: ChatParams, spec?: AgentSpec): LlmPrompt {
   const provider = choice.provider;
   if (isApiProvider(provider)) {
     // A model API gets the turns as real messages, not flattened.
@@ -81,15 +92,21 @@ export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: Chat
       settings: { ...(params.annotations?.length ? { attachments: attachmentSummary(params.annotations) } : {}), api: LLM_PROVIDER_LABELS[provider], ...(choice.level ? { level: choice.level } : {}), run: describeApi(provider, choice) },
     };
   }
-  const spec = agentSpec(role, choice);
+  const now = agentSpec(role, choice, spec?.persist);
+  const used = spec ?? now;
+  // The layers as they are now; a session opened under other settings shows the prompt it was given, as one part.
+  const parts = rolePromptParts(role, used.harness, used.toggles);
+  const system = parts.map((x) => x.text).join("\n\n") === used.system
+    ? parts
+    : [{ label: `${ROLE_PROMPT_LABEL[role]} + project note + saved instructions, as fixed when this session was opened`, text: used.system }];
   return {
-    target: role, model: `${spec.model || "default model"} via ${LLM_PROVIDER_LABELS[spec.harness]}`,
-    system: [{ label: ROLE_PROMPT_LABEL[role] + (spec.project ? " + project note" : ""), text: spec.system }],
+    target: role, model: `${used.model || "default model"} via ${LLM_PROVIDER_LABELS[used.harness]}`,
+    system,
     messages: [{ role: "user", text: flattenMessages(params), label: "this turn (earlier turns flattened in)" }],
     settings: {
       ...(params.annotations?.length ? { attachments: attachmentSummary(params.annotations) } : {}),
-      harness: LLM_PROVIDER_LABELS[spec.harness], ...(spec.level ? { level: spec.level } : {}), ...(spec.speed ? { speed: spec.speed } : {}),
-      ...(spec.project ? { cwd: spec.project } : {}), run: describeAgent(spec),
+      harness: LLM_PROVIDER_LABELS[used.harness], ...(used.level ? { level: used.level } : {}), ...(used.speed ? { speed: used.speed } : {}),
+      ...(used.project ? { cwd: used.project } : {}), composition: compositionOf(used), run: describeAgent(used),
     },
   };
 }
@@ -145,7 +162,7 @@ Reply with ONLY one JSON object (no code fences, no other text): {"lines": ["…
  */
 export function projectNote(harness: LlmProvider, toggles?: HarnessToggles): string {
   const claude = harness === "claude-code";
-  const has = (id: "shell" | "web"): boolean => isHarness(harness) && toggleOn(harness, toggles, id);
+  const has = (id: "shell" | "web"): boolean => isHarness(harness) && toggleOn(harness, toggles, id, "smart");
   return [
     `Your working directory is the project you're answering about. Find the code behind the pointed elements ${claude ? "with Glob, Grep and Read" : "with your file search and read tools"}: start from what identifies the element (its JSX location or data-source when given, else its \`selector\` line, data-testid, classes and text), then read the markup, styles and script that render it. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, ${claude ? "make the change with Edit or Write" : "make the change with your file editing tools"}, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`,
     has("shell")
@@ -176,14 +193,28 @@ function prompts(): { router: string; routerThreads: string; solver: string; fil
   })());
 }
 
+/**
+ * A role's system prompt as its layers, in order (joined with a blank line, they are the prompt): the role's prompt
+ * file; for the solver, the project note (what its harness's switches give it) and the saved instructions, each scope
+ * its own layer.
+ */
+export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { label: string; text: string }[] {
+  if (role === "router") return [{ label: ROLE_PROMPT_LABEL.router, text: routerSystem() + ROUTER_FORMAT }];
+  if (role === "fillers") return [{ label: ROLE_PROMPT_LABEL.fillers, text: prompts().fillers + FILLERS_FORMAT }];
+  const dir = projectDir();
+  return [
+    { label: ROLE_PROMPT_LABEL.solver, text: prompts().solver },
+    // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
+    dir ? { label: "project note (what this harness's switches give it)", text: projectNote(harness, toggles) } : { label: "no-tools note", text: NO_TOOLS_NOTE },
+    ...solverInstructions().map((x) => ({ label: `saved instructions · ${x.label}`, text: `## ${x.label}\n\n${x.text}` })),
+  ];
+}
+
 /** Each role's system prompt on a harness; the solver works in the project folder when there is one. */
 export function roleSystem(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { system: string; project?: string } {
-  if (role === "router") return { system: routerSystem() + ROUTER_FORMAT };
-  if (role === "fillers") return { system: prompts().fillers + FILLERS_FORMAT };
-  const dir = projectDir();
-  // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
-  if (!dir) return { system: appendInstructions(`${prompts().solver}\n\n${NO_TOOLS_NOTE}`) };
-  return { system: appendInstructions(`${prompts().solver}\n\n${projectNote(harness, toggles)}`), project: dir };
+  const system = rolePromptParts(role, harness, toggles).map((x) => x.text).join("\n\n");
+  const dir = role === "solver" ? projectDir() : undefined;
+  return dir ? { system, project: dir } : { system };
 }
 registerRoleSpecs(roleSystem);
 
@@ -260,8 +291,8 @@ export function historyMessages(history: ChatTurn[], forSolver: boolean): ChatMe
     { role: "user", content: (t.user || "(inaudible)") + (t.annotation ? `\n\n${drawingContext(t.annotation)}` : "") },
     {
       role: "assistant",
-      // The solver answers in the SPOKEN:-first format; replay its own detailed answer when it gave one.
-      content: (forSolver ? (t.detail ? trimDetail(t.detail) : `SPOKEN: ${t.assistant}`) : t.assistant) || "(no reply)",
+      // The solver answers in the SPOKEN:-first format; replay its own detailed answer, whole, when it gave one.
+      content: (forSolver ? (t.detail || `SPOKEN: ${t.assistant}`) : t.assistant) || "(no reply)",
     },
   ]);
 }
@@ -518,29 +549,40 @@ export const generateFillers: GenerateFillers = async ({ transcript, question, i
 
 // ── Solver ───────────────────────────────────────────────────────────────────
 
+/**
+ * The user's own words next to the voice front end's reading of them ("" when there are none, or they are the
+ * request as written). The front end resolves what "this" and "it" refer to; it must not lose a constraint on the way.
+ */
+export function originalWords(original: string | undefined, question: string): string {
+  const own = original?.trim();
+  if (!own || own === question.trim()) return "";
+  return `\n\nThe user's own words (transcribed, with the pointing markers): ${JSON.stringify(own)}\nThe line above is the voice front end's reading of them. Where the two differ, the user's own words decide: keep every condition they state.`;
+}
+
 /** The last user message for the solver. Tasks are framed as change requests here, so the system prompt never changes. */
 export function solverUserMessage(
-  question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string, language?: string, voiceCues = false,
+  question: string, pointing: PointingTarget[], intent: Intent = "question", pageContext?: string, language?: string, voiceCues = false, original?: string,
 ): string {
   const lang = languageLine(language, "the SPOKEN line and the detailed answer");
   const cues = voiceCues ? `\n\n${FISH_SOLVER_CUES}` : "";
   const pointed = `Pointing context (from the user's cursor):\n${formatPointingForPrompt(pointing, { selectors: true })}${pageContext ? `\n${pageContext}` : ""}${lang ? `\n\n${lang}` : ""}${cues}`;
+  const own = originalWords(original, question);
   if (intent === "task") {
-    return `Request type: TASK. This is a change request: the user wants something changed. If you have file tools, make the change in the project and report it in the task format. If you don't, describe the change you would make, using the task format.\n\nTask: ${question}\n\n${pointed}`;
+    return `Request type: TASK. This is a change request: the user wants something changed. If you have file tools, make the change in the project and report it in the task format. If you don't, describe the change you would make, using the task format.\n\nTask: ${question}${own}\n\n${pointed}`;
   }
-  return `Question: ${question}\n\n${pointed}`;
+  return `Question: ${question}${own}\n\n${pointed}`;
 }
 
 export function buildSolverParams(
   question: string, pointing: PointingTarget[], history: ChatTurn[] = [], intent: Intent = "question",
-  pageContext?: string, language?: string, voiceCues = false,
+  pageContext?: string, language?: string, voiceCues = false, original?: string,
 ): ChatParams {
   return {
-    messages: [...historyMessages(history, true), { role: "user", content: solverUserMessage(question, pointing, intent, pageContext, language, voiceCues) }],
+    messages: [...historyMessages(fitHistory(history).kept, true), { role: "user", content: solverUserMessage(question, pointing, intent, pageContext, language, voiceCues, original) }],
   };
 }
 
-export const solveTask: SolveTask = async ({ mark, question, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation }) => {
+export const solveTask: SolveTask = async ({ mark, question, original, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation }) => {
   const t0 = performance.now();
   const choice = choiceFor(llm, "solver");
   let text = "";
@@ -551,7 +593,7 @@ export const solveTask: SolveTask = async ({ mark, question, pointing, history, 
     mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-  const params = attachDrawing(buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues), annotation, history);
+  const params = attachDrawing(buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues, original), annotation, history);
   const git = await gitContext(projectDir());
   if (git) params.messages.at(-1)!.content += `\n\n${git}`;
   onPrompt?.(harnessPromptInfo("solver", choice, params));
@@ -607,19 +649,20 @@ function pointedTail(pointing: PointingTarget[], pageContext?: string, language?
  */
 export function threadUserMessage(
   kind: "request" | "followup" | "correction" | "reconcile" | "direct", question: string, pointing: PointingTarget[], intent: Intent = "question",
-  pageContext?: string, language?: string, voiceCues = false,
+  pageContext?: string, language?: string, voiceCues = false, original?: string,
 ): string {
   const tail = pointedTail(pointing, pageContext, language, voiceCues);
+  const own = originalWords(original, question);
   switch (kind) {
-    case "request": return solverUserMessage(question, pointing, intent, pageContext, language, voiceCues);
+    case "request": return solverUserMessage(question, pointing, intent, pageContext, language, voiceCues, original);
     case "followup":
       return intent === "task"
-        ? `Follow-up on the same element (more feedback from the user; build on what you did so far). Request type: TASK: make the change and report it in the task format.\n\nTask: ${question}${tail}`
-        : `Follow-up on the same element (a further question from the user; what you found so far still applies).\n\nQuestion: ${question}${tail}`;
+        ? `Follow-up on the same element (more feedback from the user; build on what you did so far). Request type: TASK: make the change and report it in the task format.\n\nTask: ${question}${own}${tail}`
+        : `Follow-up on the same element (a further question from the user; what you found so far still applies).\n\nQuestion: ${question}${own}${tail}`;
     case "direct":
       return `Follow-up on the same element, in the user's own words. If it asks for a change, it's Request type: TASK: make the change and report it in the task format. Otherwise answer it.\n\nUser: ${question}${tail}`;
     case "correction":
-      return `Correction: the user changed their mind about this element. This replaces their previous instruction: ${question}\n\nMake the final state match this request: adjust or undo what you already changed for the previous instruction where it no longer applies. Report it in the task format (SPOKEN line first, past tense).${tail}`;
+      return `Correction: the user changed their mind about this element. This replaces their previous instruction: ${question}${own}\n\nMake the final state match this request: adjust or undo what you already changed for the previous instruction where it no longer applies. Report it in the task format (SPOKEN line first, past tense).${tail}`;
     case "reconcile":
       return `System note (not from the user): ${question}\n\nReply in the usual format: the SPOKEN line first (one short sentence: whether your change is intact, or what you fixed), then the details.`;
   }
@@ -629,7 +672,7 @@ export function threadUserMessage(
 const threadChoice = (thread: { choice?: LlmChoice }): LlmChoice | undefined => thread.choice;
 
 export const solveInThread: SolveInThread = async ({
-  thread, kind, mark, question, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation,
+  thread, kind, mark, question, original, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation,
 }) => {
   const t0 = performance.now();
   const choice = threadChoice(thread);
@@ -642,18 +685,27 @@ export const solveInThread: SolveInThread = async ({
     onSpokenLine(line);
   });
   const git = await gitContext(projectDir());
-  const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues) + (annotation ? `\n\n${drawingContext(annotation)}` : "") + (git ? `\n\n${git}` : "");
+  const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues, original) + (annotation ? `\n\n${drawingContext(annotation)}` : "") + (git ? `\n\n${git}` : "");
   const params: ChatParams = { messages: [{ role: "user", content: user }], ...(annotation ? { annotations: [annotation] } : {}) };
-  if (onPrompt) {
+  // The prompt goes to the debug view as it is dispatched: with the history or notes the session added, and how the
+  // request reached the session (live, resumed, forked, replayed). Never dispatched (it failed first): as built here.
+  let shown = false;
+  const showPrompt = (d?: SessionDispatch): void => {
+    if (!onPrompt || shown) return;
+    shown = true;
     const info: LlmPrompt = choice
-      ? harnessPromptInfo("solver", choice, params)
+      ? harnessPromptInfo("solver", choice, params, thread.spec)
       : { target: "solver", model: "the thread's session", system: [], messages: [{ role: "user", text: user }] };
+    const how = d ? SESSION_MODE_LABEL[d.mode] : "not dispatched";
     onPrompt({
       ...info,
-      messages: [{ role: "user", text: user, label: `thread ${kind} (the session holds the history)` }],
-      settings: { ...info.settings, thread: thread.id, live: thread.live },
+      messages: [{ role: "user", text: d?.message ?? user, label: `${kind}, as sent to the session (${how})` }],
+      settings: {
+        ...info.settings, thread: thread.id,
+        session: { mode: d?.mode ?? "not dispatched", ...(d?.sessionId ? { id: d.sessionId } : {}), ...(d?.fallback ? { fallback: d.fallback } : {}) },
+      },
     });
-  }
+  };
   mark("solver.request", {
     ...(choice ? { model: choice.model, backend: choice.provider, fast: choice.speed === "fast", ...(choice.level ? { level: choice.level } : {}) } : {}),
     thread: thread.id, kind, ...(intent === "task" ? { intent } : {}),
@@ -668,14 +720,16 @@ export const solveInThread: SolveInThread = async ({
   const gate = new NarrationGate(onText);
   let res: Awaited<ReturnType<typeof thread.send>>;
   try {
-    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations);
+    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations, showPrompt);
+    showPrompt();
     gate.end();
   } catch (err) {
+    showPrompt();
     onResponse?.(errorResponseInfo("solver", t0, err));
     throw err;
   }
   const info = harnessResponseInfo("solver", t0, res, choice ?? { provider: "claude-code", model: res.model });
-  onResponse?.({ ...info, raw: { ...(info.raw as object), thread: thread.id, reopened: res.reopened, filesTouched: res.filesTouched } });
+  onResponse?.({ ...info, raw: { ...(info.raw as object), thread: thread.id, reopened: res.reopened, ...(res.session ? { session: res.session } : {}), filesTouched: res.filesTouched } });
 
   if (!spokenReady) parser.end();
   const usage = res.usage as { speed?: string; cache_read_input_tokens?: number } | null;
@@ -685,6 +739,15 @@ export const solveInThread: SolveInThread = async ({
   if (res.stopReason === "refusal") throw new ClaudeRefusalError(res.model, null, null);
   if (res.stopReason === "max_tokens") log(`[claude] solver hit its output limit; answer is truncated`);
   return { text, usage: res.usage, filesTouched: res.filesTouched };
+};
+
+/** How a request reached its session, in words (debug view). */
+const SESSION_MODE_LABEL: Record<SessionMode, string> = {
+  live: "live session: it holds the history",
+  new: "new session",
+  resumed: "the harness's saved session, resumed: it holds the history",
+  forked: "a fork of the conversation's session: it holds that history",
+  replayed: "new session: the history is replayed as text above; the harness's earlier tool results are not in it",
 };
 
 function logUsage(who: string, usage: unknown, model?: string): void {

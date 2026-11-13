@@ -30,7 +30,13 @@ describe("solver instruction composition", () => {
       expect(prompt.system).toContain("standing authorization");
       expect(prompt.system).not.toContain("unrelated project rule");
       const info = harnessPromptInfo("solver", { provider, model: "" }, { messages: [{ role: "user", content: "change it" }] });
-      expect(info.system?.map(s => s.text).join("\n")).toBe(prompt.system);
+      // The inspector shows the prompt as its layers: the prompt file, the project note, each saved scope.
+      expect(info.system?.map(s => s.text).join("\n\n")).toBe(prompt.system);
+      expect(info.system?.map(s => s.label)).toEqual([
+        "solver.md", "project note (what this harness's switches give it)",
+        "saved instructions · Saved instruction rules", "saved instructions · All projects", "saved instructions · This project",
+      ]);
+      expect(info.settings?.composition).toMatch(/appended to .*own system prompt/);
     }
     expect(roleSystem("solver", "claude-code", { shell: false }).system).toContain("You have no shell");
     expect(roleSystem("router", "claude-code").system).not.toContain("Always run tests and commit.");

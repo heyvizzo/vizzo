@@ -167,6 +167,13 @@
           <label class="check"><input type="checkbox" id="debug-outlines"> <span><span class="label">Outlines</span> <span class="hint">Outline what each turn pointed at on the page (picked elements, cursor rests).</span></span></label>
           <label class="check"><input type="checkbox" id="hover-outline"> <span><span class="label">Hover outline</span> <span class="hint">Always outline the element under the pointer, as comment mode does, so you can see what “this” will point at (handy with Always listen). Clicks still go to the page.</span></span></label>
         </div>
+        <h3 class="sub-head">Traces</h3>
+        <p class="note">A record of every model call, kept on this Mac so a bad answer can be traced back: the prompt as it went to the harness (Vizzo’s instructions, the message with any history or notes added, which harness session it went to, and the launch settings) and the raw response. The harness’s own system prompt and the tool calls inside its turn aren’t in it: Vizzo only sees what goes in and comes out.</p>
+        <div class="card fields">
+          <label class="check"><input type="checkbox" id="capture-trace"> <span><span class="label">Save full traces</span> <span class="hint">Only calls made while this is on are saved. They stay after you turn it off, until you delete them or they expire: after 7 days, or sooner once they pass 250 MB (oldest first).</span></span></label>
+          <p class="hint" id="trace-status">…</p>
+          <div><button type="button" class="small" id="trace-reveal">Show in Finder</button> <button type="button" class="small" id="trace-delete">Delete all traces</button></div>
+        </div>
       </section>
 
       <section id="section-cookies" data-section="cookies" hidden>

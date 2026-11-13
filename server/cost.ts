@@ -111,7 +111,12 @@ const billedCost = (config: RunConfig, tier: LlmTier, u: unknown, fastFallback =
   return c.billing === "api" ? c.usd : 0;
 };
 
-export function costBreakdown(config: RunConfig, usage: Usage): CostBreakdown {
+/** The turn's config with the smart tier the solver actually ran on (Usage.solverLlm). */
+const solverConfig = (config: RunConfig, usage: Usage): RunConfig =>
+  usage.solverLlm ? { ...config, llm: { ...llmOf(config), smart: usage.solverLlm } } : config;
+
+export function costBreakdown(turnConfig: RunConfig, usage: Usage): CostBreakdown {
+  const config = solverConfig(turnConfig, usage);
   const a = obj(usage.anthropic);
   const b = {
     // Fast tier: the router + the progress-lines call. Smart tier: the solver.
@@ -160,7 +165,8 @@ export function llmCostItem(config: RunConfig, tier: LlmTier, u: unknown, role: 
 const fmtSecs = (s: number) => `${s.toFixed(1)} s`;
 
 /** A turn's cost, itemized (sums to computeCost). Zero items are left out. */
-export function costItems(config: RunConfig, usage: Usage): CostItem[] {
+export function costItems(turnConfig: RunConfig, usage: Usage): CostItem[] {
+  const config = solverConfig(turnConfig, usage);
   const a = obj(usage.anthropic);
   // Model calls are listed even at $0 (a free model, or one without a known price).
   const calls: CostItem[] = [];

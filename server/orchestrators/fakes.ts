@@ -83,7 +83,8 @@ function tone(n: number): Buffer[] {
 export interface FakeLog {
   opened: string[]; closed: string[];
   /** Element threads: every request sent to a thread session, and thread aborts/closes. */
-  threadSends: { threadId: string; kind: string; question: string; replay: string }[];
+  /** `replay`: the history a session without one was told; `notes`: what a session with its own was told had happened since; `fork`: it started as a fork of this session. */
+  threadSends: { threadId: string; kind: string; question: string; replay: string; notes?: string; fork?: string }[];
   threadAborts: string[];
   threadClosed: string[];
 }
@@ -249,16 +250,41 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
 
   const threadRunMs = sc.threadRunMs ?? t.solverFirstMs * 3;
   let threadSeq = 0;
-  const openThread: OpenHarnessThread = ({ choice, replay }) => {
+  // A session of the conversation (the central one, or a long job's fork): opened with `notes`. It answers like the
+  // fake solveTask (same text and timing); an element thread's answers "Done: …" after threadRunMs.
+  const conversational = new WeakSet<HarnessThread>();
+  const openThread: OpenHarnessThread = ({ choice, replay, notes, forkOf }) => {
     const id = `thread#${++threadSeq}`;
     let pending: { reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
     let live = false;
     const h: HarnessThread = {
       id, choice,
       send(user, onText) {
-        const reopened = !live && replay() !== "";
-        log.threadSends.push({ threadId: id, kind: "", question: user, replay: live ? "" : replay() });
+        // First request: a fork starts with its source's history; anything else is told the history as text.
+        const forked = !live && forkOf?.live ? forkOf.id : undefined;
+        const told = live || forked ? "" : replay();
+        const since = live || forked ? notes?.() ?? "" : "";
+        const reopened = told !== "";
+        log.threadSends.push({ threadId: id, kind: "", question: user, replay: told, ...(since ? { notes: since } : {}), ...(forked ? { fork: forked } : {}) });
         live = true;
+        if (conversational.has(h)) {
+          return new Promise((resolve, reject) => {
+            const text = `SPOKEN: ${SPOKEN_LINE}\n\nThe features section uses \`display: grid\` (demo.css:40) so the cards share column widths.`;
+            const head = `SPOKEN: ${SPOKEN_LINE}\n`;
+            const step = (n: number): void => {
+              if (n === 0 && sc.failIn === "solver") { pending = null; reject(new Error("fake solver: 500")); return; }
+              if (n === 0) onText?.(head);
+              if (n === 1) onText?.(text.slice(head.length));
+              if (n === 2) {
+                pending = null;
+                resolve({ text, model: "fake-solver", stopReason: "end_turn", usage: { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000, cache_creation_input_tokens: 0, speed: "standard" }, raw: null, warm: true, filesTouched: [], reopened } as Awaited<ReturnType<HarnessThread["send"]>>);
+                return;
+              }
+              pending = { reject, timer: setTimeout(() => step(n + 1), t.solverFirstMs) };
+            };
+            pending = { reject, timer: setTimeout(() => step(0), t.solverFirstMs) };
+          });
+        }
         return new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             pending = null;
@@ -281,10 +307,29 @@ export function createFakeDeps(t: FakeTiming = FAST_TIMING, sc: FakeScenario = D
       close() { log.threadClosed.push(id); h.abort(); live = false; },
       get live() { return live; },
     };
+    if (notes) conversational.add(h);
     return h;
   };
 
-  const solveInThread: SolveInThread = async ({ thread, kind, question, onSpokenLine, onDelta, onPrompt, onResponse }) => {
+  const solveInThread: SolveInThread = async ({ thread, kind, mark, question, onSpokenLine, onDelta, onPrompt, onResponse }) => {
+    if (conversational.has(thread)) {
+      // The conversation's solver: the same marks, deltas and spoken line as the fake solveTask.
+      onPrompt?.(fakePrompt("solver", `Question: ${question}`));
+      mark("solver.request", { fast: false });
+      let chunks = 0;
+      const n = log.threadSends.length;
+      const p = thread.send(question, (d) => {
+        if (chunks++ === 0) { mark("solver.firstToken"); onDelta(d); return; }
+        mark("solver.spokenReady", { viaPrefix: true });
+        onSpokenLine(SPOKEN_LINE);
+        onDelta(d);
+      }, 60_000);
+      if (log.threadSends[n]) log.threadSends[n]!.kind = kind;
+      const r = await p;
+      mark("solver.done", { stopReason: "end_turn" });
+      onResponse?.(fakeResponse("solver", "end_turn", { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 5000 }));
+      return { text: r.text, usage: r.usage, filesTouched: r.filesTouched };
+    }
     onPrompt?.(fakePrompt("solver", `(${kind}) ${question}`));
     const n = log.threadSends.length;
     const p = thread.send(question, undefined, 60_000);

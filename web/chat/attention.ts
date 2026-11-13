@@ -19,6 +19,9 @@ export interface AttentionDeps {
   openSettings(section: string): void;
   /** The current picks (they change from Settings). */
   current(): { llm: Record<LlmTier, LlmChoice>; sttModel: SttModel; ttsModel: TtsModel; sttLanguages: Partial<Record<SttModel, string[]>>; language?: string };
+  /** Server-side notices to show once (GET /api/llm/notice): × or the link dismisses them for good (`dismissNotices`). */
+  notices?(): Problem[];
+  dismissNotices?(): void;
 }
 
 /** A loading-only state shows only if it lasts this long (an engine loading at every launch shouldn't flash the card). */
@@ -47,6 +50,7 @@ export function mountAttention(box: HTMLElement, deps: AttentionDeps): { refresh
       out.push(...speechProblems("tts", speechStatusOf("tts", cur.ttsModel, ctx, keyLabel)));
     }
     if (app) out.push(...permissionProblems(app.permissions), ...keyProblems(app.unreadable, keyLabel));
+    out.push(...(deps.notices?.() ?? []));
     return sortProblems(out);
   }
 
@@ -77,7 +81,7 @@ export function mountAttention(box: HTMLElement, deps: AttentionDeps): { refresh
     close.textContent = "×";
     close.title = "Hide until something else needs attention";
     close.setAttribute("aria-label", "Hide");
-    close.onclick = () => { dismissed = key; box.hidden = true; };
+    close.onclick = () => { dismissed = key; box.hidden = true; deps.dismissNotices?.(); };
     head.append(light, title, settings, close);
     const ul = document.createElement("ul");
     ul.className = "attn-list";
@@ -95,7 +99,7 @@ export function mountAttention(box: HTMLElement, deps: AttentionDeps): { refresh
       const section = p.focusKey ? "keys" : p.section;
       link.textContent = `${SECTION_LABELS[section]} →`;
       link.title = `Open Settings → ${SECTION_LABELS[section]}`;
-      link.onclick = () => deps.openSettings(section);
+      link.onclick = () => { deps.openSettings(section); if (deps.notices?.().includes(p)) deps.dismissNotices?.(); };
       li.append(dot, text, link);
       return li;
     }));

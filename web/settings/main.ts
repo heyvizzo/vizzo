@@ -202,7 +202,7 @@ function modelsOf(provider: LlmProvider): Promise<LlmModelInfo[]> {
 
 /** Keep the level and speed to what the model offers (a level it lacks → the tier's default one), the toggles to the harness's. */
 function fitChoice(tier: LlmTier, c: LlmChoice): LlmChoice {
-  const toggles = isHarness(c.provider) ? cleanToggles(c.provider, c.toggles) : undefined;
+  const toggles = isHarness(c.provider) ? cleanToggles(c.provider, c.toggles, tier) : undefined;
   const { toggles: _t, ...rest } = c;
   const kept = toggles ? { ...rest, toggles } : rest;
   const info = modelInfo(c);
@@ -273,7 +273,7 @@ function renderToggles(tier: LlmTier): void {
     label.title = t.hint;
     const input = document.createElement("input");
     input.type = "checkbox";
-    input.checked = toggleOn(harness, choice.toggles, t.id);
+    input.checked = toggleOn(harness, choice.toggles, t.id, tier);
     input.onchange = () => {
       const cur = settings.llm[tier];
       setTier(tier, { ...cur, toggles: { ...cur.toggles, [t.id]: input.checked } });
@@ -374,11 +374,32 @@ function loadServerState(triesLeft = 30): void {
 loadServerState();
 
 // ── display ────────────────────────────────────────
-for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"]] as const) {
+for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"], ["capture-trace", "captureTrace"]] as const) {
   const box = $<HTMLInputElement>(id);
   box.checked = settings[key];
   box.onchange = () => { settings[key] = box.checked; saveSettings(); dashboardChanged(); };
 }
+
+// ── traces (server/traceStore.ts) ──────────────────
+const traceStatusEl = $("trace-status");
+const mib = (n: number): string => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
+type TraceStatus = { dir: string; files: { name: string; bytes: number }[]; bytes: number };
+function showTraceStatus(): void {
+  fetch("/api/traces").then((r) => r.json() as Promise<TraceStatus>).then((s) => {
+    traceStatusEl.textContent = s.files.length
+      ? `${s.files.length} day${s.files.length === 1 ? "" : "s"} saved (${mib(s.bytes)}), ${s.files[0]!.name.slice(0, 10)} to ${s.files.at(-1)!.name.slice(0, 10)}, in ${s.dir}`
+      : `Nothing saved yet. Traces go to ${s.dir}`;
+    traceStatusEl.dataset.dir = s.dir;
+  }).catch(() => { traceStatusEl.textContent = "The voice server isn't answering."; });
+}
+$<HTMLButtonElement>("trace-delete").onclick = () => {
+  void fetch("/api/traces", { method: "DELETE" }).then(showTraceStatus, showTraceStatus);
+};
+$<HTMLButtonElement>("trace-reveal").onclick = () => {
+  void fetch("/api/traces/reveal", { method: "POST" }).catch(() => {});
+};
+showTraceStatus();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) showTraceStatus(); });
 
 // ── keyboard ───────────────────────────────────────
 // A shortcut's button records the next keys: a key with its modifiers, or a modifier pressed and let go on its own.
@@ -713,10 +734,10 @@ function go(p: { section: Section; focusKey?: string }): void {
   else showSection(p.section);
 }
 
-function tierText(c: LlmChoice): { text: string; loads?: string } {
+function tierText(tier: LlmTier, c: LlmChoice): { text: string; loads?: string } {
   const parts = [LLM_PROVIDER_LABELS[c.provider], c.model || "default model", c.level, c.speed === "fast" ? "fast" : undefined];
   const harness = c.provider;
-  const loads = isHarness(harness) ? HARNESS_TOGGLES[harness].filter((t) => toggleOn(harness, c.toggles, t.id)).map((t) => t.label) : undefined;
+  const loads = isHarness(harness) ? HARNESS_TOGGLES[harness].filter((t) => toggleOn(harness, c.toggles, t.id, tier)).map((t) => t.label) : undefined;
   return { text: parts.filter(Boolean).join(" · "), ...(loads ? { loads: loads.length ? `Loads ${loads.join(", ")}` : "File tools only" } : {}) };
 }
 
@@ -779,8 +800,8 @@ function renderDashboard(): void {
   $("nav-health").className = `nav-dot ${overall}`;
 
   // The summary: what's set up, a line per part.
-  const fast = tierText(settings.llm.fast);
-  const smart = tierText(settings.llm.smart);
+  const fast = tierText("fast", settings.llm.fast);
+  const smart = tierText("smart", settings.llm.smart);
   const stt = speechLine("stt");
   const tts = speechLine("tts");
   const tierTone = (tier: LlmTier): Tone => serverDown || tierProblems(tier).length ? "bad" : "ok";

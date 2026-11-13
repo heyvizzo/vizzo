@@ -33,6 +33,7 @@
     "smoke:chat": "tsx scripts/smoke-chat.ts",
     "smoke:drawing": "npm run build:electron && electron scripts/smoke-drawing.cjs",
     "smoke:settings": "npm run build:electron && electron scripts/smoke-settings.cjs",
+    "smoke:sessions": "tsx scripts/smoke-sessions.ts",
     "bench:harness": "tsx scripts/bench-harness.ts",
     "bench:tts": "tsx scripts/bench-tts.ts",
     "setup:local-tts": "bash scripts/setup-local-tts.sh",

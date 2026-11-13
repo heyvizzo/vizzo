@@ -35,6 +35,7 @@ import { anchorKey, isQueuedId, queuedAnchor, queuedThreads as groupQueued, reco
 import { costBreakdown, fmtUsd, renderTurnCost, savingsOf, savingsText, type TurnCost } from "./costView.ts";
 import { PlaybackClock, decisionBadges, detailOf, fmtBytes, fmtElapsed, fmtEstimate, groupThreads, jobHeadline, markerLabel, pageLabel, replyNeedsReply, runningLabel, spokenOf, threadsOnPage, type DecisionLike } from "./logic.ts";
 import { mountAttention, type AttentionBridge } from "./attention.ts";
+import type { Problem } from "../settings/attention.ts";
 import { PANEL_KEYS, SIDEBAR_KEYS, fishVoice, languageConfig, loadSettings, normalizeSettings, saveSettingsKeys, type ChatSettingsBridge } from "./settings.ts";
 
 const PRE_ROLL_MS = 500;
@@ -181,11 +182,27 @@ setHotkeys(settings.hotkeys);
 showHotkeys();
 let llmSelectionChanged = false;
 // What needs attention in the setup (the Settings Dashboard's list), at the top of the sidebar.
+// Shown once: what the move to the new defaults turned on for the solver (server/llmSelection.ts).
+let selectionNotice: Problem[] = [];
 const attention = mountAttention(document.getElementById("attention")!, {
   bridge: shell?.attention,
   openSettings: (section) => void shell?.openSettings?.(section),
   current: () => settings,
+  notices: () => selectionNotice,
+  dismissNotices: () => {
+    if (!selectionNotice.length) return;
+    selectionNotice = [];
+    void fetch("/api/llm/notice", { method: "POST" }).catch(() => {});
+  },
 });
+fetch("/api/llm/notice").then((r) => r.json()).then((n: { harness: string; turnedOn: string[] } | null) => {
+  if (!n?.turnedOn.length) return;
+  selectionNotice = [{
+    tone: "warn", section: "models",
+    text: `The solver now runs with your whole ${n.harness} setup: ${n.turnedOn.join(", ")} turned on. It runs unattended, without asking. Switch any of them off under Models.`,
+  }];
+  attention.refresh();
+}).catch(() => {});
 fetch("/api/llm/selection").then((r) => r.json()).then((sel: RunConfig["llm"]) => {
   // A settings change made during startup takes precedence over this initial response.
   if (!llmSelectionChanged) settings.llm = llmOf({ llm: sel });
@@ -230,6 +247,7 @@ function config(): RunConfig {
     taskTimeoutMinutes: settings.taskTimeoutMinutes,
     ...languageConfig(settings),
     llm: settings.llm,
+    ...(settings.captureTrace ? { captureTrace: true } : {}),
   };
 }
 

@@ -116,9 +116,35 @@ describe("pipeline in chat mode", () => {
     expect(getConversation(s.connection).some((t) => t.turnId === jobs[1]!.jobId)).toBe(true);
   });
 
+  it("long task: it runs on a session of its own, forked from the conversation's, which stays free and hears the result", async () => {
+    const d = deps({ intent: "question", estimateS: 5 });
+    const orch = createPipelineOrchestrator(d);
+    const s = setup({ approach: "pipeline", fillers: false });
+    const r1 = await run(orch, s.ctx); // a short question first: the conversation's session exists
+    getConversation(s.connection).push({ turnId: "t1", approach: "pipeline", user: r1.transcript, assistant: r1.voiceText, detail: r1.solverText });
+    const central = d.log.threadSends[0]!.threadId;
+    // The same deps, now routing a long task.
+    const long = createFakeDeps({ ...FAST_TIMING, solverFirstMs: 3 }, { ...DEFAULT_SCENARIO, intent: "task", estimateS: 120 });
+    d.routeTurn = long.routeTurn;
+    await run(orch, { ...s.ctx, turnId: "t2" });
+    await until(() => s.channelEvents.some((e) => e.type === "job" && e.job.state === "done"));
+    const job = d.log.threadSends[1]!;
+    expect(job.threadId).not.toBe(central);
+    expect(job.fork).toBe(central);
+    expect(job.replay).toBe(""); // a fork has the history
+    expect(d.log.threadClosed).toEqual([job.threadId]); // the job's session is closed, the conversation's stays
+    // The conversation's session hears the job's result as a note with its next request.
+    d.routeTurn = deps({ intent: "question", estimateS: 5 }).routeTurn;
+    await run(orch, { ...s.ctx, turnId: "t3" });
+    const next = d.log.threadSends[2]!;
+    expect(next.threadId).toBe(central);
+    expect(next.notes).toContain("(Background task finished:");
+  });
+
   it("long task stopped by the user: its solver is aborted, it's marked stopped, nothing is announced", async () => {
     const s = setup({ approach: "pipeline" });
-    await run(createPipelineOrchestrator(deps({ intent: "task", estimateS: 120 }, 200)), s.ctx);
+    const d = deps({ intent: "task", estimateS: 120 }, 200);
+    await run(createPipelineOrchestrator(d), s.ctx);
     const jobs = () => s.channelEvents.filter((e) => e.type === "job").map((e) => (e as Extract<ServerMsg, { type: "job" }>).job);
     const jobId = jobs()[0]!.jobId;
     expect(stopJob(s.connection, s.ctx.channel!, jobId)).toBe(true);
@@ -126,6 +152,9 @@ describe("pipeline in chat mode", () => {
     await new Promise((r) => setTimeout(r, 600)); // past when the solver would have finished
     expect(jobs().map((j) => j.state)).toEqual(["running", "stopped"]);
     expect(s.channelEvents.some((e) => e.type === "notice")).toBe(false);
+    // Its session was stopped and closed.
+    expect(d.log.threadAborts.length).toBeGreaterThan(0);
+    expect(d.log.threadClosed).toHaveLength(1);
     expect(getConversation(s.connection).at(-1)!.user).toMatch(/^\(Background task stopped by the user/);
   });
 

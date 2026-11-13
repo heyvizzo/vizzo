@@ -2,7 +2,22 @@
 
 Date: 2026-11-12
 
-Status: implementation decisions approved by the user; this document is the handoff to the implementing agent. No product implementation was performed while writing it.
+Status: workstreams 1–4 and 6 implemented, and the capture/persistence half of workstream 5 (2026-11-12, branch `agent-sessions`). The trace UI (timeline, diff, per-trace export and deletion) is deferred by the user's decision. See "Decisions after review" and "Implementation status" below; where they differ from the text that follows, they win.
+
+## Decisions after review (2026-11-12)
+
+- Every delegated turn of the central conversation runs on one harness session of its own, kept until New conversation (its saved session stays on disk; Vizzo no longer continues it). A long task runs on a session forked from it, so the conversation stays free; its result reaches the central session as a note.
+- Sessions are reused as much as possible; replaying the history as text is only the fallback. Up to 15 live processes (the central session included).
+- A session keeps what it was opened with (harness, model, level, switches, prompt, saved instructions). Changes in Settings, saved instructions included, apply to sessions opened after them; running sessions are not relaunched and not told.
+- Stop and correction interrupt the turn, never the session. Sessions are only ended when their thread is deleted (or New conversation), and the harness's saved session stays so the user can take it over later with the harness's own resume command (UI for that later).
+- Headless harness modes are kept (no terminal/tmux driving): resume and takeover give the full harness when wanted.
+- Local projects are trusted: no untrusted-page-content rule or sandbox change. A one-time notice says what the migration turned on.
+
+## Implementation status
+
+Done: native instruction composition and native tool sets for the solver (workstream 1); tier-aware switch defaults and the one-time selection migration with its notice (2); the user's own words next to the router's reading, whole earlier answers, a replay budget for the fallback (3); harness sessions with live / resumed / forked / replayed modes, interrupt, fallback and takeover, verified live on Claude Code, Codex, Grok, opencode and OhMyPi (4; matrix in API-NOTES.md "Harness sessions"); the prompt captured as dispatched, with the session mode and id, saved to a local trace log with retention and delete-all while "Save full traces" is on (5, capture half); the two solver.md changes (6). Details in ARCHITECTURE.md "Harness sessions" and "Trace log".
+
+Not done: Pi's live check (no provider login on this machine); the trace UI; capture of tool calls inside a harness turn and of speech/transcription stages in the trace log; the bounded Vizzo-vs-native comparison.
 
 ## Objective
 

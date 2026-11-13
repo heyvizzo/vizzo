@@ -5,17 +5,17 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // `configureWarm(selection)` is called at server start (the saved selection) and whenever the Chat page
 // changes a tier: pools for anything else are killed, the selected ones started. A request for a choice
 // without a pool (a turn sent with another config) starts one on the spot, so only its first request is cold.
-// Element threads take their agents here too (`takeThreadAgent`): kept across requests, never back in a pool.
+// Sessions (harnessThread.ts) take their agents here too (`takeSessionAgent`): kept across requests, never back in a
+// pool. The solver's pool holds agents whose conversation is saved (AgentSpec.persist), so one can become a session.
 // A fast tier on a model API (llmApi.ts) has nothing to warm: its roles get no pool.
 import { cleanToggles, isHarness, LLM_PROVIDER_LABELS, type HarnessId, type HarnessToggles, type LlmChoice, type LlmTier } from "../../shared/config.ts";
 import type { CliRole } from "./claudeCli.ts";
-import { AGENT_FACTORIES, KEEPS_POOLED, stopSharedServers, type AgentFactory, type AgentSpec, type HarnessResult, type WarmAgent } from "./harnesses.ts";
+import { AGENT_FACTORIES, KEEPS_POOLED, ROLE_TIER, stopSharedServers, type AgentFactory, type AgentSpec, type HarnessResult, type SessionStart, type WarmAgent } from "./harnesses.ts";
 
 /** Agents kept waiting per pool. Codex threads and opencode sessions are cheap; Grok can't be pre-started. */
 export const POOL_SIZE: Record<HarnessId, number> = { "claude-code": 1, codex: 2, grok: 0, opencode: 2, pi: 1, omp: 1 };
 
-/** The tier each role runs on. */
-export const ROLE_TIER: Record<CliRole, LlmTier> = { router: "fast", fillers: "fast", solver: "smart" };
+export { ROLE_TIER };
 
 let log: (msg: string) => void = (msg) => console.info(msg);
 export function setWarmLogger(fn: (msg: string) => void): void { log = fn; }
@@ -26,26 +26,31 @@ let specSource: SpecSource | null = null;
 export function registerRoleSpecs(fn: SpecSource): void { specSource = fn; }
 
 /** Tests: replace how agents are made (default: the real harnesses). */
-let factory: AgentFactory = (s, keep) => AGENT_FACTORIES[s.harness](s, keep);
+let factory: AgentFactory = (s, start) => AGENT_FACTORIES[s.harness](s, start);
 export function setAgentFactory(fn: AgentFactory | null): void {
-  factory = fn ?? ((s, keep) => AGENT_FACTORIES[s.harness](s, keep));
+  factory = fn ?? ((s, start) => AGENT_FACTORIES[s.harness](s, start));
 }
 
-export function agentSpec(role: CliRole, choice: LlmChoice): AgentSpec {
+/**
+ * What an agent for `role` with `choice` starts with, as things stand now (the prompt, the saved instructions, the
+ * project folder). `persist`: its conversation is saved by the harness (a session's agent).
+ */
+export function agentSpec(role: CliRole, choice: LlmChoice, persist = false): AgentSpec {
   if (!specSource) throw new Error("role prompts not registered");
   const harness = choice.provider;
   if (!isHarness(harness)) throw new Error(`${LLM_PROVIDER_LABELS[harness]} is a model API, not a harness: it can't run the ${role}`);
-  const toggles = cleanToggles(harness, choice.toggles);
+  const toggles = cleanToggles(harness, choice.toggles, ROLE_TIER[role]);
   const { system, project } = specSource(role, harness, toggles);
   return {
     role, harness, model: choice.model,
     ...(choice.level ? { level: choice.level } : {}), ...(choice.speed === "fast" ? { speed: "fast" as const } : {}),
     ...(toggles ? { toggles } : {}),
     system, ...(role === "solver" && project ? { project } : {}),
+    ...(persist ? { persist: true } : {}),
   };
 }
 
-const keyOf = (s: AgentSpec): string => JSON.stringify([s.role, s.harness, s.model, s.level ?? "", s.speed ?? "", s.toggles ?? {}, s.project ?? "", s.system]);
+const keyOf = (s: AgentSpec): string => JSON.stringify([s.role, s.harness, s.model, s.level ?? "", s.speed ?? "", s.toggles ?? {}, s.project ?? "", s.system, !!s.persist]);
 
 class Pool {
   private idle: WarmAgent[] = [];
@@ -90,7 +95,7 @@ const label = (s: AgentSpec): string =>
 const pools = new Map<string, Pool>();
 /** Requests in flight per harness: a shared server isn't stopped under them. */
 const inflight = new Map<HarnessId, number>();
-/** Element-thread agents (alive or not yet released): their shared server stays up; killed by stopWarm. */
+/** Sessions' agents (alive or not yet released): their shared server stays up; killed by stopWarm. */
 const kept = new Map<WarmAgent, HarnessId>();
 let exitHooked = false;
 
@@ -118,7 +123,8 @@ export function configureWarm(selection: Record<LlmTier, LlmChoice>): void {
   for (const role of ["router", "fillers", "solver"] as const) {
     const choice = selection[ROLE_TIER[role]];
     if (!isHarness(choice.provider)) continue;
-    const spec = agentSpec(role, choice);
+    // The solver's agents become sessions (the conversation, a thread, a long job): their conversations are saved.
+    const spec = agentSpec(role, choice, role === "solver");
     wanted.set(keyOf(spec), spec);
   }
   for (const [key, pool] of pools) {
@@ -172,27 +178,28 @@ export async function harnessRequest(
 }
 
 /**
- * Element threads: an agent for `role` with `choice` that keeps its session across requests. Taken from the warm
- * pool when its harness can keep a pooled agent (a warm first request; a replacement starts), else started now.
- * It never goes back to a pool. Hand it to `releaseThreadAgent` when done; stopWarm kills it.
+ * A session's agent for `spec` (a `persist` one, fixed when the session was opened), kept across requests. A new
+ * session takes a waiting agent from the warm pool when its harness can keep a pooled one (a warm first request; a
+ * replacement starts); a resumed or forked one, or a spec nothing is warmed for, is started now. It never goes back
+ * to a pool. Hand it to `releaseSessionAgent` when done; stopWarm kills it. Throws SessionUnavailableError when the
+ * session to resume or fork is known to be gone.
  */
-export function takeThreadAgent(role: CliRole, choice: LlmChoice): WarmAgent {
+export function takeSessionAgent(spec: AgentSpec, start: SessionStart): WarmAgent {
   hookExit();
-  const spec = agentSpec(role, choice);
-  const pool = pools.get(keyOf(spec));
+  const pool = start.kind === "new" ? pools.get(keyOf(spec)) : undefined;
   let agent: WarmAgent | null = null;
   if (pool && KEEPS_POOLED.has(spec.harness)) {
     const a = pool.take();
     if (a.keep?.()) agent = a;
     else a.kill();
   }
-  agent ??= factory(spec, true);
+  agent ??= factory(spec, start);
   kept.set(agent, spec.harness);
   return agent;
 }
 
-/** Kill an element-thread agent and stop the shared server it used if nothing else does. */
-export function releaseThreadAgent(agent: WarmAgent): void {
+/** Stop a session's agent (its saved session stays) and the shared server it used if nothing else does. */
+export function releaseSessionAgent(agent: WarmAgent): void {
   agent.kill();
   if (kept.delete(agent)) releaseShared();
 }

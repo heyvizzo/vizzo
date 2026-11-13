@@ -1,7 +1,7 @@
 // The chat's settings, kept in the app's settings file (electron/main.ts `chat`). Two windows edit them: the Settings
 // window (web/settings/main.ts) owns PANEL_KEYS, the chat sidebar (web/chat/main.ts) SIDEBAR_KEYS. Each saves only
 // its own keys; main merges them into the file and passes the result to the sidebar.
-import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, STT_LANGUAGE_SUPPORT, llmOf, sttLanguagesFor, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type RunConfig, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
+import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE, LLM_PROVIDER_LABELS, SELECTION_VERSION, STT_LANGUAGE_SUPPORT, llmOf, migrateChoice, sttLanguagesFor, type LlmChoice, type LlmProvider, type LlmTier, type RouterMode, type RunConfig, type SttModel, type TtsModel, type TtsStyle } from "../../shared/config.ts";
 import { parsePointingWords } from "../../shared/languages.ts";
 import type { OrbPos } from "../cursor/pageBridge.ts";
 import { DEFAULT_HOTKEYS, normalizeHotkeys, type Hotkeys } from "../../shared/hotkeys.ts";
@@ -31,6 +31,10 @@ export interface Settings {
   llm: Record<LlmTier, LlmChoice>;
   /** The choice last used with each harness, per tier (restored when switching back to that harness). */
   llmModels: Record<LlmTier, Partial<Record<LlmProvider, LlmChoice>>>;
+  /** shared/config.ts SELECTION_VERSION the choices were saved under (older: moved over once, see normalizeSettings). */
+  selectionVersion?: number;
+  /** Debugging: save every model call to the local trace log (server/traceStore.ts). */
+  captureTrace: boolean;
   /** Chosen voice per TTS model (Piper / Kokoro / OpenAI). */
   ttsVoices: Partial<Record<TtsModel, string>>;
   /** Open a turn from the mic level instead of holding the talk key. */
@@ -62,7 +66,7 @@ export interface Settings {
 /** What the Settings window changes. */
 export const PANEL_KEYS = [
   "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "sttLanguages", "pointingWords", "llm", "llmModels", "ttsVoices", "ttsStyle",
-  "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug", "hotkeys",
+  "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug", "captureTrace", "hotkeys", "selectionVersion",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
 export const SIDEBAR_KEYS = ["alwaysListen", "listenThreshold", "listenHangMs", "instant", "orbPos"] as const satisfies readonly (keyof Settings)[];
@@ -82,7 +86,7 @@ export function normalizeSettings(saved: unknown): Settings {
     routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, sttModel: DEFAULT_CONFIG.sttModel, longTaskSeconds: 20,
     taskTimeoutMinutes: DEFAULT_CONFIG.taskTimeoutMinutes,
     sttLanguages: {}, pointingWords: {}, llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
-    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showDebug: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
+    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showDebug: false, captureTrace: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
   };
   if (saved && typeof saved === "object") Object.assign(settings, saved);
   settings.ttsStyle = { ...DEFAULT_TTS_STYLE, ...settings.ttsStyle };
@@ -108,6 +112,12 @@ export function normalizeSettings(saved: unknown): Settings {
   const keepChoices = (m: Partial<Record<string, unknown>> | undefined) =>
     Object.fromEntries(Object.entries(m ?? {}).filter(([k, v]) => k in LLM_PROVIDER_LABELS && typeof v === "object" && v)) as Partial<Record<LlmProvider, LlmChoice>>;
   settings.llmModels = { fast: keepChoices(settings.llmModels?.fast), smart: keepChoices(settings.llmModels?.smart) };
+  // Saved before the solver's switches started on: the remembered smart-tier choices lose their old switches once,
+  // as the server's saved selection does (server/llmSelection.ts).
+  if ((settings.selectionVersion ?? 1) < SELECTION_VERSION) {
+    settings.llmModels.smart = Object.fromEntries(Object.entries(settings.llmModels.smart).map(([k, c]) => [k, migrateChoice("smart", c!)]));
+    settings.selectionVersion = SELECTION_VERSION;
+  }
   settings.alwaysListen = settings.alwaysListen === true;
   settings.instant = settings.instant !== false;
   settings.debugOutlines = settings.debugOutlines === true;
@@ -115,6 +125,7 @@ export function normalizeSettings(saved: unknown): Settings {
   settings.showRam = settings.showRam === true;
   settings.showCost = settings.showCost === true;
   settings.showDebug = settings.showDebug === true;
+  settings.captureTrace = settings.captureTrace === true;
   const o = settings.orbPos;
   settings.orbPos = o && Number.isFinite(o.x) && Number.isFinite(o.y) ? { x: Math.min(1, Math.max(0, o.x)), y: Math.min(1, Math.max(0, o.y)) } : null;
   settings.listenThreshold = clampThreshold(settings.listenThreshold);
