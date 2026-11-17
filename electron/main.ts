@@ -5,12 +5,13 @@
 // agents wait in an empty temp folder until then), and it gets the browser pane's URL with every page change (it goes
 // into each turn's context).
 import {
-  app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, nativeTheme, safeStorage, screen, shell, systemPreferences, utilityProcess,
+  app, BrowserWindow, Menu, Notification, Tray, WebContentsView, clipboard, dialog, ipcMain, nativeImage, nativeTheme, safeStorage, screen, shell,
+  systemPreferences, utilityProcess,
   type IpcMainEvent, type IpcMainInvokeEvent, type UtilityProcess, type WebContents,
 } from "electron";
 import type { ViteDevServer } from "vite";
 import { dirname, join } from "node:path";
-import { readFileSync, statSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -25,6 +26,7 @@ import { LEGACY_NAMES, legacySecrets, moveLegacyDir } from "./rename.ts";
 import { loginShellPath, mergePath } from "./shellPath.ts";
 import { chromeKeychainAccess, fullDiskAccess, fullDiskRow, keychainRow, microphoneRow, type PermissionRow } from "./permissions.ts";
 import { THEME } from "../shared/theme.ts";
+import { continueSession, prepareSessionResume } from "../shared/sessionResume.ts";
 import { endsHold, fromElectronInput, hotkeys, matchesDown, onHotkeys, setHotkeys } from "../shared/hotkeys.ts";
 
 const TOOLBAR_HEIGHT = 44;
@@ -271,6 +273,7 @@ function startServer(port: number): Promise<void> {
           RESULTS_DIR: process.env.RESULTS_DIR ?? join(app.getPath("userData"), "results"),
           LLM_SELECTION_FILE: process.env.LLM_SELECTION_FILE ?? join(app.getPath("userData"), "llm-selection.json"),
           SPEECH_SELECTION_FILE: process.env.SPEECH_SELECTION_FILE ?? join(app.getPath("userData"), "speech-selection.json"),
+          VIZZO_THREADS_FILE: process.env.VIZZO_THREADS_FILE ?? join(app.getPath("userData"), "threads.json"),
         } : {}),
         PORT: String(port),
         PROJECT_DIR: projectFolder ?? "",
@@ -281,6 +284,7 @@ function startServer(port: number): Promise<void> {
     server.once("message", (msg: { type: string }) => {
       if (msg.type === "ready") resolve();
     });
+    server.on("message", onServerMessage);
     server.once("exit", (code) => reject(new Error(`voice server exited (${code}) before it was ready`)));
   });
 }
@@ -348,6 +352,8 @@ function toUrl(input: string): string {
 
 /** Pushes the browser's URL, title and history state to the address bar. */
 function sendState(wc: WebContents) {
+  // The page's preload too: a side button or a swipe navigates only where history has an entry (historyNav.ts).
+  wc.send("page:history-state", historyState(wc));
   toolbar?.webContents.send("nav-state", {
     url: wc.getURL(),
     title: wc.getTitle(),
@@ -355,6 +361,34 @@ function sendState(wc: WebContents) {
     canGoForward: wc.navigationHistory.canGoForward(),
     loading: wc.isLoading(),
   });
+}
+
+const historyState = (wc: WebContents) => ({ back: wc.navigationHistory.canGoBack(), forward: wc.navigationHistory.canGoForward() });
+
+/**
+ * A safety net under the page's own momentum handling (historyNav.ts): one trackpad swipe navigation per this long.
+ * Short enough for swiping back several pages in a row.
+ */
+const SWIPE_NAV_COOLDOWN_MS = 300;
+let lastSwipeNav = 0;
+
+/**
+ * Back or forward in the browser pane. `via`: "button" (mouse buttons 4/5 on the page), "swipe" (two-finger trackpad
+ * swipe, from wheel events on the page) or "gesture" (a macOS swipe event: three-finger swipes, and mice whose
+ * software sends back/forward as one, like Logi Options+'s Back/Forward).
+ */
+// DEBUG-HISTORY (temporary)
+const historyDebug = (line: string) => { try { require("node:fs").appendFileSync('/private/tmp/claude-501/-Users-j-Sites-vizzo/aa977892-3ab7-43ed-a726-2940189693f5/scratchpad/history-debug.log', `${new Date().toISOString()} ${line}\n`); } catch {} };
+function goHistory(dir: unknown, via: unknown) {
+  historyDebug(`goHistory ${String(dir)} via ${String(via)}`);
+  const wc = currentPage();
+  if (!wc || (dir !== "back" && dir !== "forward")) return;
+  if (via === "swipe") {
+    if (Date.now() - lastSwipeNav < SWIPE_NAV_COOLDOWN_MS) return;
+    lastSwipeNav = Date.now();
+  }
+  if (dir === "back") wc.navigationHistory.goBack();
+  else wc.navigationHistory.goForward();
 }
 
 /** Tells the server which page the browser is on (sent with each turn). */
@@ -524,6 +558,24 @@ function createWindow() {
     win = null; toolbar = null; folderBar = null; browser = null; sidebar = null; divider = null; tooltip = null; tooltipPending = null; drag = null;
   });
   win.on("resize", layout);
+  // macOS: closing the window keeps the app running (its threads, jobs and turns go on); the Dock icon brings it back.
+  // Elsewhere closing it quits, asking first while something works (the window stays until then: its chat holds the
+  // background jobs).
+  win.on("close", (e) => {
+    if (quitState === "now") return;
+    e.preventDefault();
+    if (process.platform === "darwin") win?.hide();
+    else void requestQuit();
+  });
+  // macOS swipe events come to the window: three-finger swipes (System Settings → Trackpad → Swipe between pages:
+  // three fingers), and mouse buttons that Logi Options+ maps to Back/Forward (it sends them as swipes). Two-finger
+  // swipes come to the page as wheel events instead (historyNav.ts). Checked with an MX Master 3 on Logi Options+:
+  // its Back button arrives as "right", Forward as "left".
+  win.on("swipe", (_e, direction) => {
+    historyDebug(`window swipe ${direction}`);
+    if (direction === "right") goHistory("back", "gesture");
+    else if (direction === "left") goHistory("forward", "gesture");
+  });
 
   const appPrefs = { preload: join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true };
 
@@ -739,9 +791,9 @@ function registerIpc() {
     if (!sidebar || e.sender !== sidebar.webContents) return null;
     const { values, unreadable } = storedEnv();
     return {
-      // The required ones only (the Chrome keychain is optional, and checking it runs Swift): cheap, so it's
-      // asked again each time the window comes back into focus (after System Settings).
-      permissions: [microphoneRow(systemPreferences.getMediaAccessStatus("microphone")), fullDiskRow(fullDiskAccess())],
+      // Only the microphone is required. Cookie import permissions belong in Settings, and checking the
+      // Chrome keychain runs Swift. This stays cheap when the window comes back into focus.
+      permissions: [microphoneRow(systemPreferences.getMediaAccessStatus("microphone"))],
       set: Object.keys(values).filter((k) => values[k]?.trim()),
       labels: Object.fromEntries(ENV_FIELDS.map((f) => [f.key, f.label])),
       unreadable,
@@ -855,6 +907,18 @@ function registerIpc() {
   ipcMain.handle("page:state", (e) => (fromPage(e) ? { tFrom: turnFrom } : null));
   // Element threads. A document that's ready for commands (load, reload, HMR full reload) gets its threads again.
   const fromSidebar = (e: IpcMainEvent | IpcMainInvokeEvent) => !!sidebar && e.sender === sidebar.webContents;
+  ipcMain.handle("clipboard:write", (e, text: unknown) => {
+    if (!(fromSidebar(e) || fromPage(e)) || typeof text !== "string") throw new Error("Clipboard unavailable");
+    return clipboard.writeText(text);
+  });
+  ipcMain.handle("session:release", async (e, sessionId: unknown) => {
+    if (!(fromSidebar(e) || fromPage(e)) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
+    await prepareSessionResume(sessionId, `http://127.0.0.1:${serverPort}`);
+  });
+  ipcMain.handle("session:continue", async (e, sessionId: unknown, context: unknown) => {
+    if (!(fromSidebar(e) || fromPage(e)) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
+    await continueSession(sessionId, `http://127.0.0.1:${serverPort}`, typeof context === "string" ? context : undefined);
+  });
   ipcMain.on("page:ready", (e) => { if (fromPage(e)) sendPageUrl(); });
   // The chat's settings (read synchronously: the sidebar needs them before it builds its UI). The sidebar and the
   // Settings window each save only the keys they change (web/chat/settings.ts); they're merged here, and the
@@ -942,6 +1006,10 @@ function registerIpc() {
   ipcMain.on("page:comment", (e, action: unknown) => {
     if (fromPage(e)) sidebar?.webContents.send("page:comment", action);
   });
+  ipcMain.handle("page:history-state", (e) =>
+    (fromPage(e) && browser ? { ...historyState(browser.webContents), swipedAgo: Date.now() - lastSwipeNav } : null));
+  ipcMain.on("page:history", (e, dir: unknown, via: unknown) => { if (fromPage(e)) goHistory(dir, via); });
+  ipcMain.on("history:debug", (_e, line: unknown) => historyDebug(`page ${String(line)}`)); // DEBUG-HISTORY
   ipcMain.on("page:navigate", (e, url: unknown) => {
     if (fromSidebar(e) && typeof url === "string" && /^(https?|file):/i.test(url)) currentPage()?.loadURL(url);
   });
@@ -978,7 +1046,7 @@ async function uninstall() {
   spawn("/bin/sh", ["-c", 'while kill -0 "$0" 2>/dev/null; do sleep 0.2; done; rm -rf -- "$@"; security delete-generic-password -s "$KC_SERVICE" -a "$KC_ACCOUNT" >/dev/null 2>&1', String(process.pid), ...paths], {
     detached: true, stdio: "ignore", env: { ...process.env, KC_SERVICE: service, KC_ACCOUNT: account },
   }).unref();
-  app.quit();
+  void quitNow();
 }
 
 function buildMenu() {
@@ -999,7 +1067,8 @@ function buildMenu() {
         { role: "quit" },
       ],
     },
-    // File → Close Window (Cmd-W) closes the focused window: Settings, or the main window (which quits the app).
+    // File → Close Window (Cmd-W) closes the focused window: Settings, or the main window (hidden on macOS: the app and
+    // its work keep running; elsewhere it quits, asking first while something works).
     { role: "fileMenu" },
     { role: "editMenu" },
     {
@@ -1028,7 +1097,7 @@ function fail(err: unknown) {
 // The chat turns on the mic and audio at load, without a click first (the sidebar's mic permission is granted below).
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
-app.whenReady().then(() => {
+app.whenReady().then(() => instanceReady).then(() => {
   // Opened from Finder, the PATH lacks the user's tools (the harness CLIs, node, uv, Homebrew): take the login shell's.
   if (app.isPackaged) process.env.PATH = mergePath(loginShellPath(), process.env.PATH ?? "");
   setHotkeys(jsonObject(readSettings().chat).hotkeys);
@@ -1043,9 +1112,196 @@ app.whenReady().then(() => {
   void webAppBase().catch(fail);
 }).catch(fail);
 
-app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => {
+app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+app.on("activate", () => {
+  if (quitState === "background") return leaveBackground();
+  showMainWindow();
+});
+// Quit (Cmd-Q, the menu, the Dock): asks first while something works (quitting, below).
+app.on("before-quit", (e) => {
+  if (quitState === "now") return;
+  e.preventDefault();
+  void requestQuit();
+});
+app.on("will-quit", () => {
   server?.kill();
   void vite?.close();
   webServer?.close();
 });
+
+// ── quitting: ask while work is running; finish it in the background; one app at a time ──
+// The server reports what's working (server/activity.ts): element-thread runs, background jobs and conversation
+// turns. Quitting while any is asks: finish in the background (the windows and the Dock icon go away, a menu-bar
+// item shows what's left, a notification as each one ends, and the app quits after the last), stop and quit, or
+// cancel. Either way the thread list is saved (server/threads/persist.ts): a thread that was stopped mid-run comes
+// back interrupted, with Resume. In dev, `npm run app` again asks the running one to quit (the same question) and
+// starts once it has: the new code takes over without two apps sharing the same files.
+
+/** none: running normally. background: finishing work after Quit, then quitting. now: quitting for real. */
+let quitState: "none" | "background" | "now" = "none";
+/** Titles of what the server is working on (its `activity` messages). */
+let runningTasks: string[] = [];
+let tray: Tray | null = null;
+/** A quit question is showing (repeated requests don't stack another). */
+let quitPrompt = false;
+/** A new dev instance is waiting for this one to quit (`npm run app` again). */
+let relaunchWaiting = false;
+/** The waiting dev instance gives up when this file appears (the user kept the running one). */
+const relaunchCancelFile = () => join(app.getPath("userData"), "relaunch-cancelled");
+
+function onServerMessage(msg: { type: string; running?: string[]; finished?: { title: string; outcome: "done" | "failed" | "stopped" } }): void {
+  if (msg.type !== "activity" || !Array.isArray(msg.running)) return;
+  runningTasks = msg.running;
+  const f = msg.finished;
+  const hidden = quitState === "background" || !win || win.isDestroyed() || !win.isVisible();
+  if (f && f.outcome !== "stopped" && hidden && Notification.isSupported()) {
+    new Notification({ title: f.outcome === "done" ? `${f.title}: done` : `${f.title}: failed`, body: quitState === "background" ? remainingText() : "" }).show();
+  }
+  if (quitState !== "background") return;
+  if (!runningTasks.length) {
+    if (Notification.isSupported()) new Notification({ title: `${APP_NAME} finished its work and quit` }).show();
+    void quitNow();
+  } else updateTray();
+}
+
+const tasksText = (n: number) => `${n} task${n === 1 ? "" : "s"}`;
+const remainingText = () => runningTasks.length ? `${tasksText(runningTasks.length)} still working.` : "";
+const taskList = () => runningTasks.slice(0, 6).map((t) => `• ${t}`).join("\n") + (runningTasks.length > 6 ? `\n• and ${runningTasks.length - 6} more` : "");
+
+function showMainWindow(): void {
+  if (!win || win.isDestroyed()) createWindow();
+  else win.show();
+}
+
+/** Quit, or ask first while something is working. `relaunch`: a new dev instance asked (it starts once this quits). */
+async function requestQuit(relaunch = false): Promise<void> {
+  if (quitState === "now" || quitPrompt) return;
+  if (quitState === "background") { if (!runningTasks.length) void quitNow(); return; }
+  if (!runningTasks.length) return void quitNow();
+  quitPrompt = true;
+  const parent = win && !win.isDestroyed() && win.isVisible() ? win : undefined;
+  const opts = {
+    type: "question" as const,
+    buttons: relaunch ? ["Finish, Then Restart", "Stop and Restart", "Keep Running"] : ["Finish in Background", "Stop and Quit", "Cancel"],
+    defaultId: 0,
+    cancelId: 2,
+    message: `${tasksText(runningTasks.length)} still working`,
+    detail: `${taskList()}\n\n` + (relaunch
+      ? "A new Vizzo is starting. It can wait for these to finish, or stop them now."
+      : "Finish in Background closes the window and quits once they're done. Stop and Quit stops them now.") +
+      " Either way your threads are kept: a stopped one comes back with Resume.",
+  };
+  if (relaunch) app.focus({ steal: true });
+  try {
+    const { response } = parent ? await dialog.showMessageBox(parent, opts) : await dialog.showMessageBox(opts);
+    if (response === 0) enterBackground();
+    else if (response === 1) await quitNow();
+    else if (relaunch) {
+      relaunchWaiting = false;
+      try { writeFileSync(relaunchCancelFile(), String(Date.now())); } catch (err) { console.error(err); }
+    }
+  } finally {
+    quitPrompt = false;
+  }
+}
+
+/** Save the threads (the server writes what's pending), then quit for real. */
+async function quitNow(): Promise<void> {
+  if (quitState === "now") return;
+  quitState = "now";
+  tray?.destroy();
+  tray = null;
+  const s = server;
+  if (s) {
+    await new Promise<void>((resolve) => {
+      const done = (msg: { type: string }) => { if (msg.type === "flushed") finish(); };
+      const timer = setTimeout(() => finish(), 1500);
+      const finish = () => { clearTimeout(timer); s.off("message", done); resolve(); };
+      s.on("message", done);
+      try { s.postMessage({ type: "flush" }); } catch { finish(); }
+    });
+  }
+  app.quit();
+}
+
+/** Finish in the background: no windows, no Dock icon, sound off; a menu-bar item until the last task is done. */
+function enterBackground(): void {
+  quitState = "background";
+  for (const w of BrowserWindow.getAllWindows()) w.hide();
+  sidebar?.webContents.setAudioMuted(true);
+  browser?.webContents.setAudioMuted(true);
+  app.dock?.hide();
+  tray = new Tray(nativeImage.createEmpty());
+  updateTray();
+  console.log(`[app] finishing ${tasksText(runningTasks.length)} in the background, then quitting`);
+}
+
+/** Back from the background (the menu-bar item, the Dock, or opening the app again): Quit is cancelled. */
+function leaveBackground(): void {
+  if (quitState !== "background") return;
+  quitState = "none";
+  tray?.destroy();
+  tray = null;
+  sidebar?.webContents.setAudioMuted(false);
+  browser?.webContents.setAudioMuted(false);
+  void app.dock?.show();
+  showMainWindow();
+}
+
+function updateTray(): void {
+  if (!tray) return;
+  tray.setTitle(`${APP_NAME} · ${tasksText(runningTasks.length)}`);
+  tray.setToolTip(`${APP_NAME} is finishing ${tasksText(runningTasks.length)}, then quits`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `Finishing ${tasksText(runningTasks.length)}, then quitting`, enabled: false },
+    ...runningTasks.slice(0, 8).map((t) => ({ label: t, enabled: false })),
+    { type: "separator" },
+    { label: `Show ${APP_NAME}`, click: leaveBackground },
+    { label: relaunchWaiting ? "Stop Them and Restart Now" : "Stop Them and Quit Now", click: () => void quitNow() },
+  ]));
+}
+
+app.on("second-instance", (_e, _argv, _cwd, data) => {
+  const relaunch = !app.isPackaged && (data as { relaunch?: unknown } | null)?.relaunch === true;
+  if (!relaunch) {
+    // Opened again: the running app comes forward (out of the background, if it was finishing there).
+    if (quitState === "background") leaveBackground();
+    else showMainWindow();
+    return;
+  }
+  // `npm run app` again: the waiting instance pings until this one is gone.
+  if (relaunchWaiting && (quitState === "background" || quitPrompt)) return;
+  relaunchWaiting = true;
+  if (quitState === "background") { updateTray(); return; }
+  console.log("[app] a new instance is starting: quitting this one");
+  void requestQuit(true);
+});
+
+/**
+ * One app at a time (they'd share the thread list and the settings). In dev, a second `npm run app` waits for the
+ * running one to quit (it's asked, above) and then starts; packaged, opening it again brings the running one forward.
+ */
+function singleInstance(): Promise<void> {
+  if (app.requestSingleInstanceLock({ relaunch: true })) return Promise.resolve();
+  if (app.isPackaged) { app.exit(0); return new Promise(() => {}); }
+  console.log("[app] another Vizzo (dev) is running: asking it to quit, then starting…");
+  const started = Date.now();
+  rmSync(relaunchCancelFile(), { force: true });
+  return new Promise((resolve) => {
+    let said = false;
+    const timer = setInterval(() => {
+      if (existsSync(relaunchCancelFile())) {
+        clearInterval(timer);
+        rmSync(relaunchCancelFile(), { force: true });
+        console.log("[app] the running Vizzo was kept: not starting another");
+        app.exit(0);
+        return;
+      }
+      if (app.requestSingleInstanceLock({ relaunch: true })) { clearInterval(timer); resolve(); return; }
+      if (!said && Date.now() - started > 5000) { said = true; console.log("[app] waiting for the running Vizzo to finish its tasks (its menu-bar item shows what's left)…"); }
+    }, 1000);
+  });
+}
+const instanceReady = singleInstance();
+// Ctrl-C in the `npm run app` terminal (or a kill): save the threads and quit now, no question.
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void quitNow());

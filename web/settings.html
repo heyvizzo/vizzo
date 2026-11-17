@@ -154,6 +154,7 @@
           <h2>Permissions</h2>
           <button type="button" id="refresh" title="Re-check the app's macOS permissions">Check again</button>
         </div>
+        <p class="note">Microphone access is required for voice chat. The other permissions are optional and only needed to import browser cookies.</p>
         <div id="permissions" class="card"></div>
       </section>
 
@@ -163,7 +164,9 @@
         <div class="card fields">
           <label class="check"><input type="checkbox" id="show-cost"> <span><span class="label">Cost</span> <span class="hint">What each turn, task and thread cost, and what subscriptions and on-device speech saved.</span></span></label>
           <label class="check"><input type="checkbox" id="show-ram"> <span><span class="label">RAM</span> <span class="hint">How much memory the app server and each thread use, the on-device speech models included.</span></span></label>
-          <label class="check"><input type="checkbox" id="show-debug"> <span><span class="label">Debugging details</span> <span class="hint">Under each turn: how it was routed (“direct answer” and similar), what was pointed at, clicked and highlighted, first audio and answer times, the solver’s detailed answer, and the prompts &amp; responses of each model call.</span></span></label>
+          <label class="check"><input type="checkbox" id="show-full-answers"> <span><span class="label">Full answers</span> <span class="hint">Show “Full answer” under replies to expand the complete written answer.</span></span></label>
+          <label class="check"><input type="checkbox" id="show-debug"> <span><span class="label">Debugging details</span> <span class="hint">Under each turn: how it was routed (“direct answer” and similar), what was pointed at, clicked and highlighted, first audio and answer times, and the prompts &amp; responses of each model call.</span></span></label>
+          <label class="check"><input type="checkbox" id="show-solver-session"> <span><span class="label">Solver session</span> <span class="hint">The smart solver’s harness and session ID in the conversation, thread and task panels. Click it to copy the command that resumes the session in a terminal.</span></span></label>
           <label class="check"><input type="checkbox" id="debug-outlines"> <span><span class="label">Outlines</span> <span class="hint">Outline what each turn pointed at on the page (picked elements, cursor rests).</span></span></label>
           <label class="check"><input type="checkbox" id="hover-outline"> <span><span class="label">Hover outline</span> <span class="hint">Always outline the element under the pointer, as comment mode does, so you can see what “this” will point at (handy with Always listen). Clicks still go to the page.</span></span></label>
         </div>
@@ -181,8 +184,14 @@
         <p class="note">Copy another browser's cookies into the browser pane so sites open signed in, or clear the pane's own. The page reloads.</p>
         <div class="card fields">
           <div class="buttons" id="cookies">
-            <button type="button" data-browser="chrome" title="Import cookies from Chrome into the browser pane">Import from Chrome</button>
-            <button type="button" data-browser="safari" title="Import cookies from Safari into the browser pane">Import from Safari</button>
+            <div class="cookie-action">
+              <button type="button" data-browser="chrome" title="Import cookies from Chrome into the browser pane" aria-describedby="cookies-chrome-permission" disabled>Import from Chrome</button>
+              <p class="hint" id="cookies-chrome-permission"><span>Checking Chrome keychain access…</span> <a href="#permissions">Permissions →</a></p>
+            </div>
+            <div class="cookie-action">
+              <button type="button" data-browser="safari" title="Import cookies from Safari into the browser pane" aria-describedby="cookies-safari-permission" disabled>Import from Safari</button>
+              <p class="hint" id="cookies-safari-permission"><span>Checking Full Disk Access…</span> <a href="#permissions">Permissions →</a></p>
+            </div>
             <button type="button" data-browser="firefox" title="Import cookies from Firefox into the browser pane">Import from Firefox</button>
             <button type="button" class="danger" title="Delete every cookie in the browser pane (your other browsers keep theirs)">Clear cookies</button>
           </div>

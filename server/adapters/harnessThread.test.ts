@@ -1,7 +1,7 @@
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 import { annotation } from "./drawing.fixture.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,9 @@ import { claudeEditedFiles, codexEditedFiles, opencodeEditedFiles, patchFiles, p
 import type { SessionDispatch } from "./types.ts";
 import { liveHarnessSessions, openHarnessThread, withReplay } from "./harnessThread.ts";
 import { configureWarm, registerRoleSpecs, setAgentFactory, setWarmLogger, stopWarm } from "./warmPool.ts";
+import { centralSession, continueConversationSession, finishJobSession, openJobSession, solveCentral } from "../centralSession.ts";
+import { resetConversation } from "../conversation.ts";
+import { harnessSessionInfo } from "./sessionInfo.ts";
 
 const SMART: LlmChoice = { provider: "claude-code", model: "claude-opus-5-5", level: "high" };
 const until = async (f: () => boolean, ms = 5000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) throw new Error("timeout"); await new Promise((r) => setTimeout(r, 10)); } };
@@ -76,13 +79,108 @@ beforeEach(() => {
   registerRoleSpecs((role) => ({ system: `${role.toUpperCase()} system`, project: "/proj" }));
   setAgentFactory((s, start) => new Fake(s, start, withAbort));
 });
-afterEach(() => { stopWarm(); setAgentFactory(null); vi.unstubAllEnvs(); });
+afterEach(() => { resetConversation(); stopWarm(); setAgentFactory(null); vi.unstubAllEnvs(); });
 
 const sessionsLeft: { close(): void }[] = [];
 afterEach(() => { for (const t of sessionsLeft.splice(0)) t.close(); });
 const open = (replay = () => "") => { const t = openHarnessThread({ role: "solver", choice: SMART, replay }); sessionsLeft.push(t); return t; };
 
 describe("harness threads", () => {
+  it("resumes a completed main-conversation job on its saved native session after releasing its process", async () => {
+    const handle = openJobSession(openHarnessThread, SMART, []);
+    expect(harnessSessionInfo(handle)).toBeNull();
+    const first = handle.send("original task", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    made[0]!.answer("original result");
+    await first;
+    await finishJobSession(handle);
+    expect(handle.live).toBe(false);
+    expect(handle.session?.()).toEqual({ id: "s1" });
+    continueConversationSession("s1", "original task");
+    const next = solveCentral({
+      openThread: openHarnessThread,
+      solveInThread: async (o) => o.thread.send(o.question, o.onDelta, 1000),
+    }, { provider: "codex", model: "changed-setting" }, "followup", {
+      mark: () => {}, question: "follow-up", pointing: [], onDelta: () => {}, onSpokenLine: () => {},
+    });
+    await until(() => !!made[1]?.pending.length);
+    expect(centralSession()).toBe(handle);
+    expect(made[1]!.start).toEqual({ kind: "resume", ref: { id: "s1" } });
+    expect(made[1]!.spec.harness).toBe("claude-code");
+    expect(made[1]!.messages[0]).toContain("Continuing an earlier task: original task");
+    made[1]!.answer("follow-up result");
+    await next;
+  });
+
+  it("publishes the native id as soon as output arrives, without repeating unchanged metadata", async () => {
+    const refs: (SessionRef | undefined)[] = [];
+    const t = openHarnessThread({ role: "solver", choice: SMART, replay: () => "", onSession: () => refs.push(t.session?.()) });
+    sessionsLeft.push(t);
+    const p = t.send("first", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    expect(refs).toEqual([undefined, { id: "s1" }]);
+    made[0]!.answer("done");
+    await p;
+    const next = t.send("next", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    made[0]!.answer("done");
+    await next;
+    expect(refs).toEqual([undefined, { id: "s1" }]);
+  });
+
+  it("releases an idle connection for terminal resume and continues the same saved session later", async () => {
+    const t = open();
+    const p = t.send("first", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    made[0]!.answer("done");
+    await p;
+    await t.release?.();
+    expect(t.live).toBe(false);
+    expect(t.session?.()).toEqual({ id: "s1" });
+    const next = t.send("later", undefined, 1000);
+    await until(() => !!made[1]?.pending.length);
+    expect(made[1]!.start).toEqual({ kind: "resume", ref: { id: "s1" } });
+    made[1]!.answer("continued");
+    expect(await next).toMatchObject({ session: { mode: "resumed", id: "s1" } });
+  });
+
+  it("waits for running work before releasing a connection copied for the terminal", async () => {
+    const t = open();
+    const p = t.send("working", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    const released = t.release?.();
+    expect(t.live).toBe(true);
+    expect(made[0]!.aborts).toBe(0);
+    made[0]!.answer("finished normally");
+    expect((await p).text).toBe("finished normally");
+    await released;
+    expect(t.live).toBe(false);
+    expect(t.session?.()).toEqual({ id: "s1" });
+  });
+
+  it("waits for native release to finish before acknowledging handoff or resuming another Vizzo request", async () => {
+    const t = open();
+    const first = t.send("first", undefined, 1000);
+    await until(() => !!made[0]?.pending.length);
+    made[0]!.answer("done");
+    await first;
+    let unlock!: () => void;
+    const nativeRelease = vi.fn(() => new Promise<void>((resolve) => { unlock = resolve; }));
+    (made[0] as WarmAgent).release = nativeRelease;
+    let ready = false;
+    const released = t.release!().then(() => { ready = true; });
+    const next = t.send("after handoff", undefined, 1000);
+    await until(() => nativeRelease.mock.calls.length > 0);
+    expect(ready).toBe(false);
+    expect(made).toHaveLength(1);
+    unlock();
+    await released;
+    await until(() => !!made[1]?.pending.length);
+    expect(made[1]!.start).toEqual({ kind: "resume", ref: { id: "s1" } });
+    made[1]!.answer("resumed");
+    await next;
+  });
+
   it("keeps what it was opened with: changed instructions (or model) apply to sessions opened after it", async () => {
     const t = open(() => "Earlier conversation");
     const first = t.send("first", undefined, 1000);
@@ -216,6 +314,32 @@ describe("harness threads", () => {
     expect(made[1]!.messages[0]).toBe("again");
     made[1]!.answer("ok");
     expect(await q).toMatchObject({ reopened: false, session: { mode: "resumed", id: "s1" } });
+  });
+
+  it("a session restored from disk resumes its saved session with the spec it was opened with", async () => {
+    const spec: AgentSpec = { role: "solver", harness: "claude-code", model: "old-model", system: "OLD system", project: "/old-proj", persist: true };
+    const t = openHarnessThread({ role: "solver", choice: SMART, replay: () => "HISTORY", restore: { spec, ref: { id: "saved-1" } } });
+    sessionsLeft.push(t);
+    expect(t.session?.()).toEqual({ id: "saved-1" });
+    const q = t.send("continue", undefined, 1000);
+    await until(() => made[0]?.pending.length === 1);
+    expect(made[0]!.spec).toEqual(spec);
+    expect(made[0]!.start).toEqual({ kind: "resume", ref: { id: "saved-1" } });
+    expect(made[0]!.messages[0]).toBe("continue");
+    made[0]!.answer("ok");
+    expect(await q).toMatchObject({ reopened: false, session: { mode: "resumed", id: "saved-1" } });
+  });
+
+  it("a restored session without a saved id starts new and is told the history", async () => {
+    const spec: AgentSpec = { role: "solver", harness: "claude-code", model: "m", system: "S", project: "/p", persist: true };
+    const t = openHarnessThread({ role: "solver", choice: SMART, replay: () => "HISTORY", restore: { spec } });
+    sessionsLeft.push(t);
+    const q = t.send("continue", undefined, 1000);
+    await until(() => made[0]?.pending.length === 1);
+    expect(made[0]!.start).toEqual({ kind: "new" });
+    expect(made[0]!.messages[0]).toBe(withReplay("HISTORY", "continue"));
+    made[0]!.answer("ok");
+    expect(await q).toMatchObject({ reopened: true });
   });
 
   it("a crashed session is resumed by id; errors reach the caller", async () => {
@@ -422,6 +546,32 @@ describe("harness threads", () => {
     stopWarm();
     expect(made[0]!.dead).toBe(true);
     expect(t.live).toBe(false);
+  });
+});
+
+describe("codex thread (fake app-server)", () => {
+  it("sets immediate unloading and waits for thread/closed while other sessions remain usable", async () => {
+    const project = mkdtempSync(join(tmpdir(), "vizzo-codex-release-"));
+    const log = join(project, "protocol.jsonl");
+    vi.stubEnv("CODEX_BIN", fileURLToPath(new URL("./__fixtures__/fake-codex-session.mjs", import.meta.url)));
+    vi.stubEnv("FIXTURE_CODEX_LOG", log);
+    setAgentFactory(null);
+    registerRoleSpecs(() => ({ system: "SOLVER", project }));
+    const t = openHarnessThread({ role: "solver", choice: { provider: "codex", model: "fake" }, replay: () => "" });
+    const other = openHarnessThread({ role: "solver", choice: { provider: "codex", model: "fake" }, replay: () => "" });
+    sessionsLeft.push(t, other);
+    try {
+      await t.send("hello", undefined, 5000);
+      await other.send("keep this session", undefined, 5000);
+      await t.release!();
+      const events = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      expect(events.find((e) => e.method === "thread/start").params.config.thread_unload_delay_secs).toBe(0);
+      expect(events.some((e) => e.method === "thread/closed" && e.threadId === "fake-codex-1")).toBe(true);
+      expect(t.live).toBe(false);
+      expect(other.live).toBe(true);
+      expect((await other.send("still here", undefined, 5000)).session?.id).toBe("fake-codex-2");
+      await other.release!();
+    } finally { stopWarm(); rmSync(project, { recursive: true, force: true }); }
   });
 });
 

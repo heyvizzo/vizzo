@@ -26,20 +26,21 @@ import type { Segment } from "../../shared/protocol.ts";
 import { hasSpokenWords, isNoSpeechNote } from "../../shared/speech.ts";
 import { typedWords } from "../../shared/comment.ts";
 import { tracer } from "./trace.ts";
-import type { RouteDecision, TtsStream } from "../adapters/types.ts";
+import type { HarnessThread, RouteDecision, TtsStream } from "../adapters/types.ts";
 import { realDeps } from "./deps.ts";
 import { useVoiceCues } from "../adapters/voiceCues.ts";
 import { sttUsage } from "../cost.ts";
 import { LazyScribe } from "./shared.ts";
 import { getConversation } from "../conversation.ts";
-import { centralSession, solveCentral } from "../centralSession.ts";
-import { errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
+import { backgroundCentralSession, centralSession, solveCentral } from "../centralSession.ts";
+import { harnessSessionInfo } from "../adapters/sessionInfo.ts";
+import { DEFAULT_TURN_TIMEOUT_MS, errMessage, relabelTtsMark, TurnBase, type SegmentWriter } from "./turnBase.ts";
 import { FillerScheduler } from "./fillers.ts";
 import { isLocalTts, taskTimeoutMs, type LlmChoice } from "../../shared/config.ts";
 import { startJob } from "./jobs.ts";
-import { browserUrl } from "../browserPage.ts";
+import { browserUrl, onPage } from "../browserPage.ts";
 import { threadStore } from "../threads/store.ts";
-import { correctRun, submitRun, type RunSpec } from "../threads/runner.ts";
+import { cancelRun, correctRun, submitRun, type RunSpec } from "../threads/runner.ts";
 import { startedLine } from "../threads/policy.ts";
 import { planThread, prepareThreads, threadsEnabled, type ThreadPlan } from "../threads/turn.ts";
 import type { Orchestrator, OrchestratorDeps } from "./types.ts";
@@ -48,6 +49,9 @@ class Tagged extends Error {
   constructor(readonly source: string, cause: unknown) { super(errMessage(cause)); }
 }
 const tag = <T>(source: string, p: Promise<T>): Promise<T> => p.catch((e) => { throw e instanceof Tagged ? e : new Tagged(source, e); });
+
+/** Give a nearly finished answer time to arrive before moving it into the background. */
+const HANDOFF_GRACE_MS = 5000;
 
 /** config.silent: a TTS "socket" that says nothing (the text still goes out as voice.text). */
 const silentTts = async (): Promise<TtsStream> => ({
@@ -155,8 +159,10 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
     let routerUsage: unknown = undefined;
     let solverUsage: unknown = undefined;
     let fillerUsage: unknown = undefined;
+    let handedOff = false;
     /** The conversation's session runs on the model it was opened with, which may not be the turn's smart tier. */
     let solverLlm: LlmChoice | undefined;
+    let solverSession: HarnessThread | null = null;
 
     const base = new TurnBase(ctx, {
       timeoutMs: deps.turnTimeoutMs,
@@ -198,6 +204,16 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       firstTts = openTts("ack");
     }
 
+    // The page this turn was asked on: progress lines, the answer and the handoff line are about what's in front
+    // of it, so they're read out only while the user is still there (written in the chat either way).
+    const askedOn = ctx.pageUrl?.() ?? browserUrl();
+    const stillOnPage = (): boolean => onPage(askedOn);
+    const leftPage = (what: string): void => {
+      const meta = base.markMeta["turn.end"] ?? {};
+      const silenced = Array.isArray(meta.leftPage) ? meta.leftPage as string[] : [];
+      if (!silenced.includes(what)) base.markMeta["turn.end"] = { ...meta, leftPage: [...silenced, what] };
+    };
+
     async function run(): Promise<void> {
       if (!cfg.silent && !voiceId && cfg.ttsModel.startsWith("eleven_")) throw new Tagged("tts", new Error("ELEVENLABS_VOICE_ID not set"));
       const fin = typed !== undefined ? { text: typed.trim(), words: typedWords(typed), language: undefined } : await tag("scribe", scribe.final());
@@ -227,7 +243,10 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         }
         return spoken;
       };
-      const trace = tracer((m) => { if (!base.isFinished) ctx.send(m); }, ctx.turnId, undefined, cfg.captureTrace);
+      const trace = tracer((m) => {
+        if (handedOff) ctx.channel?.send(m);
+        else if (!base.isFinished) ctx.send(m);
+      }, ctx.turnId, undefined, cfg.captureTrace);
       const smart = ctx.pinnedThread && threadsEnabled(cfg, deps, ctx) ? threadStore().info(ctx.pinnedThread) : undefined;
       if (smart?.alwaysSmart && typed !== undefined) {
         if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // nothing is said in this turn
@@ -387,6 +406,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         // is only created when the line arrives, so filler segments queue before it.
         let answerTts: SegmentTts | null = warm ? openTts("answer") : null;
         let spokenLine = false;
+        let solverSpoken = "";
         let cutIn: string | undefined;
         const fillers = cfg.fillers && !cfg.silent && deps.generateFillers
           ? new FillerScheduler(
@@ -401,11 +421,21 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
               t.flush();
               return { done: t.done(), cut: () => t.cut() };
             },
+            undefined,
+            () => stillOnPage() || (leftPage("fillers"), false),
           )
           : null;
         const onSpokenLine = (line: string): void => {
-          if (base.isFinished || spokenLine) return;
+          solverSpoken = line;
+          if (base.isFinished || handedOff || spokenLine) return;
           spokenLine = true;
+          if (!stillOnPage()) {
+            // The user went to another page while it worked: the answer is written in the chat, not read out.
+            fillers?.cut();
+            leftPage("answer");
+            base.voice(sep() + line, true);
+            return;
+          }
           // The answer doesn't wait for a progress line to end: it's broken off, and if that was heard, the answer
           // starts by saying why ("Oh, wait, here it is."). A line that had ended, or was about to, isn't.
           const cut = fillers?.cut() ?? false;
@@ -417,39 +447,111 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
           answerTts.pushText(said);
           answerTts.flush();
         };
-        const onDelta = (d: string): void => base.solver(d);
+        const onDelta = (d: string): void => { if (!handedOff) base.solver(d); };
+        // Speech and routing keep their short watchdog. Solver work has its own configured task limit, even
+        // when the router underestimated it or the long-task threshold is longer than a minute.
+        base.resetTimeout(taskTimeoutMs(cfg) + DEFAULT_TURN_TIMEOUT_MS);
+        const startedAt = performance.now();
+        let asking = true;
+        let stop = (): void => {};
+        let centralHandle: HarnessThread | null = null;
+        let solving: Promise<{ text: string; usage: unknown } | null>;
+        base.onCleanup((reason) => { if (reason !== "done" && !handedOff && asking) stop(); });
         if (plan && threadSpec) {
           // A short new question on an element: answered in this turn, in the thread's own harness session.
-          const r = await tag("solver", submitRun(plan.threadId, {
-            ...threadSpec, inline: { mark: base.mark, trace, onSpokenLine, onDelta, active: () => !base.isFinished },
+          stop = () => { cancelRun(plan.threadId); };
+          solving = tag("solver", submitRun(plan.threadId, {
+            ...threadSpec, inline: { mark: base.mark, trace, onSpokenLine, onDelta, active: () => !base.isFinished && !handedOff },
           }, deps));
-          if (r) solverUsage = r.usage;
         } else if (cfg.memory && deps.openThread && deps.solveInThread) {
           // The conversation's own harness session: it holds the earlier turns itself (what it read and changed too).
-          // A turn that is cancelled or fails stops its request there, so the session is free for the next one.
-          let asking = true;
-          base.onCleanup((reason) => { if (reason !== "done" && asking) centralSession()?.abort(); });
-          const solved = await tag("solver", solveCentral({ openThread: deps.openThread, solveInThread: deps.solveInThread }, cfg.llm.smart, ctx.turnId, {
+          solving = tag("solver", solveCentral({ openThread: deps.openThread, solveInThread: deps.solveInThread }, cfg.llm.smart, ctx.turnId, {
             mark: base.mark, question: delegate.question, original: own, pointing, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language,
             timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
             onDelta,
             ...trace(),
             onSpokenLine,
-          }).finally(() => { asking = false; }));
-          solverUsage = solved.usage;
-          const ran = centralSession()?.choice;
+          }));
+          centralHandle = centralSession();
+          solverSession = centralHandle;
+          const handle = centralHandle;
+          stop = () => handle?.abort();
+          const ran = handle?.choice;
           if (ran && JSON.stringify(ran) !== JSON.stringify(cfg.llm.smart)) solverLlm = ran;
         } else {
           // No memory: one request on a fresh agent.
-          const solved = await tag("solver", deps.solveTask({
+          const abort = new AbortController();
+          stop = () => abort.abort(new Error("stopped by the user"));
+          solving = tag("solver", deps.solveTask({
             mark: base.mark, question: delegate.question, original: own, pointing, fast: cfg.solverFast, history, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
             timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
+            signal: abort.signal,
             onDelta,
             ...trace(),
             onSpokenLine,
           }));
-          solverUsage = solved.usage;
         }
+        solving = solving.finally(() => { asking = false; });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const canHandOff = !!ctx.channel && (!!plan || canBackground);
+        let outcome: { result: Awaited<typeof solving> } | null;
+        try {
+          outcome = await Promise.race([
+            solving.then((result) => ({ result })),
+            base.done.then(() => null),
+            ...(canHandOff ? [new Promise<null>((resolve) => {
+              timer = setTimeout(() => {
+                // Once the answer is being spoken, finish it in this turn. The solver's own time limit
+                // and user cancellation still apply while the detailed answer finishes streaming.
+                if (!spokenLine) resolve(null);
+              }, cfg.longTaskSeconds * 1000 + HANDOFF_GRACE_MS);
+            })] : []),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (base.isFinished) return;
+        base.resetTimeout(); // only the remaining speech is tied to this turn now
+        if (!outcome) {
+          handedOff = true;
+          background = true;
+          fillers?.cut();
+          first?.cut();
+          answerTts?.cut();
+          if (!plan) {
+            // Transfer the same request to the job registry. The next central turn gets an independent
+            // continuation, so it can answer without waiting for this job's harness session to become free.
+            const handle = centralHandle;
+            if (handle) backgroundCentralSession(handle);
+            const job = startJob(ctx.connection, ctx.channel!, deps, {
+              turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question, original: own,
+              estimateS: delegate.estimateS, pointing, history: history ?? [], annotation: ctx.annotation, pageContext: solverContext, language: base.language,
+            }, {
+              promise: solving.then((r) => r!), startedAt, spoken: () => solverSpoken, abort: stop,
+              ...(handle ? { session: handle, choice: handle.choice } : {}),
+            });
+            base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };
+          }
+          base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], background: true, promoted: true };
+          ctx.send({ type: "decision", turnId: ctx.turnId, intent: delegate.intent, estimateS: delegate.estimateS, background: true, ...(plan ? { threadId: plan.threadId } : {}) });
+          const line = base.language?.startsWith("ro")
+            ? "Durează mai mult decât mă așteptam. Continui să lucrez și te anunț când e gata."
+            : "This is taking longer than expected. I’ll keep working and let you know when it’s done.";
+          if (plan) store.addMessage(plan.threadId, { turnId: ctx.turnId, role: "assistant", kind: "ack", text: line });
+          base.voice(sep() + line, true);
+          if (stillOnPage()) {
+            const handoffTts = openTts("answer");
+            handoffTts.setLabel("answer");
+            handoffTts.pushText(line);
+            handoffTts.flush();
+            await handoffTts.done();
+          } else {
+            leftPage("handoff"); // written in the chat, not read out
+          }
+          if (!base.isFinished) base.finish();
+          return;
+        }
+        if (outcome.result) solverUsage = outcome.result.usage;
         fillers?.stop();
         if (fillers) {
           base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], fillers: fillers.spoken.length };
@@ -464,7 +566,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       await answerDone;
       if (base.isFinished) return;
       if (labelConflict) base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], labelConflict: true };
-      base.finish();
+      base.finish({ ...(solverSession ? { session: harnessSessionInfo(solverSession) ?? undefined } : {}) });
     }
 
     return {

@@ -4,6 +4,7 @@ import { isDrawingAnnotation, type DrawingAnnotation } from "./annotations.ts";
 import type { LlmChoice, RunConfig } from "./config.ts";
 import type { MarkName, Metrics } from "./marks.ts";
 import type { ThreadInfo, ThreadSay } from "./threads.ts";
+import type { HarnessSessionInfo } from "./harnessSession.ts";
 
 /**
  * Audio segments. "ack" = first thing the voice layer says; "filler" = progress lines while the solver works
@@ -18,6 +19,8 @@ export type Intent = "question" | "task";
 export type RouteIntent = Intent | "clarify" | "answer";
 
 export interface JobInfo {
+  /** Saved native session for continuing this completed task. */
+  session?: HarnessSessionInfo;
   jobId: string;
   /** The turn that started it. */
   turnId: string;
@@ -369,6 +372,8 @@ export type ServerMsg =
   | { type: "notice"; jobId: string; state: "start" | "end" }
   /** Element threads: every thread (sent on connect, so a reloaded sidebar or page gets its markers back). */
   | { type: "threads.snapshot"; threads: ThreadInfo[] }
+  /** The central conversation's native harness session, also sent on connect and reset. */
+  | { type: "conversation.session"; session: HarnessSessionInfo | null }
   /** Element threads: a thread was created or changed (full record). */
   | { type: "thread"; thread: ThreadInfo }
   | { type: "thread.removed"; threadId: string }
@@ -403,6 +408,8 @@ export interface Usage {
 }
 
 export interface RunRecord {
+  /** Native session that answered this turn, even if the conversation later switches sessions. */
+  session?: HarnessSessionInfo;
   annotation?: DrawingAnnotation;
   runId: string;
   turnId: string;

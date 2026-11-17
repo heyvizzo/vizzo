@@ -43,8 +43,16 @@ describe("permission copy", () => {
     expect(keychainRow("denied").action?.id).toBe("allow-keychain");
     expect(keychainRow("missing").ok).toBe(false);
     expect(keychainRow("missing").action).toBeUndefined();
-    expect(keychainRow("denied").optional && keychainRow("missing").optional).toBe(true);
-    expect(fullDiskRow("denied").optional).toBeUndefined();
+  });
+
+  it("keeps cookie permissions optional in every access state", () => {
+    for (const access of ["ok", "denied", "missing"] as const) {
+      expect(fullDiskRow(access).optional).toBe(true);
+      expect(keychainRow(access).optional).toBe(true);
+      expect(fullDiskRow(access).description).toMatch(/import Safari cookies/);
+      expect(keychainRow(access).description).toMatch(/import Chrome cookies/);
+    }
+    expect(microphoneRow("denied").optional).toBeUndefined();
   });
 });
 

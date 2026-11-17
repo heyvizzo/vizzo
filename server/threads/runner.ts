@@ -11,7 +11,8 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // overlapped it in time touched a same file, the later-finishing thread gets ONE system follow-up naming the files.
 import { taskTimeoutMs, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, PointingTarget, ServerMsg } from "../../shared/protocol.ts";
-import type { ThreadInfo } from "../../shared/threads.ts";
+import { displayTitle, type ThreadInfo } from "../../shared/threads.ts";
+import { beginTask } from "../activity.ts";
 import type { Mark } from "../clock.ts";
 import { llmCostItem } from "../cost.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
@@ -20,12 +21,57 @@ import { spokenFallback } from "../orchestrators/jobs.ts";
 import { tracer, type CallTrace } from "../orchestrators/trace.ts";
 import type { OrchestratorDeps } from "../orchestrators/types.ts";
 import { ttsSpeaker } from "./floor.ts";
-import { failureText, finishedLine, finishMode, reconcileText, reminderText } from "./policy.ts";
+import { awayText, failureText, finishedLine, finishMode, reconcileText, reminderText } from "./policy.ts";
+import { onBrowserUrl, onPage } from "../browserPage.ts";
 import { threadStore, type ThreadRecord, type ThreadRunState, type ThreadStore } from "./store.ts";
 import { fitLines } from "../conversation.ts";
+import { harnessSessionInfo } from "../adapters/sessionInfo.ts";
 
 const SUMMARY_MAX = 160;
 const noMark: Mark = () => {};
+
+/** A full result held for a page the user had left (ThreadRunner.announce): read out when they're back on it. */
+interface HeldResult {
+  store: ThreadStore;
+  spoken: string;
+  speaker: ReturnType<typeof ttsSpeaker>;
+  language?: string;
+  addSpokenCost: (cost: CostItem | null) => void;
+}
+const heldResults = new Map<string, HeldResult>();
+
+/** Speak a thread's full result on the floor; told once heard, pending otherwise. */
+function speakResult(
+  store: ThreadStore, id: string, spoken: string, speaker: ReturnType<typeof ttsSpeaker>, language: string | undefined,
+  addSpokenCost: (cost: CostItem | null) => void,
+): void {
+  const info = store.info(id);
+  const floor = store.speaker();
+  if (!info) return;
+  if (!floor) return void store.update(id, (t) => { if (t.state === "idle") t.state = "pending"; });
+  floor.enqueue({
+    kind: "result", language, speaker,
+    say: { sayId: `${id}:${info.messages.length}`, threadId: id, text: spoken, needsReply: false },
+    valid: () => store.info(id)?.unread === true,
+    onDone: (outcome, cost) => {
+      addSpokenCost(cost);
+      if (outcome === "spoken") store.markTold(id);
+      else store.update(id, (t) => { if (t.state === "idle") t.state = "pending"; });
+    },
+  });
+}
+
+/** The user came to a page: held results for threads on it are read out (those already told, or gone, are dropped). */
+onBrowserUrl(() => {
+  for (const [id, held] of [...heldResults]) {
+    const info = held.store.info(id);
+    if (!info || !info.unread || held.store !== threadStore()) { heldResults.delete(id); continue; }
+    if (!onPage(info.pageUrl)) continue;
+    heldResults.delete(id);
+    for (const f of held.store.floors()) f.drop(id); // the "on the pricing page" line, if it hasn't played yet
+    speakResult(held.store, id, held.spoken, held.speaker, held.language, held.addSpokenCost);
+  }
+});
 
 /** direct: typed in the panel of a thread that always uses the smart model (no router: the harness decides question or task). */
 export type RunKind = "request" | "followup" | "correction" | "reconcile" | "direct";
@@ -63,7 +109,7 @@ interface Queued { spec: RunSpec; resolve: (r: RunResult | null) => void; reject
 
 class ThreadRunner implements ThreadRunState {
   private queue: Queued[] = [];
-  private current: { q: Queued; abortedBy: "correction" | "stop" | "user" | null } | null = null;
+  private current: { q: Queued; abortedBy: "correction" | "stop" | "user" | null; failed?: boolean } | null = null;
   private stopped = false;
   /** The current run's own message: the replay stops before it (it's sent as the request itself). */
   private replayCut: string | null = null;
@@ -77,7 +123,7 @@ class ThreadRunner implements ThreadRunState {
     return new Promise((resolve, reject) => {
       const q = { spec, resolve, reject };
       if (front) this.queue.unshift(q); else this.queue.push(q);
-      if (spec.kind !== "reconcile") this.store.update(this.threadId, (t) => { t.state = "running"; t.intent = spec.intent; });
+      if (spec.kind !== "reconcile") this.store.update(this.threadId, (t) => { t.state = "running"; t.intent = spec.intent; delete t.interrupted; });
       this.next();
     });
   }
@@ -100,10 +146,10 @@ class ThreadRunner implements ThreadRunState {
   cancel(): boolean {
     const cur = this.current;
     const dropped = this.queue.filter((q) => q.spec.kind !== "reconcile");
-    if (!dropped.length && (!cur || cur.q.spec.kind === "reconcile")) return false;
+    if (!dropped.length && (!cur || cur.abortedBy || cur.q.spec.kind === "reconcile")) return false;
     this.queue = this.queue.filter((q) => !dropped.includes(q));
     for (const q of dropped) q.resolve(null);
-    if (cur) {
+    if (cur && !cur.abortedBy) {
       cur.abortedBy = "user";
       try { this.rec.handle?.abort(); } catch { /* ignore */ }
     }
@@ -127,8 +173,12 @@ class ThreadRunner implements ThreadRunState {
     if (this.stopped || this.current) return;
     const q = this.queue.shift();
     if (!q) return;
-    this.current = { q, abortedBy: null };
+    const cur: NonNullable<ThreadRunner["current"]> = { q, abortedBy: null };
+    this.current = cur;
+    // Tracked so the app asks before quitting while it works (server/activity.ts).
+    const end = beginTask(displayTitle(this.store.info(this.threadId)?.title ?? "a thread"));
     void this.exec(q).finally(() => {
+      end(cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done");
       this.current = null;
       this.next();
     });
@@ -142,7 +192,20 @@ class ThreadRunner implements ThreadRunState {
     this.replayCut = spec.messageId ?? null;
     // The thread's session keeps the harness, model and prompt it was opened with: a change of the smart tier (or of
     // the saved instructions) in Settings applies to threads started after it.
-    rec.handle ??= this.deps.openThread!({ role: "solver", choice: spec.config.llm.smart, replay: () => replayText(store.info(this.threadId), this.replayCut), replayAnnotations: () => replayAnnotations(store.info(this.threadId), this.replayCut) });
+    const publishSession = () => {
+      const session = harnessSessionInfo(rec.handle) ?? undefined;
+      if (JSON.stringify(session) !== JSON.stringify(rec.info.session)) store.update(this.threadId, (t) => { t.session = session; });
+    };
+    // Restored from disk (server/threads/persist.ts): the session it had, on the harness and model it was opened with.
+    rec.handle ??= this.deps.openThread!({
+      role: "solver", choice: rec.resume?.choice ?? spec.config.llm.smart,
+      replay: () => replayText(store.info(this.threadId), this.replayCut),
+      replayAnnotations: () => replayAnnotations(store.info(this.threadId), this.replayCut),
+      onSession: publishSession,
+      ...(rec.resume ? { restore: { spec: rec.resume.spec, ...(rec.resume.ref ? { ref: rec.resume.ref } : {}) } } : {}),
+    });
+    delete rec.resume;
+    publishSession();
     const kind = spec.kind;
     const win: RunWindow = { threadId: this.threadId, start: store.now(), end: null, files: [], kind };
     store.runLog.push(win);
@@ -171,8 +234,11 @@ class ThreadRunner implements ThreadRunState {
     } catch (e) {
       win.end = store.now();
       if (this.current?.abortedBy || this.stopped) return q.resolve(null);
+      if (this.current) this.current.failed = true;
       this.failed(spec, kind, e);
       q.reject(e);
+    } finally {
+      publishSession();
     }
   }
 
@@ -202,26 +268,30 @@ class ThreadRunner implements ThreadRunState {
     this.announce(spec, r.spoken);
   }
 
-  /** Notice policy: the full result if focused (or nothing else runs), else a reminder; the thread waits pending. */
+  /**
+   * Notice policy: the full result if focused (or nothing else runs), else a reminder; the thread waits pending.
+   * A full result for a page the user has left is held: a short line says which page, and the result is read out
+   * when they're back on it (or when they ask: tell/focus mark it told).
+   */
   private announce(spec: RunSpec, spoken: string): void {
     const store = this.store;
     const id = this.threadId;
     const mode = finishMode(id, store.list());
     const info = store.info(id)!;
-    const floor = store.speaker();
     const speaker = ttsSpeaker(this.deps, spec.config, spec.language);
     const addSpokenCost = (cost: CostItem | null) => { if (cost) store.update(id, (t) => addCost(t, cost)); };
     if (mode === "full") {
-      if (!floor) return void store.update(id, (t) => { if (t.state === "idle") t.state = "pending"; });
-      floor.enqueue({
-        kind: "result", language: spec.language, speaker,
-        say: { sayId: `${id}:${info.messages.length}`, threadId: id, text: spoken, needsReply: false },
-        valid: () => store.info(id)?.unread === true,
-        onDone: (outcome, cost) => {
-          addSpokenCost(cost);
-          if (outcome === "spoken") store.markTold(id);
-          else store.update(id, (t) => { if (t.state === "idle") t.state = "pending"; });
-        },
+      if (onPage(info.pageUrl)) return void speakResult(store, id, spoken, speaker, spec.language, addSpokenCost);
+      const text = awayText(info.title, info.pageUrl, spec.language);
+      store.addMessage(id, { turnId: null, role: "system", kind: "reminder", text }, (t) => {
+        if (t.state === "idle") t.state = "pending";
+      });
+      heldResults.set(id, { store, spoken, speaker, language: spec.language, addSpokenCost });
+      store.speaker()?.enqueue({
+        kind: "reminder", title: info.title, language: spec.language, speaker,
+        say: { sayId: `${id}:${info.messages.length}`, threadId: id, text, needsReply: false },
+        valid: () => store.info(id)?.unread === true && !onPage(store.info(id)?.pageUrl),
+        onDone: (_outcome, cost) => addSpokenCost(cost),
       });
       return;
     }
@@ -229,7 +299,7 @@ class ThreadRunner implements ThreadRunState {
     store.addMessage(id, { turnId: null, role: "system", kind: "reminder", text }, (t) => {
       if (t.state === "idle") t.state = "pending";
     });
-    floor?.enqueue({
+    store.speaker()?.enqueue({
       kind: "reminder", title: info.title, language: spec.language, speaker,
       say: { sayId: `${id}:${info.messages.length}`, threadId: id, text, needsReply: false },
       valid: () => store.info(id)?.unread === true,
@@ -245,7 +315,8 @@ class ThreadRunner implements ThreadRunState {
     const more = this.queue.length > 0;
     store.addMessage(id, { turnId: spec.turnId, role: "system", kind: "error", text: message }, (t) => { t.state = more ? "running" : "failed"; });
     const info = store.info(id);
-    if (!info || spec.inline?.active() || store.focused() !== id) return;
+    // Spoken only for the thread the user dealt with last, and only while they're on its page (else it's just the red marker).
+    if (!info || spec.inline?.active() || store.focused() !== id || !onPage(info.pageUrl)) return;
     store.speaker()?.enqueue({
       kind: "result", language: spec.language, speaker: ttsSpeaker(this.deps, spec.config, spec.language),
       say: { sayId: `${id}:${info.messages.length}`, threadId: id, text: failureText(info.title, spec.language), needsReply: false },

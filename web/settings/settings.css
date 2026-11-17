@@ -33,6 +33,10 @@ section > .card + .card { margin-top: 14px; }
 .name { font-weight: 650; }
 .summary { color: var(--err); font-weight: 600; }
 .row.ok .summary { color: var(--ok); }
+.row.optional:not(.ok) .dot { background: var(--muted); box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted) 18%, transparent); }
+.row.optional:not(.ok) .summary { color: var(--muted); }
+.permission-kind { margin-left: 8px; color: var(--muted); font-size: 12px; }
+.permission-description { margin: 6px 0 0; }
 .instruction { color: var(--muted); margin: 4px 0 0; }
 
 /* Fields */
@@ -111,6 +115,8 @@ button.small { margin-top: 8px; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 /* Browser cookies: one button per row. */
 #cookies { flex-direction: column; align-items: flex-start; }
+.cookie-action { display: grid; justify-items: start; gap: 4px; }
+.cookie-action a { color: var(--accent); }
 #cookies-status:empty { display: none; }
 #cookies-status.error { color: var(--err); }
 .savebar { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 28px; background: var(--panel); border-top: 1px solid var(--line); }

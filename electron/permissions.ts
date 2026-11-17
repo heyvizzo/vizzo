@@ -17,6 +17,8 @@ export interface PermissionRow {
   optional?: boolean;
   /** Short status next to the dot. */
   summary: string;
+  /** Why this permission is needed, regardless of its current status. */
+  description?: string;
   /** What to do when it is off, or what it unlocks when it is on. */
   instruction: string;
   action?: { id: "allow-microphone" | "open-microphone" | "open-full-disk" | "allow-keychain"; label: string };
@@ -85,19 +87,23 @@ export function microphoneRow(status: string): PermissionRow {
 }
 
 export function fullDiskRow(access: Access): PermissionRow {
+  const base = {
+    id: "full-disk" as const,
+    name: "Full Disk Access",
+    optional: true,
+    description: "Needed only to import Safari cookies. macOS protects Safari’s cookie file; access lets Vizzo copy your website sign-ins into its browser pane.",
+  };
   if (access === "ok") {
     return {
-      id: "full-disk",
-      name: "Full Disk Access",
+      ...base,
       ok: true,
       summary: "Allowed",
-      instruction: "Safari cookies can be imported under Browser cookies above.",
+      instruction: "Safari cookies can be imported under Browser cookies.",
     };
   }
   const hidden = access === "missing";
   return {
-    id: "full-disk",
-    name: "Full Disk Access",
+    ...base,
     ok: false,
     summary: "Not allowed",
     instruction: hidden
@@ -108,30 +114,31 @@ export function fullDiskRow(access: Access): PermissionRow {
 }
 
 export function keychainRow(access: Access): PermissionRow {
+  const base = {
+    id: "chrome-keychain" as const,
+    name: "Chrome keychain",
+    optional: true,
+    description: "Needed only to import Chrome cookies. Chrome encrypts its cookies with the “Chrome Safe Storage” password in your macOS Keychain; access lets Vizzo decrypt them and copy your website sign-ins into its browser pane.",
+  };
   if (access === "ok") {
     return {
-      id: "chrome-keychain",
-      name: "Chrome keychain",
+      ...base,
       ok: true,
       summary: "Allowed",
-      instruction: "Chrome cookies can be decrypted for Browser cookies above.",
+      instruction: "Chrome cookies can be imported under Browser cookies.",
     };
   }
   if (access === "missing") {
     return {
-      id: "chrome-keychain",
-      name: "Chrome keychain",
+      ...base,
       ok: false,
-      optional: true,
       summary: "Not found",
-      instruction: "Open Chrome once so it creates the “Chrome Safe Storage” password. Then use Import from Chrome under Browser cookies above and choose Always Allow.",
+      instruction: "Open Chrome once so it creates the “Chrome Safe Storage” password, then click Check again here. Use Allow keychain access and choose Always Allow when macOS asks.",
     };
   }
   return {
-    id: "chrome-keychain",
-    name: "Chrome keychain",
+    ...base,
     ok: false,
-    optional: true,
     summary: "Not allowed yet",
     instruction: "When macOS asks to use the “Chrome Safe Storage” password, choose Always Allow.",
     action: { id: "allow-keychain", label: "Allow keychain access" },

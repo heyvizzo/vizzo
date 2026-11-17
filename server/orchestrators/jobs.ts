@@ -4,14 +4,17 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // (server/centralSession.ts), so the conversation's session stays free for the next turn. When it finishes, the
 // client gets a `job` update, the result joins the conversation (the conversation's session hears it as a note), and
 // it's spoken as a notice once no turn is active, with the turn's TTS engine. The user can stop one (stopJob): its
-// solver is stopped and nothing is announced. The job's session is closed when the job is over.
+// solver is stopped and nothing is announced. A finished job releases its process and keeps its saved context.
 import { randomUUID } from "node:crypto";
-import { isLocalTts, llmOf, taskTimeoutMs, TTS_LABELS, type RunConfig } from "../../shared/config.ts";
+import { isLocalTts, llmOf, taskTimeoutMs, TTS_LABELS, type LlmChoice, type RunConfig } from "../../shared/config.ts";
 import type { CostItem, Intent, JobInfo, PointingTarget } from "../../shared/protocol.ts";
 import { llmCostItem, PRICES } from "../cost.ts";
 import { getConversation, retainConversationDrawings, type ChatTurn } from "../conversation.ts";
-import { openJobSession } from "../centralSession.ts";
+import { finishJobSession, openJobSession } from "../centralSession.ts";
+import { harnessSessionInfo } from "../adapters/sessionInfo.ts";
+import type { HarnessThread } from "../adapters/types.ts";
 import { tracer } from "./trace.ts";
+import { beginTask } from "../activity.ts";
 import { useVoiceCues } from "../adapters/voiceCues.ts";
 import type { ConnectionCache, ConnectionChannel, OrchestratorDeps } from "./types.ts";
 
@@ -31,6 +34,17 @@ export interface JobSpec {
   history: ChatTurn[];
   pageContext?: string;
   language?: string;
+}
+
+/** Adopt foreground work without starting another solver request or restarting its task timeout. */
+export interface RunningJob {
+  promise: Promise<{ text: string; usage: unknown }>;
+  startedAt: number;
+  spoken(): string;
+  abort(): void;
+  close?(): void | Promise<void>;
+  session?: HarnessThread;
+  choice?: LlmChoice;
 }
 
 class JobRegistry {
@@ -76,23 +90,30 @@ export function stopJob(conn: ConnectionCache, channel: ConnectionChannel, jobId
   return true;
 }
 
+function shortQuestion(q: string): string {
+  const line = q.replace(/\s+/g, " ").trim();
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+}
+
 /** First paragraph without the SPOKEN: prefix, for answers where the SPOKEN line never fired. */
 export function spokenFallback(text: string): string {
   return text.split(/\n\s*\n/)[0]!.replace(/^\s*SPOKEN:\s*/i, "").trim().slice(0, 400);
 }
 
-/** Start a job; returns its initial info (already sent to the client). */
+/** Start a job (or adopt an existing request); returns its initial info, already sent to the client. */
 export function startJob(
   conn: ConnectionCache, channel: ConnectionChannel, deps: OrchestratorDeps, spec: JobSpec,
+  running?: RunningJob,
 ): JobInfo {
   const reg = registry(conn);
   const job: JobInfo = {
     jobId: randomUUID(), turnId: spec.turnId, approach: spec.config.approach, intent: spec.intent,
     question: spec.question, estimateS: spec.estimateS, state: "running", ...(spec.language ? { language: spec.language } : {}),
+    ...(running ? { elapsedMs: Math.round(performance.now() - running.startedAt) } : {}),
   };
   reg.jobs.set(job.jobId, job);
   channel.send({ type: "job", job: { ...job } });
-  const t0 = performance.now();
+  const t0 = running?.startedAt ?? performance.now();
   let spoken = "";
   let text = "";
   const abort = new AbortController();
@@ -110,27 +131,43 @@ export function startJob(
     onDelta: (d: string) => { text += d; },
   };
   let run: Promise<{ text: string; usage: unknown }>;
+  let session = running?.session;
   // Costs are counted for the model the job's session runs on (a fork keeps the conversation's).
   let costConfig = spec.config;
-  if (deps.openThread && deps.solveInThread) {
-    // Its own session, forked from the conversation's when there is one to fork.
-    const session = openJobSession(deps.openThread, llmOf(spec.config).smart, spec.history);
-    if (session.choice) costConfig = { ...spec.config, llm: { ...llmOf(spec.config), smart: session.choice } };
-    const stop = (): void => { try { session.abort(); } catch { /* ignore */ } };
+  if (running) {
+    if (running.choice) costConfig = { ...spec.config, llm: { ...llmOf(spec.config), smart: running.choice } };
+    const stop = (): void => { try { running.abort(); } catch { /* already stopped */ } };
     abort.signal.addEventListener("abort", stop, { once: true });
-    run = deps.solveInThread({ ...common, thread: session, kind: "request" }).finally(() => {
+    run = running.promise.finally(async () => {
       abort.signal.removeEventListener("abort", stop);
-      try { session.close(); } catch { /* ignore */ }
+      if (session) await finishJobSession(session);
+      else try { await running.close?.(); } catch { /* already gone */ }
+    });
+  } else if (deps.openThread && deps.solveInThread) {
+    // Its own session, forked from the conversation's when there is one to fork.
+    session = openJobSession(deps.openThread, llmOf(spec.config).smart, spec.history);
+    const handle = session;
+    if (session.choice) costConfig = { ...spec.config, llm: { ...llmOf(spec.config), smart: session.choice } };
+    const stop = (): void => { try { handle.abort(); } catch { /* ignore */ } };
+    abort.signal.addEventListener("abort", stop, { once: true });
+    run = deps.solveInThread({ ...common, thread: session, kind: "request" }).finally(async () => {
+      abort.signal.removeEventListener("abort", stop);
+      await finishJobSession(handle);
     });
   } else {
     run = deps.solveTask({ ...common, signal: abort.signal, fast: spec.config.solverFast, history: spec.history, llm: llmOf(spec.config).smart });
   }
+  // Tracked so the app asks before quitting while it works (server/activity.ts).
+  const end = beginTask(`Background task: ${shortQuestion(spec.question)}`);
   run.finally(() => reg.aborts.delete(job.jobId)).then(
     (r) => {
+      end(live() ? "done" : "stopped");
       if (!live()) return;
+      spoken = running?.spoken() || spoken;
       text = r.text || text;
       const item = llmCostItem(costConfig, "smart", r.usage, "Background solver");
       Object.assign(job, {
+        ...(session ? { session: harnessSessionInfo(session) ?? undefined } : {}),
         state: "done", spoken: spoken || spokenFallback(text) || "The task is done.", detail: text, elapsedMs: Math.round(performance.now() - t0),
         costUsd: item.usd,
         costItems: [item],
@@ -153,6 +190,7 @@ export function startJob(
         .catch((e) => console.warn("[jobs] notice failed", e));
     },
     (e) => {
+      end(live() ? "failed" : "stopped");
       if (!live()) return;
       Object.assign(job, { state: "failed", error: e instanceof Error ? e.message : String(e), elapsedMs: Math.round(performance.now() - t0) });
       channel.send({ type: "job", job: { ...job } });
@@ -166,6 +204,7 @@ async function announce(
   channel: ConnectionChannel, deps: OrchestratorDeps, config: RunConfig, job: JobInfo, reg: JobRegistry,
 ): Promise<CostItem | null> {
   let cost: CostItem | null = null;
+  if (config.silent) return cost;
   for (let attempt = 0; attempt < 5; attempt++) {
     await channel.whenIdle();
     if (reg.cancelled) return cost;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CursorSample, PageEvents } from "../../shared/protocol.ts";
-import { createRemotePage, mergePageEvents, shiftPageEvents, type PageBridge, type PageCmd, type PageEventsMsg } from "./pageBridge.ts";
+import { createRemotePage, isPageThreadAction, mergePageEvents, shiftPageEvents, type PageBridge, type PageCmd, type PageEventsMsg } from "./pageBridge.ts";
 
 const el = { elementPath: "html > body > a", dataSource: null, label: "Docs" };
 const sample = (t: number): CursorSample => ({ t, x: 1, y: 2, scrollX: 0, scrollY: 0, ...el });
@@ -17,6 +17,15 @@ function fakeBridge() {
   const bridge: PageBridge = { send: (c) => sent.push(c), onSamples: (cb) => (samples = cb), onEvents: (cb) => (evs = cb) };
   return { bridge, sent, samples: (s: CursorSample[]) => samples(s), events: (m: PageEventsMsg) => evs(m) };
 }
+
+describe("thread stop action", () => {
+  it("accepts a stop for a specific thread and rejects a missing or invalid thread", () => {
+    expect(isPageThreadAction({ type: "thread.stop", threadId: "red" })).toBe(true);
+    for (const action of [null, { type: "thread.stop" }, { type: "thread.stop", threadId: "" }, { type: "thread.stop", threadId: 1 }]) {
+      expect(isPageThreadAction(action)).toBe(false);
+    }
+  });
+});
 
 describe("shiftPageEvents", () => {
   it("shifts every timestamp", () => {

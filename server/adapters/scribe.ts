@@ -1,16 +1,17 @@
 // ElevenLabs Scribe v2 Realtime STT adapter (T3). Shapes per docs/API-NOTES.md "ElevenLabs Scribe".
 //
-// Lifecycle (one session per turn, exactly one commit):
+// Lifecycle (one session per turn, one client commit on release):
 // - `openScribe` resolves as soon as the WebSocket is OPEN, so the orchestrator is never blocked on
 //   the vendor handshake. Audio (and a commit) pushed before the server's `session_started` is
 //   buffered and flushed when `session_started` arrives — the probe and docs only show audio sent
 //   after `session_started`, so we don't send earlier. Connect failures reject `openScribe`.
 // - Audio is coalesced into 100 ms – 1 s messages (the documented recommended chunk size);
 //   `commit()` flushes whatever is pending, then sends the empty-audio commit chunk.
-// - `final()` resolves on `committed_transcript_with_timestamps` (words filtered to type "word").
-//   If only the plain `committed_transcript` has arrived 3 s after commit, it resolves with that
-//   text and no words. `insufficient_audio_activity` resolves with empty text; other vendor errors,
-//   socket errors and closes reject (unless a plain transcript is already in hand).
+// - Scribe also auto-commits after ~36 s, even in manual mode. Keep each segment's text and
+//   session-relative word timestamps; partials expose the committed prefix plus the current segment.
+// - `final()` waits for the release segment and all timestamp responses. After 3 s it can fall back
+//   to the combined plain text (no words if any segment lacks timestamps). An empty release segment
+//   or no-speech response preserves earlier speech. Late partials after finalization are ignored.
 import WebSocket from "ws";
 import type { Word } from "../../shared/protocol.ts";
 import { serverNow } from "../clock.ts";
@@ -75,6 +76,17 @@ export function filterWords(words: unknown): Word[] {
 }
 
 type FinalResult = { text: string; words: Word[]; language?: string };
+interface TranscriptSegment {
+  text: string;
+  /** This segment's plain response arrived after the release commit was sent. */
+  afterCommit: boolean;
+  plainAt?: number;
+  words?: Word[];
+  language?: string;
+  timestampDelayMs?: number;
+}
+
+const joinText = (parts: string[]): string => parts.map((s) => s.trim()).filter(Boolean).join(" ");
 
 export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
   const factory = deps.wsFactory ?? defaultFactory;
@@ -103,7 +115,8 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
       let pending: Buffer[] = [];
       let pendingBytes = 0;
       let tCommit = 0;
-      let plain: { text: string; t: number } | null = null;
+      const segments: TranscriptSegment[] = [];
+      let partialText = "";
       let fallbackDue = false;
       let lastError: { type: string; error: string } | null = null;
       const partialCbs: ((text: string) => void)[] = [];
@@ -164,10 +177,36 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
         clearTimers();
         rejectFinal(err);
       };
-      const resolvePlain = (reason: string) =>
-        finish({ text: plain!.text, words: [] }, { timestamped: false, fallback: reason });
+      const finishTranscript = (meta: Record<string, unknown> = {}) => {
+        const timestamped = segments.length > 0 && segments.every((s) => s.words !== undefined);
+        const language = segments.findLast((s) => s.language)?.language;
+        const delay = segments.at(-1)?.timestampDelayMs;
+        finish({
+          text: joinText(segments.map((s) => s.text)),
+          // A partial word list would truncate the annotated transcript sent to the router.
+          words: timestamped ? segments.flatMap((s) => s.words!) : [],
+          ...(language ? { language } : {}),
+        }, {
+          timestamped, segments: segments.length,
+          ...(language ? { language } : {}),
+          ...(delay !== undefined ? { plainToTimestampedMs: delay } : {}),
+          ...meta,
+        });
+      };
+      const finishIfReady = () => {
+        // A timestamp response for a pre-release auto-commit can arrive after release. It isn't
+        // the final segment: wait for a new committed segment, including an empty one.
+        if (!commitSent || !segments.some((s) => s.afterCommit)) return;
+        if (segments.every((s) => s.words !== undefined)) finishTranscript();
+        else if (fallbackDue) finishTranscript({ fallback: "timeout" });
+      };
+      const publishPartial = () => {
+        const text = joinText([...segments.map((s) => s.text), partialText]);
+        for (const cb of partialCbs) cb(text);
+      };
 
       const handleMessage = (raw: unknown) => {
+        if (settled || closed) return;
         let ev: Record<string, unknown>;
         try {
           ev = JSON.parse(String(raw)) as Record<string, unknown>;
@@ -187,33 +226,42 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
               sentFirstPartial = true;
               mark("stt.firstPartial", { text });
             }
-            for (const cb of partialCbs) cb(text);
+            partialText = text;
+            publishPartial();
             return;
           }
-          case "committed_transcript":
-            if (!plain) {
-              plain = { text: typeof ev.text === "string" ? ev.text : "", t: serverNow() };
-              if (fallbackDue) resolvePlain("timeout");
-            }
+          case "committed_transcript": {
+            segments.push({ text: typeof ev.text === "string" ? ev.text : "", plainAt: serverNow(), afterCommit: commitSent });
+            partialText = "";
+            publishPartial();
+            finishIfReady();
             return;
+          }
           case "committed_transcript_with_timestamps": {
             const words = filterWords(ev.words);
-            finish(
-              {
-                text: typeof ev.text === "string" ? ev.text : words.map((w) => w.text).join(" "), words,
-                ...(typeof ev.language_code === "string" && ev.language_code ? { language: ev.language_code } : {}),
-              },
-              { timestamped: true, ...(typeof ev.language_code === "string" ? { language: ev.language_code } : {}), ...(plain ? { plainToTimestampedMs: Math.round(serverNow() - plain.t) } : {}) },
-            );
+            const text = typeof ev.text === "string" ? ev.text : words.map((w) => w.text).join(" ");
+            // Pair the delayed timestamp event with its plain event. Matching only unfinished
+            // segments keeps repeated phrases, and also handles timestamp work finishing out of order.
+            let segment = segments.find((s) => s.words === undefined && (typeof ev.text !== "string" || s.text === text));
+            if (!segment) {
+              segment = { text, afterCommit: commitSent };
+              segments.push(segment); // tolerate a timestamp response without its plain counterpart
+              partialText = "";
+              publishPartial();
+            }
+            segment.words = words;
+            if (typeof ev.language_code === "string" && ev.language_code) segment.language = ev.language_code;
+            if (segment.plainAt !== undefined) segment.timestampDelayMs = Math.round(serverNow() - segment.plainAt);
+            finishIfReady();
             return;
           }
           default:
             if (ERROR_TYPES.has(type) || typeof ev.error === "string") {
               lastError = { type, error: String(ev.error ?? "") };
               if (type === "insufficient_audio_activity") {
-                finish({ text: "", words: [] }, { timestamped: false, error: type });
-              } else if (committed && plain) {
-                resolvePlain(`error:${type}`);
+                if (committed) finishTranscript({ error: type });
+              } else if (committed && segments.length && !partialText.trim()) {
+                finishTranscript({ fallback: `error:${type}` });
               } else {
                 fail(new Error(`scribe ${type}: ${lastError.error}`));
               }
@@ -236,7 +284,7 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
       ws.on("error", (e: Error) => {
         const err = new Error(`scribe socket error: ${e?.message ?? e}`);
         if (!opened) rejectOpen(err);
-        if (committed && plain) resolvePlain("socket-error");
+        if (committed && segments.length && !partialText.trim()) finishTranscript({ fallback: "socket-error" });
         else fail(err);
       });
       ws.on("close", (code: number, reason: unknown) => {
@@ -244,7 +292,7 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
         const r = reason ? String(reason) : "";
         const why = `scribe socket closed (${code ?? "?"}${r ? ` ${r}` : ""})`;
         if (!opened) rejectOpen(new Error(why));
-        if (committed && plain) resolvePlain("socket-close");
+        if (committed && segments.length && !partialText.trim()) finishTranscript({ fallback: "socket-close" });
         else fail(new Error(lastError ? `${why} after ${lastError.type}: ${lastError.error}` : `${why} before final`));
       });
 
@@ -260,23 +308,25 @@ export function createOpenScribe(deps: ScribeDeps = {}): OpenScribe {
 
       const stream: SttStream = {
         pushAudio(pcm24k: Buffer) {
-          if (committed || closed || pcm24k.length === 0) return; // audio after release is ignored
+          if (committed || settled || closed || pcm24k.length === 0) return; // audio after release is ignored
           pending.push(pcm24k);
           pendingBytes += pcm24k.length;
           flushAudio(false);
         },
         commit() {
-          if (committed || closed) return;
+          if (committed || settled || closed) return;
           committed = true;
           tCommit = serverNow();
           sendCommitIfDue();
           timers.push(
             setTimeout(() => {
               fallbackDue = true;
-              if (plain) resolvePlain("timeout");
+              finishIfReady();
             }, fallbackMs),
             setTimeout(() => {
-              if (plain) resolvePlain("timeout");
+              // If release landed on an auto-commit boundary Scribe may have no new segment.
+              // Never silently return just the prefix while uncommitted speech is still visible.
+              if (segments.length && (!partialText.trim() || segments.some((s) => s.afterCommit))) finishTranscript({ fallback: "timeout" });
               else fail(new Error(`scribe: no transcript within ${finalTimeoutMs} ms of commit`));
             }, finalTimeoutMs),
           );

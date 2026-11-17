@@ -58,6 +58,12 @@ main:not(.hide-ram) .chat-head:has(#session-mem:not([hidden])) { display: flex; 
 /* New conversation: pinned to the top of the conversation, only once it has something to forget (what it clears). */
 .conv-reset { position: sticky; top: 0; z-index: 2; align-self: flex-end; flex: none; margin-bottom: -6px; padding: 3px 10px; font-size: 12px; color: var(--muted); background: var(--panel); }
 .conv-reset:hover { color: var(--text); }
+.reset-confirm { position: sticky; top: 30px; z-index: 3; align-self: flex-end; flex: none; max-width: 300px; margin-bottom: -6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 6px 20px rgb(0 0 0 / 0.18); font-size: 12px; }
+.reset-confirm strong { display: block; margin-bottom: 4px; font-size: 13px; }
+.reset-confirm p { margin: 2px 0; color: var(--muted); }
+.reset-confirm-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.reset-confirm-actions button { padding: 3px 10px; font-size: 12px; }
+.reset-confirm-actions .danger { border-color: var(--err); background: var(--err); color: var(--panel); }
 .messages:not(:has(> .turn:not(.queued), > .job, > .job-row, > .note)) > .conv-reset { display: none; }
 .empty { margin: auto; text-align: center; color: var(--muted); max-width: 320px; line-height: 1.5; }
 div.empty { text-align: left; }
@@ -79,8 +85,19 @@ div.empty { text-align: left; }
 .chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .chip b { color: var(--text); font-weight: 600; }
 details.detail { align-self: flex-start; max-width: 92%; font-size: 13px; }
-details.detail summary { cursor: pointer; color: var(--accent); font-size: 12px; }
-details.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 6px 0 0; padding: 8px 10px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; }
+details.detail > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.detail-body {
+  --ui-field: var(--field);
+  --ui-line: var(--line);
+  --ui-muted: var(--muted);
+  --ui-accent: var(--accent);
+  font: 12.5px/1.5 ui-sans-serif, system-ui, sans-serif;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
 .badges { align-self: flex-start; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 /* "working… ×" under the user's bubble while the turn is being answered; the × stops it. */
 .turn-working { align-self: flex-end; display: inline-flex; align-items: center; gap: 6px; padding: 1px 2px 1px 8px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; }
@@ -215,11 +232,14 @@ table.ctable .cusd.saved { color: var(--ok); }
 .session-mem[hidden] { display: none; }
 /* Sidebar RAM / Cost checkboxes unticked */
 .hide-ram :is(.session-mem, .thread-mem, .thread-mem-all),
-.hide-cost :is(.session-cost, .costbox, .thread-page-cost, .cost-text) { display: none !important; }
+.hide-cost :is(.session-cost, .costbox, .thread-page-cost, .cost-text),
+.hide-full-answers details.detail { display: none !important; }
 /* Debugging details unticked: errors, "interrupted"/"stopped" tags and a queued turn's Remove stay. */
-.hide-debug :is(.annot, .chips, .decision, .bubble.user .lang, .meta > span:not(.err), details.prompts, details.detail),
+.hide-solver-session .session-info,
+.hide-debug :is(.annot, .chips, .decision, .bubble.user .lang, .meta > span:not(.err), details.prompts),
 .hide-debug .badges:not(:has(.tag)),
 .hide-debug .meta:not(:has(.err, button)) { display: none !important; }
+#conversation-session .session-info { padding-top: 8px; }
 
 /* Project folder (Electron only): name as a button, full path after it */
 .project { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; min-width: 0; }
@@ -255,6 +275,7 @@ table.ctable .cusd.saved { color: var(--ok); }
 .thread-del:hover, .job-stop:hover, .task-stop:hover { background: var(--hover); color: var(--err); }
 .thread-del:focus-visible, .job-stop:focus-visible, .task-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .thread-item:hover { background: var(--hover); border-color: var(--line); }
+.thread-item[aria-current="true"] { background: var(--selected); border-color: var(--accent-line); }
 .thread-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .thread-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--st-working-fill); }
 .thread-item[data-state="running"] .thread-dot { animation: beat var(--st-beat) ease-in-out infinite; }
@@ -264,6 +285,8 @@ table.ctable .cusd.saved { color: var(--ok); }
 .thread-item[data-state="failed"] .thread-dot { background: var(--st-failed-fill); }
 .thread-item[data-state="queued"] .thread-dot { background: var(--st-queued-fill); opacity: .55; }
 .thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-open { flex: none; color: var(--accent); font-size: 11px; font-weight: 600; }
+.thread-item:not([aria-current="true"]) .thread-open { display: none; }
 .thread-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .thread-state { flex: none; font-size: 11px; color: var(--muted); }
 .thread-cost { font-variant-numeric: tabular-nums; cursor: help; }

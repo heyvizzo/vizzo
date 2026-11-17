@@ -1,8 +1,9 @@
 import { drawingContext } from "../adapters/drawing.ts";
 // Element threads: the process-level store (docs/PLAN-threads.md, "Lifetime"). Every thread's record, its harness
-// session handle and its run queue, plus the central conversation (server/conversation.ts). Lives as long as the
-// server process: survives page and sidebar reloads, gone when the app closes. Every change goes out to every
-// connected Session (`thread`, `thread.removed`); a Session gets `threads.snapshot` when it connects.
+// session handle and its run queue, plus the central conversation (server/conversation.ts). Survives page and
+// sidebar reloads; with persistTo() (the app and `npm run dev:server`, not tests) the threads are also saved to disk
+// and restored at the next start (server/threads/persist.ts). Every change goes out to every connected Session
+// (`thread`, `thread.removed`); a Session gets `threads.snapshot` when it connects.
 import { randomUUID } from "node:crypto";
 import type { Intent, ServerMsg } from "../../shared/protocol.ts";
 import type { ThreadAnchor, ThreadInfo, ThreadMessage } from "../../shared/threads.ts";
@@ -11,6 +12,12 @@ import { getConversation, resetConversation, type ChatTurn } from "../conversati
 import type { Floor } from "./floor.ts";
 import type { RunWindow } from "./runner.ts";
 import { focusedThreadId } from "./policy.ts";
+import { loadThreads, writeThreads, type SavedThread, type ThreadResume } from "./persist.ts";
+
+/** Changes are written this long after the last one (a streamed run changes its thread often). */
+const SAVE_DELAY_MS = 400;
+
+export const INTERRUPTED_TEXT = "Vizzo was closed before this finished. What it already changed stays. Resume picks up where it left off.";
 
 /** What the runner keeps per thread (server/threads/runner.ts). */
 export interface ThreadRunState {
@@ -22,6 +29,8 @@ export interface ThreadRecord {
   info: ThreadInfo;
   handle: HarnessThread | null;
   run: ThreadRunState | null;
+  /** Restored from disk: what its harness session is reopened with (until a handle is opened). */
+  resume?: ThreadResume;
 }
 
 /** A connected Session. */
@@ -37,6 +46,8 @@ export class ThreadStore {
   now: () => number = Date.now;
   /** Every run's time window and edited files (reconcile, server/threads/runner.ts). */
   readonly runLog: RunWindow[] = [];
+  private file: string | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   get conversation(): ChatTurn[] { return getConversation(); }
 
@@ -130,6 +141,7 @@ export class ThreadStore {
     stopRecord(r);
     for (const f of this.floors()) f.drop(threadId);
     this.broadcast({ type: "thread.removed", threadId });
+    this.scheduleSave();
     return true;
   }
 
@@ -141,12 +153,63 @@ export class ThreadStore {
     for (const f of this.floors()) f.clear();
     resetConversation();
     this.broadcast({ type: "threads.snapshot", threads: [] });
+    this.scheduleSave();
+  }
+
+  /**
+   * Save the threads to `file` from now on, after restoring the ones saved there. A thread that was working when the
+   * app closed comes back interrupted (its run is gone; its harness kept the session up to that point).
+   */
+  persistTo(file: string): void {
+    this.file = file;
+    for (const saved of loadThreads(file)) {
+      if (this.records.has(saved.info.threadId)) continue;
+      const info = restoredInfo(saved, this.now());
+      this.records.set(info.threadId, { info, handle: null, run: null, ...(saved.resume ? { resume: saved.resume } : {}) });
+    }
+    if (this.records.size) console.log(`[threads] restored ${this.records.size} thread${this.records.size === 1 ? "" : "s"} from ${file}`);
+    this.broadcast({ type: "threads.snapshot", threads: this.list() });
+    this.flush();
+  }
+
+  /** Write any pending change now (at exit). */
+  flush(): void {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+    if (!this.file) return;
+    try { writeThreads(this.file, [...this.records.values()].map(savedOf)); }
+    catch (e) { console.warn("[threads] save failed", e); }
+  }
+
+  private scheduleSave(): void {
+    if (!this.file || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.flush(); }, SAVE_DELAY_MS);
+    this.saveTimer.unref?.();
   }
 
   private emit(threadId: string): void {
     const r = this.records.get(threadId);
     if (r) this.broadcast({ type: "thread", thread: snapshot(r.info) });
+    this.scheduleSave();
   }
+}
+
+/** What goes to disk: the record, and how to reopen its session (from the live handle, else what it was restored with). */
+function savedOf(r: ThreadRecord): SavedThread {
+  const h = r.handle;
+  const resume: ThreadResume | undefined = h?.spec && h.choice
+    ? { choice: h.choice, spec: h.spec, ...(h.session?.() ? { ref: h.session!()! } : {}) }
+    : r.resume;
+  return { info: r.info, ...(resume ? { resume } : {}) };
+}
+
+/** A saved thread as it comes back: nothing is running any more. */
+function restoredInfo(saved: SavedThread, now: number): ThreadInfo {
+  const info = saved.info;
+  if (info.state !== "running") return info;
+  return {
+    ...info, state: "idle", interrupted: true, awaitingReply: false,
+    messages: [...info.messages, { id: randomUUID(), turnId: null, at: now, role: "system", kind: "interrupted", text: INTERRUPTED_TEXT }],
+  };
 }
 
 function stopRecord(r: ThreadRecord): void {

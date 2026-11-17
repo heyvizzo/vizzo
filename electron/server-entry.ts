@@ -12,6 +12,9 @@ import { startSavedSpeech } from "../server/speechEngines.ts";
 import { setBrowserUrl } from "../server/browserPage.ts";
 import { applyEnv } from "./settings.ts";
 import "../server/adapters/claude.ts"; // registers the roles' prompts
+import { threadStore } from "../server/threads/store.ts";
+import { threadsFile } from "../server/threads/persist.ts";
+import { onActivity, runningTasks } from "../server/activity.ts";
 
 function useProject(dir: string | null) {
   setProjectDir(dir);
@@ -20,11 +23,21 @@ function useProject(dir: string | null) {
   console.log(`[server] project folder: ${projectDir() ?? "(none)"}`);
 }
 
+// The thread list comes back from the last run, and every change is saved (server/threads/persist.ts).
+threadStore().persistTo(threadsFile());
 const running = await startServer(Number(process.env.PORT ?? 0), { host: "127.0.0.1" });
 process.parentPort.postMessage({ type: "ready", port: running.port });
+// What's working, for the quit prompt and finishing in the background (electron/main.ts, "quitting").
+onActivity((c) => process.parentPort.postMessage({ type: "activity", ...c }));
+process.parentPort.postMessage({ type: "activity", running: runningTasks() });
 
 let instructionsTimer: ReturnType<typeof setTimeout> | undefined;
 process.parentPort.on("message", (e: { data: { type: string; dir?: string | null; url?: string | null; env?: Record<string, string> } }) => {
+  // The app is about to stop this process: what changed in the last moments goes to disk first.
+  if (e.data.type === "flush") {
+    threadStore().flush();
+    process.parentPort.postMessage({ type: "flushed" });
+  }
   if (e.data.type === "instructions") {
     // Saving text is immediate; wait for a typing pause before replacing idle warm agents.
     // Dispatch reads the saved text directly, and active threads refresh only before their next request.

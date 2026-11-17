@@ -57,6 +57,10 @@ async function started(over?: { fallbackMs?: number; finalTimeoutMs?: number }) 
 
 const pcm = (ms: number) => Buffer.alloc((24000 * 2 * ms) / 1000, 1);
 const audioChunks = (ws: FakeWs) => ws.sent.filter((m) => m.commit === false);
+const timestamped = (text: string, start = 0) => ({
+  message_type: "committed_transcript_with_timestamps", text, language_code: "en",
+  words: text.split(" ").map((text, i) => ({ text, type: "word", start: start + i, end: start + i + 0.5 })),
+});
 
 afterEach(() => vi.useRealTimers());
 
@@ -207,6 +211,127 @@ describe("openScribe", () => {
     // a late timestamped message does not re-mark
     ws.server({ message_type: "committed_transcript_with_timestamps", text: "Hello.", words: [] });
     expect(marks.filter((m) => m.name === "stt.final")).toHaveLength(1);
+  });
+
+  it("keeps automatic commits and live partials together until release, including repeated segments", async () => {
+    vi.useFakeTimers();
+    const { ws, stt, marks } = await started();
+    const seen: string[] = [];
+    stt.onPartial((text) => seen.push(text));
+    let done = false;
+    void stt.final().then(() => { done = true; });
+    ws.server({ message_type: "partial_transcript", text: "First" });
+    ws.server({ message_type: "committed_transcript", text: "First part." });
+    ws.server(timestamped("First part.", 1));
+    ws.server({ message_type: "partial_transcript", text: "" });
+    ws.server({ message_type: "partial_transcript", text: "First" });
+    ws.server({ message_type: "committed_transcript", text: "First part." });
+    ws.server(timestamped("First part.", 37));
+    ws.server({ message_type: "partial_transcript", text: "Last" });
+    await Promise.resolve();
+    expect(done).toBe(false);
+    expect(marks.some((m) => m.name === "stt.final")).toBe(false);
+    expect(seen.at(-1)).toBe("First part. First part. Last");
+
+    stt.commit();
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(done).toBe(false); // earlier committed text isn't the release response
+    ws.server({ message_type: "committed_transcript", text: "Last part." });
+    ws.server(timestamped("Last part.", 74));
+    await expect(stt.final()).resolves.toEqual({
+      text: "First part. First part. Last part.", language: "en",
+      words: [1, 37, 74].flatMap((start, i) => timestamped(i === 2 ? "Last part." : "First part.", start).words.map(({ type: _, ...w }) => w)),
+    });
+    expect(marks.filter((m) => m.name === "stt.final")).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("waits for the release segment when an earlier segment's timestamps arrive after release", async () => {
+    const { ws, stt } = await started();
+    ws.server({ message_type: "committed_transcript", text: "Earlier segment." });
+    stt.commit();
+    let done = false;
+    void stt.final().then(() => { done = true; });
+    ws.server({ message_type: "committed_transcript", text: "Final segment." });
+    // Timestamp work can finish out of order; pair it with its plain text.
+    ws.server(timestamped("Final segment.", 37));
+    await Promise.resolve();
+    expect(done).toBe(false);
+    ws.server(timestamped("Earlier segment.", 1));
+    await expect(stt.final()).resolves.toMatchObject({
+      text: "Earlier segment. Final segment.",
+      words: [{ text: "Earlier", start: 1 }, { text: "segment.", start: 2 }, { text: "Final", start: 37 }, { text: "segment.", start: 38 }],
+    });
+  });
+
+  it("falls back with every segment and no incomplete word list when timestamps are missing", async () => {
+    vi.useFakeTimers();
+    const { ws, stt } = await started();
+    ws.server({ message_type: "committed_transcript", text: "Earlier segment." });
+    ws.server(timestamped("Earlier segment.", 1));
+    stt.commit();
+    ws.server({ message_type: "committed_transcript", text: "Final segment." });
+    await vi.advanceTimersByTimeAsync(3000);
+    await expect(stt.final()).resolves.toMatchObject({ text: "Earlier segment. Final segment.", words: [] });
+  });
+
+  it("does not fall back to only an earlier segment while the release response is pending", async () => {
+    vi.useFakeTimers();
+    const { ws, stt } = await started();
+    ws.server({ message_type: "committed_transcript", text: "Earlier segment." });
+    ws.server(timestamped("Earlier segment.", 1));
+    ws.server({ message_type: "partial_transcript", text: "Final segment" });
+    stt.commit();
+    let done = false;
+    void stt.final().then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(done).toBe(false);
+    ws.server(timestamped("Final segment.", 37));
+    await expect(stt.final()).resolves.toMatchObject({ text: "Earlier segment. Final segment." });
+  });
+
+  it("rejects a missing final segment instead of silently losing its live partial", async () => {
+    vi.useFakeTimers();
+    for (const end of ["socket", "timeout"]) {
+      const { ws, stt } = await started();
+      ws.server({ message_type: "committed_transcript", text: "Earlier segment." });
+      ws.server(timestamped("Earlier segment.", 1));
+      ws.server({ message_type: "partial_transcript", text: "Do not lose this" });
+      stt.commit();
+      const rejected = expect(stt.final()).rejects.toThrow(/before final|no transcript/);
+      if (end === "socket") ws.emit("close", 1006, Buffer.from(""));
+      else await vi.advanceTimersByTimeAsync(10_000);
+      await rejected;
+    }
+  });
+
+  it("an empty release segment or no-speech error preserves earlier committed speech", async () => {
+    for (const empty of [
+      { message_type: "committed_transcript_with_timestamps", text: "", words: [] },
+      { message_type: "insufficient_audio_activity", error: "No speech detected" },
+    ]) {
+      const { ws, stt } = await started();
+      ws.server({ message_type: "committed_transcript", text: "Keep this." });
+      ws.server(timestamped("Keep this.", 1));
+      stt.commit();
+      ws.server(empty);
+      await expect(stt.final()).resolves.toMatchObject({ text: "Keep this.", words: [{ text: "Keep", start: 1 }, { text: "this.", start: 2 }] });
+    }
+  });
+
+  it("ignores partials after finalization and close", async () => {
+    const { ws, stt } = await started();
+    const seen: string[] = [];
+    stt.onPartial((text) => seen.push(text));
+    stt.commit();
+    ws.server(timestamped("Finished."));
+    await stt.final();
+    const before = [...seen];
+    ws.server({ message_type: "partial_transcript", text: "late tail" });
+    expect(seen).toEqual(before);
+    stt.close();
+    ws.server({ message_type: "partial_transcript", text: "after close" });
+    expect(seen).toEqual(before);
   });
 
   it("resolves immediately if the plain transcript arrives after the fallback deadline", async () => {

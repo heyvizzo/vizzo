@@ -3,6 +3,7 @@ import type { DrawingAnnotation } from "./annotations.ts";
 // thread that runs in its own persistent harness session; markers on the page show each thread's state.
 // This file is the contract shared by the server (server/threads/), the chat sidebar and the page overlay.
 import type { CostItem, Intent } from "./protocol.ts";
+import type { HarnessSessionInfo } from "./harnessSession.ts";
 
 /**
  * running: the harness is working on it (subtle spinning marker).
@@ -46,6 +47,7 @@ export type ThreadMessageKind =
   | "reminder" // "An earlier task on … finished"
   | "reconcile" // system follow-up after another thread changed the same file
   | "stopped" // the user stopped the run before it finished
+  | "interrupted" // the app was closed while the run was working (restored from disk; Resume continues it)
   | "error";
 
 export interface ThreadMessage {
@@ -66,6 +68,7 @@ export interface ThreadMessage {
 
 export interface ThreadInfo {
   threadId: string;
+  session?: HarnessSessionInfo;
   pageUrl: string;
   anchor: ThreadAnchor;
   /** Short spoken/visible name of the element: "the red button", "the footer links". */
@@ -84,6 +87,11 @@ export interface ThreadInfo {
    * spoken turn still goes through the router (forced: it only speaks the ack); a typed one goes straight to the thread.
    */
   alwaysSmart?: boolean;
+  /**
+   * The app was closed while this thread was working: restored from disk without its run. The panel offers Resume
+   * (a follow-up that continues the harness's saved session); cleared when its next run starts.
+   */
+  interrupted?: boolean;
   messages: ThreadMessage[];
   /** Epoch ms. */
   createdAt: number;

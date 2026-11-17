@@ -15,7 +15,7 @@ export interface SttStream {
   /** Push-to-talk release. */
   commit(): void;
   onPartial(cb: (text: string) => void): void;
-  /** Resolves on committed_transcript_with_timestamps (3 s fallback to plain committed_transcript, empty words). */
+  /** Full turn after commit(), including automatic segments (3 s fallback to plain text, empty words if incomplete). */
   /** `language`: the language Scribe detected (as sent, e.g. "en" / "ron"), when given. */
   final(): Promise<{ text: string; words: Word[]; language?: string }>;
   /** Idempotent. Rejects a still-pending final(). */
@@ -247,6 +247,8 @@ export interface HarnessThread {
   close(): void;
   /** A process is attached right now. */
   readonly live: boolean;
+  /** Release the live connection once idle, keeping the saved session for a terminal or the next send. */
+  release?(): Promise<void>;
   /** The harness's own saved session, once it has one (what `claude --resume` and the like take). */
   session?(): SessionRef | undefined;
 }
@@ -254,6 +256,8 @@ export interface HarnessThread {
 export interface OpenHarnessThreadOpts {
   role: "solver";
   choice: LlmChoice;
+  /** Native session metadata may have changed (starting, first output, completion or fallback). */
+  onSession?(): void;
   /** The history as plain text, prepended when a session starts with none of its own. "" = nothing yet. */
   replay: () => string;
   replayAnnotations?: () => DrawingAnnotation[];
@@ -264,6 +268,11 @@ export interface OpenHarnessThreadOpts {
   notes?: () => string;
   /** Start as a fork of this session's saved one when it has one (same harness); otherwise new, with `replay()`. */
   forkOf?: HarnessThread;
+  /**
+   * A session saved before the app last closed (server/threads/persist.ts): it keeps the spec it was opened with and
+   * its first request resumes `ref` (or, without one, starts new with `replay()`).
+   */
+  restore?: { spec: AgentSpec; ref?: SessionRef };
 }
 /** Live processes are capped (MAX_LIVE_THREAD_SESSIONS): the least recently used idle one is stopped, and resumed when needed. */
 export type OpenHarnessThread = (opts: OpenHarnessThreadOpts) => HarnessThread;

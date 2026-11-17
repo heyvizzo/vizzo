@@ -15,6 +15,10 @@ import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
 import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
 import { mountPlasmaOrb, PLASMA_ORB_CSS, type PlasmaState } from "./plasmaOrb.ts";
 import { ORB_ASKING_COLORS, ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
+import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
+import { SESSION_BADGE_CSS, sessionActions, sessionBadge } from "../sessionBadge.ts";
+import { MARKDOWN_CSS, renderMarkdown } from "./markdown.ts";
+import { enablePanelDrag } from "./panelDrag.ts";
 
 const MARKER = 20;
 /** Markers of threads on one element sit side by side, this far apart. */
@@ -35,6 +39,7 @@ const TAIL_GAP = TAIL_REACH + 2;
 const CHECK = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2l2.3 2.3 4.7-5' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`;
 /** The panel header's delete button. */
 const ICON_TRASH = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.5 4.5h11M6.5 4.5V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M4 4.5l.7 8.6a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.6M6.8 7v4.5M9.2 7v4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const ICON_STOP = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1.5" fill="currentColor"/></svg>`;
 /** The conversation orb, and how far its bottom edge sits above the viewport's bottom before it's dragged. */
 const ORB = 78;
 const ORB_BOTTOM = 25;
@@ -55,18 +60,30 @@ const ORB_LOOKS: Record<OrbState, { state: PlasmaState; colors: StateColor }> = 
   asking: { state: "idle", colors: "asking" },
   failed: { state: "idle", colors: "failed" },
 };
-/** A marker's look: its thread's state, or "asking" when the thread's last reply asked you something. */
-const markerLook = (t: ThreadInfo): string => (t.awaitingReply && (t.state === "idle" || t.state === "pending") ? "asking" : t.state);
+/**
+ * A marker's look: its thread's state, or "asking" when the thread's last reply asked you something, or when the app
+ * was closed mid-run (interrupted: it waits for Resume).
+ */
+const markerLook = (t: ThreadInfo): string => ((t.awaitingReply || t.interrupted) && (t.state === "idle" || t.state === "pending") ? "asking" : t.state);
+/** The words for the "asking" look. */
+const askingLabel = (t: ThreadInfo | null | undefined): string => (t?.interrupted ? "interrupted" : "asking you");
+/** What Resume sends an interrupted thread (a follow-up: its harness session continues where it stopped). */
+export const RESUME_TEXT = "Vizzo was closed while you were working on this. Continue where you left off and finish the request.";
 /** The orb is kept this far inside the viewport. */
 const ORB_MARGIN = 4;
 /** A press on the orb that moves more than this is a drag, not a click. */
 const DRAG_SLOP = 4;
 const PANEL_WIDTH = 340;
+const PANEL_HEIGHT = 420;
+const PANEL_MIN_WIDTH = 280;
+const PANEL_MIN_HEIGHT = 220;
 const PANEL_GAP = 8;
 
 const cssVars = (vars: Record<string, string>): string => Object.entries(vars).map(([k, v]) => `${k}: ${v};`).join(" ");
 
 export const THREAD_CSS = `
+${SESSION_BADGE_CSS}
+${MARKDOWN_CSS}
 .th-layer { ${cssVars(stateColorVars("dark"))} --th-edge: 0 0 0 1.5px rgba(255,255,255,.85), 0 1px 4px rgba(0,0,0,.45); position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 1; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: var(--ui-text); }
 /* Markers are small orbs in the shared palette (colors.ts): a white hairline and a soft shadow keep them clear on any page. */
 .th-marker { position: absolute; width: ${MARKER}px; height: ${MARKER}px; margin: -${MARKER / 2}px 0 0 -${MARKER / 2}px; padding: 0; box-sizing: border-box; border-radius: 50%; border: 0; background: var(--st-working-fill); box-shadow: var(--th-edge); cursor: pointer; pointer-events: auto; z-index: 1; }
@@ -109,10 +126,24 @@ export const THREAD_CSS = `
 .th-bubble::after { bottom: -${TAIL / 2 + 1}px; border-width: 0 1px 1px 0; }
 .th-bubble[data-side="below"] { transform: translateX(-100%) scale(var(--s)); transform-origin: calc(100% - var(--tail-right, 11px) - ${TAIL / 2}px) -${TAIL_REACH}px; }
 .th-bubble[data-side="below"]::after { bottom: auto; top: -${TAIL / 2 + 1}px; border-width: 1px 0 0 1px; }
-.th-panel { position: absolute; width: ${PANEL_WIDTH}px; max-height: 420px; display: flex; flex-direction: column; box-sizing: border-box; background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 10px; box-shadow: 0 8px 28px var(--ui-shadow); pointer-events: auto; z-index: 3; text-align: left; }
+.th-panel { position: absolute; width: ${PANEL_WIDTH}px; max-height: ${PANEL_HEIGHT}px; display: flex; flex-direction: column; box-sizing: border-box; background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 10px; box-shadow: 0 8px 28px var(--ui-shadow); pointer-events: auto; z-index: 3; text-align: left; }
+.th-panel > :not(.th-body) { flex-shrink: 0; }
+.th-panel.resizing, .th-panel.dragging { user-select: none; }
+.th-resize { position: absolute; inset: 0; pointer-events: none; }
+.th-panel .th-resize-handle { position: absolute; width: 14px; height: 14px; padding: 0; border: 0; border-radius: 4px; background: transparent; pointer-events: auto; touch-action: none; opacity: .4; }
+.th-panel .th-resize-handle:hover, .th-panel .th-resize-handle:focus-visible { opacity: 1; }
+.th-resize-handle::after { content: ""; position: absolute; inset: 4px; border: solid var(--ui-muted); border-width: 0 1.5px 1.5px 0; }
+.th-resize-handle[data-corner="se"] { right: 0; bottom: 0; cursor: nwse-resize; }
+.th-resize-handle[data-corner="sw"] { left: 0; bottom: 0; cursor: nesw-resize; }
+.th-resize-handle[data-corner="sw"]::after { transform: rotate(90deg); }
 .th-panel::before { border-color: var(--ui-line); top: -${TAIL / 2 + 1}px; border-width: 1px 0 0 1px; }
 .th-panel[data-side="above"]::before { top: auto; bottom: -${TAIL / 2 + 1}px; border-width: 0 1px 1px 0; }
-.th-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+.th-panel.detached::before { display: none; }
+.th-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; cursor: grab; touch-action: none; user-select: none; }
+.th-panel.dragging .th-head { cursor: grabbing; }
+.th-session-row { display: flex; align-items: flex-start; gap: 8px; padding: 0 12px 8px; }
+.th-session-row .session-info { flex: 1; padding: 0; }
+.th-session-row > :not(.session-info) { margin-top: 2px; }
 .th-title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .th-state { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--ui-line); color: var(--ui-muted); }
 .th-state[data-state="running"], .th-state[data-state="speaking"] { color: var(--st-working); border-color: color-mix(in srgb, var(--st-working-to) 45%, transparent); }
@@ -124,8 +155,10 @@ export const THREAD_CSS = `
 .th-panel button:hover { border-color: var(--ui-accent); }
 .th-panel button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
 .th-panel .th-close { padding: 0 7px; font-size: 15px; line-height: 20px; border: 0; background: transparent; color: var(--ui-muted); }
-.th-panel .th-trash { display: flex; align-items: center; padding: 3px 5px; border: 0; background: transparent; color: var(--ui-muted); }
+.th-panel .th-trash, .th-panel .th-stop { display: flex; align-items: center; padding: 3px 5px; border: 0; background: transparent; color: var(--ui-muted); }
 .th-panel .th-trash:hover { color: var(--ui-err-text); }
+.th-panel .th-stop { color: var(--ui-err-text); }
+.th-panel .th-stop:hover { background: var(--ui-hover); }
 .th-summary { padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); }
 .th-body { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--ui-line); padding-top: 8px; }
 .th-msg { border-left: 2px solid var(--ui-line); padding-left: 8px; }
@@ -135,8 +168,9 @@ export const THREAD_CSS = `
 .th-msg.kind-error { border-left-color: var(--ui-err); }
 .th-meta { font: 10.5px ui-monospace, monospace; color: var(--ui-muted); }
 .th-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.th-text.md { white-space: normal; }
 .th-msg details summary { cursor: pointer; color: var(--ui-accent); font-size: 12px; }
-.th-msg pre { margin: 4px 0 0; padding: 6px 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-sans-serif, system-ui, sans-serif; background: var(--ui-sunken); border: 1px solid var(--ui-line); border-radius: 6px; }
+.th-msg .th-detail { margin: 4px 0 0; padding: 6px 8px; max-height: 220px; overflow: auto; font: 12px/1.45 ui-sans-serif, system-ui, sans-serif; background: var(--ui-raised); border: 1px solid var(--ui-line); border-radius: 6px; }
 .th-files { margin-top: 2px; font: 11px ui-monospace, monospace; color: var(--ui-ok); overflow-wrap: anywhere; }
 .th-empty { color: var(--ui-muted); font-style: italic; }
 .th-turn { display: flex; flex-direction: column; gap: 4px; }
@@ -181,6 +215,10 @@ export interface ThreadOverlayOpts {
   sampleAt(x: number, y: number): { sample: CursorSample } | null;
   /** The panel's form, its dictation, and sending (web/cursor/inlineForm.ts). */
   forms: FormHub;
+  /** Native clipboard, including on pages whose origin cannot use navigator.clipboard. */
+  copyText?(text: string): Promise<void>;
+  releaseSession?(sessionId: string): Promise<void>;
+  continueSession?(sessionId: string, context?: string): Promise<void>;
   now?: () => number;
 }
 
@@ -194,11 +232,15 @@ export interface ThreadOverlay {
   /** The orb's state, and where it was dragged to (null: bottom center). */
   setOrb(state: OrbState, pos: OrbPos | null): void;
   /** The conversation shown in the orb's panel. */
-  setConversation(entries: ConvoEntry[]): void;
+  setConversation(entries: ConvoEntry[], session?: HarnessSessionInfo | null): void;
   /** Comments typed in a thread's panel that wait for the current turn to end. */
   setHeld(items: HeldComment[]): void;
-  /** Debugging → Details: show each answer's "Full answer" and its edited files in the panel (off until the sidebar says otherwise). */
+  /** Debugging → Details: edited files (off until enabled). */
   setDetails(on: boolean): void;
+  /** Debugging → Solver session: native session / resume command (off until enabled). */
+  setSession(on: boolean): void;
+  /** Debugging → Full answers: expandable written answers (on by default). */
+  setFullAnswers(on: boolean): void;
   /** The node is the orb, its bubble or its panel: it stands for no element (pointing at it points at nothing). */
   isOrb(node: Node): boolean;
   /**
@@ -254,13 +296,13 @@ export const STATE_LABEL: Record<ThreadState, string> = { running: "working", pe
  * `tailRight` places the tail (from the panel's right edge) so it points at the marker.
  */
 export function panelPosition(
-  mx: number, my: number, height: number, view: { sx: number; sy: number; vw: number; vh: number }, radius = MARKER / 2,
+  mx: number, my: number, height: number, view: { sx: number; sy: number; vw: number; vh: number }, radius = MARKER / 2, width = PANEL_WIDTH,
 ): { left: number; top: number; side: "below" | "above"; tailRight: number } {
-  const left = Math.max(view.sx + PANEL_GAP, Math.min(mx + OVERHANG - PANEL_WIDTH, view.sx + view.vw - PANEL_WIDTH - PANEL_GAP));
+  const left = Math.max(view.sx + PANEL_GAP, Math.min(mx + OVERHANG - width, view.sx + view.vw - width - PANEL_GAP));
   const below = my + radius + TAIL_GAP;
   const above = my - radius - TAIL_GAP - height;
   const side = below + height <= view.sy + view.vh || above < view.sy ? "below" : "above";
-  return { left, top: side === "below" ? below : above, side, tailRight: tailOffset(left + PANEL_WIDTH, mx, PANEL_WIDTH) };
+  return { left, top: side === "below" ? below : above, side, tailRight: tailOffset(left + width, mx, width) };
 }
 
 /** The tail's offset from a box's right edge (at `right`, `width` wide) so it points at x, kept off the corners. */
@@ -330,12 +372,29 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: s
   return e;
 }
 
+/** An assistant's short reply, rendered from its Markdown: it's meant to be plain, but a reply without its SPOKEN line
+ *  falls back to the answer's first paragraph, markup and all. */
+function assistantText(text: string): HTMLElement {
+  const md = renderMarkdown(stripVoiceCues(text));
+  md.classList.add("th-text");
+  return md;
+}
+
+/** An answer's full text, rendered from its Markdown. */
+function fullAnswer(detail: string): HTMLElement {
+  const md = renderMarkdown(detail);
+  md.classList.add("th-detail");
+  return md;
+}
+
 export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   const { layer, host } = opts;
   const now = opts.now ?? (() => performance.now());
   layer.classList.add("th-layer");
   const markers = new Map<string, MarkerView>();
   const bubbles = new Map<string, BubbleView>();
+  // Sizes belong to individual tasks (null is the conversation), across close/reopen and live updates.
+  const panelSizes = new Map<string | null, { width: number; height: number }>();
   /** The provisional dot: where the pointer was on its element at release (bounds/point as in ThreadAnchor). */
   let prov: {
     anchor?: ThreadAnchor; turnId: string; el: Element | null; div: HTMLElement; x: number; y: number;
@@ -344,7 +403,9 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   /** `view`: the viewport when it opened; the panel is placed against it, so it stays put as the page scrolls. */
   /** `threadId` null: the orb's panel (the conversation; no form). */
   let panel: {
-    threadId: string | null; root: HTMLElement; form: InlineForm | null; confirming: boolean; openDetails: Set<string>;
+    threadId: string | null; root: HTMLElement; resize: HTMLElement; form: InlineForm | null; confirming: boolean; openDetails: Set<string>;
+    /** A resized or dragged panel keeps its chosen position relative to its marker until closed. */
+    offset: { x: number; y: number; side: "above" | "below" } | null;
     /** Messages already shown: a new one is scrolled into view. */
     seen: Set<string>;
     /**
@@ -364,9 +425,13 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     dragged: false,
   };
   let entries: ConvoEntry[] = [];
+  let conversationSession: HarnessSessionInfo | null = null;
   let held: HeldComment[] = [];
-  /** Debugging → Details: answers show their "Full answer" and the files they edited. */
+  /** Debugging → Details: edited files. */
   let details = false;
+  /** Debugging → Solver session: native sessions and their resume commands. */
+  let showSession = false;
+  let fullAnswers = true;
 
   // Clicks, presses and keys in the overlay stay in the overlay (the page's own handlers don't see them).
   for (const type of ["click", "pointerdown", "pointerup", "mousedown", "mouseup", "dblclick", "keydown", "keyup", "keypress", "input", "contextmenu"]) {
@@ -479,7 +544,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const look = markerLook(t);
     m.btn.dataset.state = look;
     m.btn.classList.toggle("open", panel?.threadId === t.threadId);
-    const label = [displayTitle(t.title), look === "asking" ? "asking you" : STATE_LABEL[t.state], t.unread ? "unread" : ""].filter(Boolean).join(" · ");
+    const label = [displayTitle(t.title), look === "asking" ? askingLabel(t) : STATE_LABEL[t.state], t.unread ? "unread" : ""].filter(Boolean).join(" · ");
     // No native tooltip: hovering a marker grows its bubble out instead.
     m.btn.setAttribute("aria-label", t.summary ? `${label}. ${stripVoiceCues(t.summary)}` : label);
   }
@@ -498,6 +563,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       if (ids.has(id)) continue;
       m.btn.remove();
       markers.delete(id);
+      panelSizes.delete(id);
       for (const [sayId, b] of bubbles) if (b.say.threadId === id) removeBubble(sayId);
       if (panel?.threadId === id) closePanel();
     }
@@ -684,6 +750,95 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
 
   // ── panel ──
 
+  function panelDrag(root: HTMLElement): void {
+    enablePanelDrag(root, ".th-head", (left, top) => {
+      const p = panel;
+      if (!p || p.root !== root) return;
+      const s = spotOf(p.threadId);
+      if (!s) return;
+      p.offset = {
+        x: left + (s.fixed ? 0 : scrollX) - s.x,
+        y: top + (s.fixed ? 0 : scrollY) - s.y,
+        side: root.dataset.side as "above" | "below",
+      };
+      p.view = { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight };
+      root.classList.add("detached");
+      placePanel();
+    });
+  }
+
+  function panelResizeHandles(root: HTMLElement): HTMLElement {
+    const handles = h("div", "th-resize");
+    type Corner = "sw" | "se";
+    let drag: { id: number; corner: Corner; rect: DOMRect; x: number; y: number } | null = null;
+    const resize = (corner: Corner, rect: DOMRect, dx: number, dy: number) => {
+      const p = panel;
+      if (!p || p.root !== root) return;
+      const s = spotOf(p.threadId);
+      if (!s) return;
+      const west = corner === "sw";
+      const maxWidth = Math.max(1, west ? rect.right - PANEL_GAP : innerWidth - PANEL_GAP - rect.left);
+      const maxHeight = Math.max(1, innerHeight - PANEL_GAP - rect.top);
+      // Leave room for the header, composer and a readable slice of the scrollable history.
+      const chrome = root.offsetHeight - (root.querySelector<HTMLElement>(".th-body")?.offsetHeight ?? 0);
+      const minHeight = Math.max(PANEL_MIN_HEIGHT, chrome + 48);
+      const width = Math.max(Math.min(PANEL_MIN_WIDTH, maxWidth), Math.min(rect.width + (west ? -dx : dx), maxWidth));
+      const height = Math.max(Math.min(minHeight, maxHeight), Math.min(rect.height + dy, maxHeight));
+      const left = west ? rect.right - width : rect.left;
+      const top = rect.top;
+      panelSizes.set(p.threadId, { width, height });
+      p.offset = { x: left + (s.fixed ? 0 : scrollX) - s.x, y: top + (s.fixed ? 0 : scrollY) - s.y, side: root.dataset.side as "above" | "below" };
+      p.view = { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight };
+      placePanel();
+    };
+    for (const [corner, label] of Object.entries({ sw: "bottom left", se: "bottom right" }) as [Corner, string][]) {
+      const handle = h("button", "th-resize-handle");
+      handle.type = "button";
+      handle.dataset.corner = corner;
+      handle.setAttribute("aria-label", `Resize from ${label}`);
+      handle.dataset.tip = "Drag to resize. Arrow keys resize; Home resets the size.";
+      handle.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !panel || panel.root !== root) return;
+        e.preventDefault();
+        drag = { id: e.pointerId, corner, rect: root.getBoundingClientRect(), x: e.clientX, y: e.clientY };
+        root.setPointerCapture(e.pointerId);
+        root.classList.add("resizing");
+      });
+      handle.addEventListener("keydown", (e) => {
+        if (!panel || panel.root !== root) return;
+        if (e.key === "Home") {
+          e.preventDefault();
+          panelSizes.delete(panel.threadId);
+          panel.offset = null;
+          root.classList.remove("detached");
+          placePanel();
+          return;
+        }
+        const step = e.shiftKey ? 40 : 10;
+        const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+        if (!delta) return;
+        e.preventDefault();
+        resize(corner, root.getBoundingClientRect(), delta[0]!, delta[1]!);
+      });
+      handles.append(handle);
+    }
+    root.addEventListener("pointermove", (e) => {
+      if (!drag || drag.id !== e.pointerId) return;
+      e.preventDefault();
+      resize(drag.corner, drag.rect, e.clientX - drag.x, e.clientY - drag.y);
+    });
+    const end = (e: PointerEvent) => {
+      if (!drag || drag.id !== e.pointerId) return;
+      drag = null;
+      root.classList.remove("resizing");
+      if (root.hasPointerCapture(e.pointerId)) root.releasePointerCapture(e.pointerId);
+    };
+    root.addEventListener("pointerup", end);
+    root.addEventListener("pointercancel", end);
+    root.addEventListener("lostpointercapture", end);
+    return handles;
+  }
+
   function closePanel(): void {
     if (!panel) return;
     const p = panel;
@@ -704,6 +859,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-label", displayTitle(m.thread.title));
     layer.append(root);
+    panelDrag(root);
     const queued = m.thread.state === "queued";
     const form = opts.forms.create({
       placeholder: queued ? "Add to this feedback…" : `Follow up… type, or ${talkHint()} to talk`,
@@ -712,7 +868,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       // Open while the panel is: the panel is the focus, so talking dictates into it whether or not the field has focus.
       activateOnCreate: true,
     });
-    panel = { threadId, root, form, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight } };
+    panel = { threadId, root, resize: panelResizeHandles(root), offset: null, form, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight } };
     const b = bubbleOf(threadId);
     if (b) collapse(b);
     renderPanel();
@@ -729,7 +885,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-label", "Conversation");
     layer.append(root);
-    panel = { threadId: null, root, form: null, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: 0, sy: 0, vw: innerWidth, vh: innerHeight } };
+    panelDrag(root);
+    panel = { threadId: null, root, resize: panelResizeHandles(root), offset: null, form: null, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: 0, sy: 0, vw: innerWidth, vh: innerHeight } };
     const b = bubbleOf(null);
     if (b) collapse(b);
     renderPanel();
@@ -742,9 +899,23 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const s = spotOf(panel.threadId);
     if (!s) return;
     // The orb's panel is fixed like the orb, placed against the viewport as it is now.
-    const view = s.fixed ? { sx: 0, sy: 0, vw: innerWidth, vh: innerHeight } : panel.view;
+    const view = { sx: s.fixed ? 0 : panel.view.sx, sy: s.fixed ? 0 : panel.view.sy, vw: innerWidth, vh: innerHeight };
     panel.root.classList.toggle("fixed", s.fixed);
-    const { left, top, side, tailRight } = panelPosition(s.x, s.y, panel.root.offsetHeight || 300, view, s.r);
+    const size = panelSizes.get(panel.threadId);
+    const width = Math.min(size?.width ?? PANEL_WIDTH, Math.max(1, view.vw - 2 * PANEL_GAP));
+    const maxHeight = Math.max(1, view.vh - 2 * PANEL_GAP);
+    panel.root.style.width = `${width}px`;
+    panel.root.style.height = size ? `${Math.min(size.height, maxHeight)}px` : "";
+    panel.root.style.maxHeight = `${size ? maxHeight : Math.min(PANEL_HEIGHT, maxHeight)}px`;
+    const height = panel.root.offsetHeight || 300;
+    let { left, top, side, tailRight } = panelPosition(s.x, s.y, height, view, s.r, width);
+    if (panel.offset) {
+      left = Math.max(view.sx + PANEL_GAP, Math.min(s.x + panel.offset.x, view.sx + view.vw - width - PANEL_GAP));
+      top = Math.max(view.sy + PANEL_GAP, Math.min(s.y + panel.offset.y, view.sy + view.vh - height - PANEL_GAP));
+      side = panel.offset.side;
+      tailRight = tailOffset(left + width, s.x, width);
+    }
+    if (size) top = Math.max(view.sy + PANEL_GAP, Math.min(top, view.sy + view.vh - height - PANEL_GAP));
     panel.root.style.left = `${left}px`;
     panel.root.style.top = `${top}px`;
     panel.root.dataset.side = side;
@@ -755,16 +926,34 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const row = h("div", `th-msg role-${msg.role} kind-${msg.kind}`);
     const who = msg.role === "user" ? "You" : msg.role === "assistant" ? "Assistant" : "System";
     const time = new Date(msg.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    row.append(h("div", "th-meta", `${who} · ${msg.kind} · ${time}`), h("div", "th-text", msg.role === "user" ? msg.text : stripVoiceCues(msg.text)));
+    row.append(h("div", "th-meta", `${who} · ${msg.kind} · ${time}`), msg.role === "assistant" ? assistantText(msg.text) : h("div", "th-text", msg.role === "user" ? msg.text : stripVoiceCues(msg.text)));
     if (msg.annotation) row.append(drawingPreview(msg.annotation));
-    if (msg.detail && details) {
+    if (msg.detail && fullAnswers) {
       const d = h("details");
       d.open = openDetails.has(msg.id);
       d.addEventListener("toggle", () => { if (d.open) openDetails.add(msg.id); else openDetails.delete(msg.id); });
-      d.append(h("summary", undefined, "Full answer"), h("pre", undefined, msg.detail));
+      d.append(h("summary", undefined, "Full answer"), fullAnswer(msg.detail));
       row.append(d);
     }
     if (msg.filesTouched?.length && details) row.append(h("div", "th-files", `Edited: ${msg.filesTouched.join(", ")}`));
+    return row;
+  }
+
+  /** Resume on an interrupted thread: a follow-up that continues its harness session. */
+  function resumeAction(threadId: string): HTMLElement {
+    const go = h("button", undefined, "Resume");
+    go.type = "button";
+    go.dataset.tip = "Continue this task where it stopped (its session keeps what it already did)";
+    go.onclick = () => {
+      const m = markers.get(threadId);
+      const hit = m && opts.sampleAt(m.x - scrollX, m.y - scrollY);
+      if (!hit) return;
+      hit.sample.t += performance.timeOrigin; // crosses the bridge as epoch ms
+      go.disabled = true;
+      opts.forms.send(RESUME_TEXT, hit.sample, threadId);
+    };
+    const row = h("div", "th-held");
+    row.append(go);
     return row;
   }
 
@@ -783,6 +972,13 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     return row;
   }
 
+  async function copyNativeSession(info: HarnessSessionInfo): Promise<void> {
+    if (!opts.copyText || !info.resumeCommand) throw new Error("Clipboard unavailable");
+    if (!info.id || !opts.releaseSession) throw new Error("Session unavailable");
+    await opts.releaseSession(info.id);
+    await opts.copyText(info.resumeCommand);
+  }
+
   /** A conversation entry in the orb's panel: what the user said, then the reply. */
   function renderEntry(e: ConvoEntry, openDetails: Set<string>): HTMLElement {
     const row = h("div", `th-turn${e.note ? " note" : ""}`);
@@ -793,18 +989,24 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       if (e.held) user.append(heldActions(e.id));
       row.append(user);
     }
-    if (e.assistant || e.who || (e.detail && details)) {
+    if (e.assistant || e.who || (e.detail && fullAnswers)) {
       const bot = h("div", "th-msg role-assistant");
       bot.append(h("div", "th-meta", [e.who ?? "Assistant", ...(e.user === null ? e.badges : [])].join(" · ")));
-      if (e.assistant) bot.append(h("div", "th-text", stripVoiceCues(e.assistant)));
-      if (e.detail && details) {
+      if (e.assistant) bot.append(assistantText(e.assistant));
+      if (e.detail && fullAnswers) {
         const d = h("details");
         d.open = openDetails.has(e.id);
         d.addEventListener("toggle", () => { if (d.open) openDetails.add(e.id); else openDetails.delete(e.id); });
-        d.append(h("summary", undefined, "Full answer"), h("pre", undefined, e.detail));
+        d.append(h("summary", undefined, "Full answer"), fullAnswer(e.detail));
         bot.append(d);
       }
       row.append(bot);
+    }
+    if (e.session && opts.continueSession) {
+      row.append(sessionActions(e.session, copyNativeSession, async (info) => {
+        await opts.continueSession!(info.id!, e.resumeContext ?? e.user ?? undefined);
+        panel?.root.querySelector("textarea")?.focus();
+      }, true, showSession));
     }
     return row;
   }
@@ -822,23 +1024,41 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     close.onclick = closePanel;
     const head = h("div", "th-head");
     head.append(h("span", "th-title", t ? displayTitle(t.title) : "Conversation"));
+    // The state chip, Stop and Delete: on the session row when it's shown (click-to-copy session on), else in the header.
+    const controls: HTMLElement[] = [];
     const look = t ? markerLook(t) : orb.state;
-    const chip = look === "asking" ? "asking you" : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
+    const chip = look === "asking" ? askingLabel(t) : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
     if (chip) {
       const state = h("span", "th-state", chip);
       state.dataset.state = look;
-      head.append(state);
+      controls.push(state);
     }
     if (t) {
+      if (t.state === "running") {
+        const stop = h("button", "th-stop");
+        stop.type = "button";
+        stop.innerHTML = ICON_STOP;
+        stop.dataset.tip = "Stop execution; then send your next message";
+        stop.setAttribute("aria-label", "Stop execution");
+        stop.addEventListener("pointerdown", (e) => e.preventDefault());
+        stop.onclick = () => { opts.send({ type: "thread.stop", threadId: t.threadId }); p.form?.focus(); };
+        controls.push(stop);
+      }
       const del = h("button", "th-trash");
       del.type = "button";
       del.innerHTML = ICON_TRASH;
       del.dataset.tip = t.state === "queued" ? "Delete this feedback (it won't be sent)" : "Delete this thread (its edits stay in the code)";
       del.setAttribute("aria-label", "Delete");
       del.onclick = () => { p.confirming = true; renderPanel(); p.root.querySelector<HTMLButtonElement>(".th-foot button")?.focus(); };
-      head.append(del);
+      controls.push(del);
     }
-    head.append(close);
+    const badge = showSession ? sessionBadge(t ? t.session : conversationSession, copyNativeSession, true) : null;
+    let session = badge;
+    if (badge && !badge.hidden) {
+      session = h("div", "th-session-row");
+      session.append(badge, ...controls);
+      head.append(close);
+    } else head.append(...controls, close);
     const body = h("div", "th-body");
     const firstRender = !p.seen.size;
     let fresh: string | null = null;
@@ -855,7 +1075,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
         body.append(row);
       }
       if (!entries.length) body.append(h("div", "th-empty", "Nothing said yet."));
-      p.root.replaceChildren(head, body);
+      p.root.replaceChildren(head, ...(session ? [session] : []), body, p.resize);
       scrollBody(p, body, scroll, firstRender, fresh);
       placePanel();
       return;
@@ -864,8 +1084,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const pending = t.state === "queued" ? [] : queuedMessages(t.anchor.domPath);
     const waiting = held.filter((c) => c.threadId === t.threadId);
     if (t.messages.length || pending.length || waiting.length) {
+      const lastInterrupted = t.interrupted ? t.messages.findLast((m) => m.kind === "interrupted") : undefined;
       for (const m of t.messages) {
         const row = renderMessage(m, p.openDetails);
+        if (m === lastInterrupted) row.append(resumeAction(t.threadId));
         note(m.id, row);
         body.append(row);
       }
@@ -912,9 +1134,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const form = p.form!;
     const compose = form.root.parentElement ?? h("div", "th-compose");
     if (!compose.isConnected) { compose.append(form.root); p.root.append(compose); }
-    for (const c of [...p.root.children]) if (c !== compose) c.remove();
-    compose.before(head, ...(p.confirming ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
+    for (const c of [...p.root.children]) if (c !== compose && c !== p.resize) c.remove();
+    compose.before(head, ...(session ? [session] : []), ...(p.confirming ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
     if (smart.childElementCount) compose.after(smart);
+    if (!p.resize.isConnected) p.root.append(p.resize);
     scrollBody(p, body, scroll, firstRender, fresh);
     placePanel();
   }
@@ -1072,8 +1295,9 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     position();
   }
 
-  function setConversation(list: ConvoEntry[]): void {
+  function setConversation(list: ConvoEntry[], session: HarnessSessionInfo | null = null): void {
     entries = list;
+    conversationSession = session;
     if (panel?.threadId === null) renderPanel();
   }
 
@@ -1088,6 +1312,18 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     if (panel) renderPanel();
   }
 
+  function setSession(on: boolean): void {
+    if (on === showSession) return;
+    showSession = on;
+    if (panel) renderPanel();
+  }
+
+  function setFullAnswers(on: boolean): void {
+    if (on === fullAnswers) return;
+    fullAnswers = on;
+    if (panel) renderPanel();
+  }
+
   return {
     setThreads,
     bubble,
@@ -1098,6 +1334,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     setConversation,
     setHeld,
     setDetails,
+    setSession,
+    setFullAnswers,
     isOrb(node) {
       if (orb.btn.contains(node)) return true;
       if (panel?.threadId === null && panel.root.contains(node)) return true;

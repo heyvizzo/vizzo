@@ -1,4 +1,5 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -11,7 +12,7 @@ import {
 } from "./claude.ts";
 import type { HarnessThread, ThreadBrief } from "./types.ts";
 import type { AgentSpec, HarnessResult, WarmAgent } from "./harnesses.ts";
-import { setAgentFactory, stopWarm } from "./warmPool.ts";
+import { agentSpec, setAgentFactory, stopWarm } from "./warmPool.ts";
 import { setProjectDir } from "../project.ts";
 
 // A small project folder for these tests (the real one is PROJECT_DIR; the tests don't depend on it).
@@ -434,7 +435,7 @@ class FakeThread implements HarnessThread {
   readonly id = "hthread-test";
   readonly live = true;
   sentMsgs: string[] = [];
-  constructor(private reply: string, private filesTouched: string[] = [], readonly choice?: LlmChoice) {}
+  constructor(private reply: string, private filesTouched: string[] = [], readonly choice?: LlmChoice, readonly spec?: AgentSpec) {}
   async send(user: string, onText: ((d: string) => void) | undefined) {
     this.sentMsgs.push(user);
     for (let i = 0; i < this.reply.length; i += 5) { await Promise.resolve(); onText?.(this.reply.slice(i, i + 5)); }
@@ -658,6 +659,46 @@ describe("solveTask", () => {
   });
 });
 
+describe("solver Git context", () => {
+  const dir = mkdtempSync(join(tmpdir(), "claude-test-git-"));
+  const answer = "SPOKEN: Done.";
+  const args = { mark: () => {}, question: "Make the button bigger.", pointing: [], onSpokenLine: () => {}, onDelta: () => {} };
+  beforeAll(() => {
+    execFileSync("git", ["init", "-q", dir]);
+    writeFileSync(join(dir, "demo.css"), "a{}\n");
+  });
+  beforeEach(() => setProjectDir(dir));
+  afterEach(() => setProjectDir(PROJECT));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it.each([
+    ["standalone", undefined], ["standalone", true], ["standalone", false],
+    ["thread", undefined], ["thread", true], ["thread", false],
+  ] as const)("%s request with shell=%s includes Git only when disabled", async (mode, shell) => {
+    const choice: LlmChoice = { provider: "claude-code", model: "claude-opus-5-5", ...(shell !== undefined ? { toggles: { shell } } : {}) };
+    let user: string;
+    if (mode === "standalone") {
+      scripts.push({ text: answer });
+      await solveTask({ ...args, fast: false, llm: choice });
+      user = sent.at(-1)!.user;
+    } else {
+      const thread = new FakeThread(answer, [], choice);
+      await solveInThread({ ...args, thread, kind: "request" });
+      user = thread.sentMsgs[0]!;
+    }
+    expect(user.includes("Git state of the project")).toBe(shell === false);
+    if (shell === false) expect(user).toContain("?? demo.css");
+  });
+
+  it.each([true, false])("thread uses its pinned shell=%s over the choice's switches", async (shell) => {
+    const choice: LlmChoice = { provider: "claude-code", model: "claude-opus-5-5", toggles: { shell: !shell } };
+    const spec = agentSpec("solver", { ...choice, toggles: { shell } }, true);
+    const thread = new FakeThread(answer, [], choice, spec);
+    await solveInThread({ ...args, thread, kind: "followup" });
+    expect(thread.sentMsgs[0]!.includes("Git state of the project")).toBe(!shell);
+  });
+});
+
 describe("request shaping", () => {
   it("flattens earlier turns into one user message; extracts the JSON object from fenced text", () => {
     const msg = flattenMessages({ messages: [
@@ -674,6 +715,7 @@ describe("projectNote: what the solver is told about its harness's switches", ()
   it("Shell on (the solver's default): it can look things up, and doesn't commit; Shell off: no git, use the git state block", () => {
     expect(projectNote("claude-code")).toContain("You have a shell");
     expect(projectNote("claude-code")).toContain("Don't commit");
+    expect(projectNote("claude-code")).not.toContain("git state block");
     expect(projectNote("claude-code", { shell: false })).toContain("You have no shell");
     expect(projectNote("codex")).toContain("You have a shell");
     expect(projectNote("codex", { shell: false })).toContain("You have no shell");

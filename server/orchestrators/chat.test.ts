@@ -1,7 +1,8 @@
 // Chat-mode behaviour: decisions, fillers on short tasks, background jobs on long ones, clarify.
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type RunConfig } from "../../shared/config.ts";
 import type { ServerMsg } from "../../shared/protocol.ts";
+import { setBrowserUrl } from "../browserPage.ts";
 import { ConnectionState } from "../connection.ts";
 import { getConversation, resetConversation } from "../conversation.ts";
 import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING, FILLER_CUT_IN, FILLER_LINES, SPOKEN_LINE, type FakeScenario } from "./fakes.ts";
@@ -12,6 +13,7 @@ import type { ConnectionChannel, Orchestrator, TurnContext, TurnResult } from ".
 const FRAME = Buffer.alloc(960);
 // The conversation is process-level now: start every test from an empty one.
 beforeEach(() => resetConversation());
+afterEach(() => setBrowserUrl(null));
 const CHAT: Partial<RunConfig> = { memory: true, fillers: true, backgroundLongTasks: true, longTaskSeconds: 20 };
 
 function setup(config: Partial<RunConfig>) {
@@ -84,6 +86,30 @@ describe("pipeline in chat mode", () => {
     const r = await run(createPipelineOrchestrator(deps({ estimateS: 8, ttsChunks: 40 }, 1470)), s.ctx);
     expect(r.error).toBeUndefined();
     expect(s.events.some((e) => e.type === "audio.cut")).toBe(false);
+    expect(r.voiceText).toContain(`${FILLER_LINES[0]} ${SPOKEN_LINE}`);
+    expect(r.voiceText).not.toContain(FILLER_CUT_IN);
+  }, 10_000);
+
+  it("left the page before the answer: no more progress lines, and the answer is written but not read out", async () => {
+    setBrowserUrl("http://localhost/demo.html");
+    const s = setup({ approach: "pipeline" });
+    const left = setTimeout(() => setBrowserUrl("http://localhost/pricing.html"), 300);
+    const r = await run(createPipelineOrchestrator(deps({ estimateS: 8 }, 900)), s.ctx);
+    clearTimeout(left);
+    expect(r.error).toBeUndefined();
+    expect(s.segments()).toEqual(["ack"]);
+    expect(r.voiceText).toContain(SPOKEN_LINE);
+    expect(r.voiceText).not.toContain(FILLER_LINES[0]);
+  }, 10_000);
+
+  it("left the page after a progress line: that line stays, the answer isn't read out and doesn't cut in", async () => {
+    setBrowserUrl("http://localhost/demo.html");
+    const s = setup({ approach: "pipeline" });
+    const left = setTimeout(() => setBrowserUrl("http://localhost/pricing.html"), 2200);
+    const r = await run(createPipelineOrchestrator(deps({ estimateS: 8, ttsChunks: 40 }, 1470)), s.ctx);
+    clearTimeout(left);
+    expect(r.error).toBeUndefined();
+    expect(s.segments()).toEqual(["ack", "filler"]);
     expect(r.voiceText).toContain(`${FILLER_LINES[0]} ${SPOKEN_LINE}`);
     expect(r.voiceText).not.toContain(FILLER_CUT_IN);
   }, 10_000);

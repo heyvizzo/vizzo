@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { finishedLine, finishMode, focusedThreadId, linePriority, reconcileText, reminderText } from "./policy.ts";
+import { finishedLine, finishMode, pageName, focusedThreadId, linePriority, reconcileText, reminderText } from "./policy.ts";
 
 const t = (threadId: string, state: "running" | "idle" | "pending" | "failed", lastInteractionAt: number) => ({ threadId, state, lastInteractionAt });
 
@@ -31,5 +31,16 @@ describe("notice policy", () => {
     expect(reconcileText(["a.css", "b.ts"])).toMatch(/^a\.css and b\.ts were also changed/);
     expect(linePriority("result", true)).toBeGreaterThan(linePriority("result", false));
     expect(linePriority("result", false)).toBeGreaterThan(linePriority("reminder", false));
+  });
+});
+
+describe("pageName", () => {
+  it("says a page by the last meaningful part of its path", () => {
+    expect(pageName("http://localhost:5173/pricing.html")).toBe("the pricing page");
+    expect(pageName("http://localhost:5173/blog/my-first_post/")).toBe("the my first post page");
+    expect(pageName("http://localhost:5173/products/42")).toBe("the products page");
+    expect(pageName("http://localhost:5173/")).toBe("the home page");
+    expect(pageName("http://localhost:5173/index.html")).toBe("the home page");
+    expect(pageName("http://localhost/pricing.html", "ro")).toBe("pagina pricing");
   });
 });

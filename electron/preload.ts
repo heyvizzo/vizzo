@@ -12,6 +12,7 @@ ipcRenderer.on("hotkeys", (_e, hk: unknown) => setHotkeys(hk));
 const hotkeyLabels = (hk: Hotkeys) => ({ talk: hotkeyLabel(hk.talk), comment: hotkeyLabel(hk.comment) });
 
 contextBridge.exposeInMainWorld("shell", {
+  copyText: (text: string) => ipcRenderer.invoke("clipboard:write", text),
   go: (input: string) => ipcRenderer.invoke("nav:go", input),
   back: () => ipcRenderer.invoke("nav:back"),
   forward: () => ipcRenderer.invoke("nav:forward"),

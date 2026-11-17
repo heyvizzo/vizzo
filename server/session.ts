@@ -3,6 +3,8 @@ import type { DrawingAnnotation } from "../shared/annotations.ts";
 import { randomUUID } from "node:crypto";
 import type { WebSocket, RawData } from "ws";
 import { parseClientMsg, type ClientMsg, type CostItem, type CursorSample, type PageEvents, type RunRecord, type Segment, type ServerMsg } from "../shared/protocol.ts";
+import { centralSession } from "./centralSession.ts";
+import { harnessSessionInfo } from "./adapters/sessionInfo.ts";
 import { deriveMetrics, type MarkName } from "../shared/marks.ts";
 import { llmOf, type RunConfig } from "../shared/config.ts";
 import { serverToClient } from "../shared/clock.ts";
@@ -13,6 +15,7 @@ import { cursorOnlyOrchestrator } from "./orchestrators/cursorOnly.ts";
 import { appendRun } from "./results.ts";
 import { computeCost, costItems } from "./cost.ts";
 import { ConnectionState } from "./connection.ts";
+import { beginTask, type TaskOutcome } from "./activity.ts";
 import { getConversation, retainConversationDrawings } from "./conversation.ts";
 import { cancelJobs, stopJob } from "./orchestrators/jobs.ts";
 import { cancelRun } from "./threads/runner.ts";
@@ -32,6 +35,8 @@ const PLAYED_GRACE_MS = 3000;
 const IDLE_GRACE_MS = 800;
 
 interface Turn {
+  /** Ends its entry in server/activity.ts. */
+  endTask?: (outcome?: TaskOutcome) => void;
   annotation?: DrawingAnnotation;
   turnId: string;
   config: RunConfig;
@@ -106,6 +111,7 @@ export class Session {
 
   private clearTurn(): void {
     const had = this.turn !== null;
+    this.turn?.endTask?.();
     this.turn = null;
     if (had) this.floor.turnEnded();
     this.wakeIdle();
@@ -127,7 +133,9 @@ export class Session {
     ws.on("message", (data, isBinary) => (isBinary ? this.onBinary(data) : this.onText(data.toString())));
     // Element threads: the snapshot now, every change after (threads outlive this connection).
     this.unsubscribe = threadStore().subscribe(this.threadSub);
+    this.send({ type: "conversation.session", session: harnessSessionInfo(centralSession()) });
     ws.on("close", () => {
+      this.turn?.endTask?.("stopped");
       this.turn?.handlers?.cancel();
       this.unsubscribe();
       this.floor.close();
@@ -258,6 +266,7 @@ export class Session {
   }
 
   private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string, pinnedThread?: string, annotation?: DrawingAnnotation, chat = false): void {
+    this.turn?.endTask?.("stopped");
     this.turn?.handlers?.cancel();
     // Older clients send `claudeBackend` instead of `llm`.
     const config: RunConfig = { ...sent, llm: llmOf(sent) };
@@ -266,6 +275,7 @@ export class Session {
       segmentsSent: new Set(), segmentsPlayed: new Set(), page: { clicks: [], preselected: null, highlights: [] },
     };
     this.turn = turn;
+    turn.endTask = beginTask("Answering in the conversation");
 
     const mark: Mark = (name, meta) => {
       if (this.turn !== turn) return;
@@ -337,6 +347,7 @@ export class Session {
     if (this.turn !== turn) return;
     const usage = result.usage;
     const run: RunRecord = {
+      session: result.session,
       annotation: turn.annotation,
       runId: randomUUID(), turnId: turn.turnId, approach: turn.config.approach, config: turn.config,
       fixtureId: turn.fixtureId, marks: turn.marks, metrics: deriveMetrics(turn.marks),

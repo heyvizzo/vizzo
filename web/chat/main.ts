@@ -9,6 +9,7 @@ import "./chat.css";
 import { drawingAnchor } from "../../shared/anchor.ts";
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 import { drawingPreview, drawingPreviewOpen } from "../cursor/drawingPreview.ts";
+import { MARKDOWN_CSS, renderMarkdown } from "../cursor/markdown.ts";
 import { connectWithStatus } from "../common.ts";
 import { pointingMatcher, type PointingMatcher } from "../../shared/pointing.ts";
 import { DEFAULT_CONFIG, isLocalStt, llmOf, type RunConfig } from "../../shared/config.ts";
@@ -36,6 +37,9 @@ import { costBreakdown, fmtUsd, renderTurnCost, savingsOf, savingsText, type Tur
 import { PlaybackClock, decisionBadges, detailOf, fmtBytes, fmtElapsed, fmtEstimate, groupThreads, jobHeadline, markerLabel, pageLabel, replyNeedsReply, runningLabel, spokenOf, threadsOnPage, type DecisionLike } from "./logic.ts";
 import { mountAttention, type AttentionBridge } from "./attention.ts";
 import type { Problem } from "../settings/attention.ts";
+import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
+import { SESSION_BADGE_CSS, sessionActions, sessionBadge } from "../sessionBadge.ts";
+import { continueSession, prepareSessionResume } from "../../shared/sessionResume.ts";
 import { PANEL_KEYS, SIDEBAR_KEYS, fishVoice, languageConfig, loadSettings, normalizeSettings, saveSettingsKeys, type ChatSettingsBridge } from "./settings.ts";
 
 const PRE_ROLL_MS = 500;
@@ -52,6 +56,7 @@ const shell = (window as { shell?: {
   chatSettings?: ChatSettingsBridge;
   drawing?: { publishDisabledReason: (reason: string | null) => void };
   getProject?: () => Promise<string | null>; pickProject?: () => Promise<string | null>;
+  copyText?: (text: string) => Promise<void>;
   onProject?: (cb: (dir: string | null) => void) => void;
   openSettings?: (section?: string) => Promise<void>; attention?: AttentionBridge;
 } }).shell;
@@ -80,6 +85,7 @@ const saveSettings = () => saveSettingsKeys(shell?.chatSettings, settings, SIDEB
 const app = document.getElementById("app")!;
 app.classList.add("chat");
 app.innerHTML = `
+<style>${SESSION_BADGE_CSS}${MARKDOWN_CSS}</style>
 <aside class="chat-side">
   <section class="panel chat-head">
     <div class="head-row opts">
@@ -103,8 +109,9 @@ app.innerHTML = `
     <details id="threads-box" open><summary id="threads-sum">Threads</summary><div class="thread-all"><button type="button" class="thread-bulk" id="threads-clear" title="Delete every thread, on every page">Delete all threads</button></div><div class="thread-groups" id="threads-list"></div></details>
   </section>
   <section class="panel conv">
+    <div id="conversation-session"></div>
     <div class="messages" id="messages" aria-live="polite">
-      <button type="button" class="conv-reset" id="reset" title="Forget the conversation on the server (also drops background tasks)">New conversation</button>
+      <button type="button" class="conv-reset" id="reset" title="Forget the conversation on the server (also deletes every thread and drops background tasks)">New conversation</button>
       <div class="empty" id="empty">
         <h3>Speak</h3>
         <p>Hover the mouse over an element while you talk to include it. Click or select text to point at “this” or “that”.</p>
@@ -218,7 +225,7 @@ shell?.chatSettings?.onChanged?.((json) => {
   Object.assign(settings, Object.fromEntries(PANEL_KEYS.map((key) => [key, next[key]])));
   publishDrawingAvailability();
   if (settings.sttModel !== prev.sttModel) for (const q of queue) transcribeQueued(q); // an on-device model: transcribe what's queued
-  if (settings.debugOutlines !== prev.debugOutlines || settings.hoverOutline !== prev.hoverOutline || settings.showDebug !== prev.showDebug) sendDebug();
+  if (settings.debugOutlines !== prev.debugOutlines || settings.hoverOutline !== prev.hoverOutline || settings.showDebug !== prev.showDebug || settings.showSolverSession !== prev.showSolverSession || settings.showFullAnswers !== prev.showFullAnswers) sendDebug();
   setHotkeys(settings.hotkeys);
   showHotkeys();
   renderDisplay();
@@ -226,7 +233,7 @@ shell?.chatSettings?.onChanged?.((json) => {
 });
 
 function sendDebug(): void {
-  bridge.send({ type: "debug", outlines: settings.debugOutlines, hover: settings.hoverOutline, details: settings.showDebug });
+  bridge.send({ type: "debug", outlines: settings.debugOutlines, hover: settings.hoverOutline, details: settings.showDebug, session: settings.showSolverSession, fullAnswers: settings.showFullAnswers });
 }
 
 function config(): RunConfig {
@@ -253,6 +260,8 @@ function config(): RunConfig {
 
 // ── conversation view ──────────────────────────────
 interface TurnView {
+  session?: HarnessSessionInfo;
+  sessionBox?: HTMLElement;
   annotation?: DrawingAnnotation;
   root: HTMLElement;
   user: HTMLElement;
@@ -266,7 +275,9 @@ interface TurnView {
   bot: HTMLElement;
   botText: Text;
   detail: HTMLDetailsElement;
-  detailPre: HTMLElement;
+  detailBody: HTMLElement;
+  /** Original Markdown, also sent to the page's conversation panel. */
+  detailText: string;
   meta: HTMLElement;
   /** Cost breakdown (filled on turn.done; background task costs added as they arrive). */
   costBox?: HTMLElement;
@@ -286,6 +297,14 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
   return e;
+}
+
+/** Keep the disclosure open during streaming, and avoid rebuilding unchanged job answers on every timer tick. */
+function updateFullAnswer(view: Pick<TurnView, "detail" | "detailBody" | "detailText">, text: string): void {
+  view.detail.hidden = !text;
+  if (view.detailText === text) return;
+  view.detailText = text;
+  view.detailBody.replaceChildren(renderMarkdown(text));
 }
 
 /** `shown` false: a turn kept out of the conversation (its thread's panel shows it); its view is built but not added. */
@@ -315,13 +334,13 @@ function addTurnView(turnId: string, shown = true): TurnView {
   bot.append(el("span", "who", BOT_LABEL), botText);
   const detail = el("details", "detail");
   detail.hidden = true;
-  const detailPre = el("pre");
-  detail.append(el("summary", undefined, "The solver's detailed answer"), detailPre);
+  const detailBody = el("div", "detail-body");
+  detail.append(el("summary", undefined, "Full answer"), detailBody);
   const meta = el("div", "meta");
   root.append(user, annot, chips, working, badges, bot, detail, meta);
   stampTime(root);
   if (shown) messages.append(root);
-  const v: TurnView = { root, user, annot, chips, badges, decision, working, bot, botText, detail, detailPre, meta };
+  const v: TurnView = { root, user, annot, chips, badges, decision, working, bot, botText, detail, detailBody, detailText: "", meta };
   views.set(turnId, v);
   if (shown) scrollDown();
   return v;
@@ -454,7 +473,13 @@ function renderMeta(v: TurnView, run: Pick<RunRecord, "metrics" | "costUsd" | "e
 }
 
 /** Show the turn's itemized cost (plus any background task it started). */
-function renderCost(v: TurnView, run: Pick<RunRecord, "costUsd" | "costItems">, turnId: string): void {
+function renderCost(v: TurnView, run: Pick<RunRecord, "costUsd" | "costItems" | "session" | "transcript">, turnId: string): void {
+  v.session = run.session;
+  if (run.session) {
+    v.sessionBox ??= el("div");
+    if (!v.sessionBox.isConnected) v.meta.before(v.sessionBox);
+    v.sessionBox.replaceChildren(completedSessionActions(run.session, run.transcript));
+  }
   const jobCosts = jobsOfTurn(turnId).map(jobCost);
   v.cost = { items: run.costItems ?? [{ label: "total", usd: run.costUsd }], total: run.costUsd, jobs: jobCosts };
   if (!v.costBox) { v.costBox = el("div", "costbox"); v.meta.after(v.costBox); }
@@ -524,8 +549,10 @@ interface JobCard {
   sub: HTMLElement;
   spoken: HTMLElement;
   detail: HTMLDetailsElement;
-  detailPre: HTMLElement;
+  detailBody: HTMLElement;
+  detailText: string;
   err: HTMLElement;
+  sessionBox: HTMLElement;
   prompts?: NonNullable<TurnView["prompts"]>;
 }
 const jobs = new Map<string, JobCard>();
@@ -605,18 +632,19 @@ function createJobCard(info: JobInfo): JobCard {
   const sub = el("div", "job-sub");
   const spoken = el("div", "job-spoken");
   const detail = el("details", "detail");
-  const detailPre = el("pre");
-  detail.append(el("summary", undefined, "Detailed answer"), detailPre);
+  const detailBody = el("div", "detail-body");
+  detail.append(el("summary", undefined, "Full answer"), detailBody);
   const err = el("div", "job-err");
+  const sessionBox = el("div");
   const cardStop = el("button", "job-stop-btn", "Stop this task");
   cardStop.type = "button";
   cardStop.title = "Stop it now. What it already changed stays.";
   cardStop.onclick = () => stopTask({ kind: "job", jobId: info.jobId });
   const costBox = el("div", "costbox");
   costBox.hidden = true;
-  root.append(head, question, sub, cardStop, spoken, detail, err, costBox);
+  root.append(head, question, sub, cardStop, spoken, detail, err, sessionBox, costBox);
   stampTime(root, new Date(Date.now() - (info.elapsedMs ?? 0)));
-  const card: JobCard = { info, tStart: performance.now() - (info.elapsedMs ?? 0), row, marker, stop, cardStop, costBox, root, head, question, sub, spoken, detail, detailPre, err };
+  const card: JobCard = { info, tStart: performance.now() - (info.elapsedMs ?? 0), row, marker, stop, cardStop, costBox, root, head, question, sub, spoken, detail, detailBody, detailText: "", err, sessionBox };
   marker.addEventListener("click", () => {
     root.hidden = !root.hidden;
     marker.setAttribute("aria-expanded", String(!root.hidden));
@@ -654,6 +682,7 @@ function upsertJob(info: JobInfo): void {
 
 function renderJob(c: JobCard): void {
   const j = c.info;
+  c.sessionBox.replaceChildren(completedSessionActions(j.session, j.question));
   c.root.dataset.state = j.state;
   c.marker.dataset.state = j.state;
   c.row.dataset.state = j.state;
@@ -671,8 +700,7 @@ function renderJob(c: JobCard): void {
   c.spoken.textContent = spoken;
   c.spoken.hidden = !spoken;
   const detail = j.state === "done" && j.detail ? detailOf(j.detail) : "";
-  c.detailPre.textContent = detail;
-  c.detail.hidden = !detail;
+  updateFullAnswer(c, detail);
   if (j.costUsd !== undefined) {
     const items = j.costItems ?? [];
     const saved = items.reduce((n, i) => n + (i.savedUsd ?? 0), 0);
@@ -877,6 +905,25 @@ function stopNotice(): void {
 
 // ── element threads ────────────────────────────────
 const threads = new Map<string, ThreadInfo>();
+let conversationSession: HarnessSessionInfo | null = null;
+async function copyNativeSession(info: HarnessSessionInfo): Promise<void> {
+  if (!info.resumeCommand || !info.id) throw new Error("Session unavailable");
+  await prepareSessionResume(info.id);
+  if (shell?.copyText) await shell.copyText(info.resumeCommand);
+  else await navigator.clipboard.writeText(info.resumeCommand);
+}
+function completedSessionActions(info?: HarnessSessionInfo, context?: string): HTMLElement {
+  return sessionActions(info, copyNativeSession, async (session) => {
+    if (turnBusy()) throw new Error("Wait for the current answer to finish before switching sessions.");
+    await continueSession(session.id!, "", context);
+    setStatus("Task selected. Send your follow-up in the conversation.");
+    $("compose").querySelector("textarea")?.focus();
+  });
+}
+function renderConversationSession(): void {
+  $("conversation-session").replaceChildren(sessionBadge(conversationSession, copyNativeSession));
+}
+renderConversationSession();
 /** The browser pane's URL (threads are filtered by normalizePageUrl). */
 let pageUrl: string | null = null;
 /** A thread picked in the list on another page: opened once that page is loaded (its panel sends thread.focus). */
@@ -890,10 +937,18 @@ const sayThreads = new Map<string, string | null>();
 
 const onCurrentPage = (t: ThreadInfo | undefined): boolean => !!t && !!pageUrl && t.pageUrl === normalizePageUrl(pageUrl);
 
+/** The panel offers Stop from Send until routing and execution finish, including before the server starts its run. */
+let pageWorkingThread: string | null = null;
+function sendPageThreads(): void {
+  pageWorkingThread = workingTurn()?.threadId ?? null;
+  const list = threadsOnPage([...threads.values(), ...queuedThreads()], pageUrl);
+  bridge.send({ type: "threads", threads: list.map((t) => t.threadId === pageWorkingThread ? { ...t, state: "running" } : t) });
+}
+
 function threadsChanged(): void {
   settleStopConfirm();
   // Queued feedback shows as teal markers next to the real threads (web/chat/queue.ts queuedThreads).
-  bridge.send({ type: "threads", threads: threadsOnPage([...threads.values(), ...queuedThreads()], pageUrl) });
+  sendPageThreads();
   renderThreadList();
   renderSessionCost();
   orbChanged(); // a thread started or stopped working
@@ -937,12 +992,13 @@ if (shell?.getProject && shell.pickProject && shell.onProject) {
   void getProject().then((dir) => { if (!seenChange) show(dir); });
 }
 
-// RAM, cost and debugging details stay rendered; turned off in Settings, they're hidden (chat.css: .hide-ram /
-// .hide-cost / .hide-debug).
+// Display options stay rendered; turned off in Settings, they're hidden by their chat.css classes.
 function renderDisplay(): void {
   app.classList.toggle("hide-ram", !settings.showRam);
   app.classList.toggle("hide-cost", !settings.showCost);
+  app.classList.toggle("hide-full-answers", !settings.showFullAnswers);
   app.classList.toggle("hide-debug", !settings.showDebug);
+  app.classList.toggle("hide-solver-session", !settings.showSolverSession);
 }
 renderDisplay();
 
@@ -1017,12 +1073,13 @@ function renderThreadList(): void {
     for (const t of g.threads) {
       const b = el("button", "thread-item");
       b.type = "button";
+      b.dataset.threadId = t.threadId;
       b.dataset.state = t.state;
-      if (t.awaitingReply && (t.state === "idle" || t.state === "pending")) b.dataset.asking = "";
+      if ((t.awaitingReply || t.interrupted) && (t.state === "idle" || t.state === "pending")) b.dataset.asking = "";
       b.title = [stripVoiceCues(t.summary), g.current ? "Open its panel on the page" : `Go to ${pageLabel(g.pageUrl)} and open its panel`].filter(Boolean).join("\n");
       const mem = el("span", "thread-mem");
       mem.dataset.thread = t.threadId;
-      b.append(el("span", "thread-dot"), el("span", "thread-title", displayTitle(t.title)), ...(t.unread ? [el("span", "thread-unread", "")] : []), mem, threadStatus(t));
+      b.append(el("span", "thread-dot"), el("span", "thread-title", displayTitle(t.title)), el("span", "thread-open", "Open"), ...(t.unread ? [el("span", "thread-unread", "")] : []), mem, threadStatus(t));
       if (t.unread) b.querySelector(".thread-unread")!.setAttribute("aria-label", "unread");
       b.onclick = () => openThread(t);
       const x = el("button", "thread-del", "×");
@@ -1036,8 +1093,17 @@ function renderThreadList(): void {
     }
     return box;
   }));
+  renderOpenThread();
   renderMemory();
   renderJobsPill();
+}
+
+/** Update selection in place so opening or closing a panel keeps the list's focus and scroll position. */
+function renderOpenThread(): void {
+  for (const b of $("threads-list").querySelectorAll<HTMLButtonElement>(".thread-item")) {
+    if (b.dataset.threadId === panelThreadId) b.setAttribute("aria-current", "true");
+    else b.removeAttribute("aria-current");
+  }
 }
 
 /** The latest RAM sample from the server (server/memory.ts), null until the first. */
@@ -1093,12 +1159,13 @@ function threadsCost(list: Iterable<ThreadInfo>): { total: number; items: CostIt
  */
 function threadStatus(t: ThreadInfo): HTMLElement {
   const finished = t.state === "idle" || t.state === "pending";
-  const asking = finished && t.awaitingReply;
-  if (t.costUsd === undefined) return el("span", "thread-state", asking ? "asking you" : STATE_LABEL[t.state]);
+  const asking = finished && (t.awaitingReply || !!t.interrupted);
+  const askingText = t.interrupted ? "interrupted" : "asking you";
+  if (t.costUsd === undefined) return el("span", "thread-state", asking ? askingText : STATE_LABEL[t.state]);
   const cost = el("span", "cost-text", finished ? fmtUsd(t.costUsd) : ` · ${fmtUsd(t.costUsd)} so far`);
   cost.title = costBreakdown(t.costItems ?? [], t.costUsd);
   const s = el("span", "thread-state thread-cost");
-  s.append(...(asking ? ["asking you · "] : finished ? [] : [STATE_LABEL[t.state]]), cost);
+  s.append(...(asking ? [`${askingText} · `] : finished ? [] : [STATE_LABEL[t.state]]), cost);
   return s;
 }
 
@@ -1172,9 +1239,11 @@ bridge.onThreadAction?.((a) => {
   }
   if (isPagePanelAction(a)) {
     panelThreadId = a.threadId && !isQueuedId(a.threadId) ? a.threadId : null;
+    renderOpenThread();
     return;
   }
   if (!isPageThreadAction(a)) return;
+  if (a.type === "thread.stop") return stopThread(a.threadId);
   if (pendingOpen?.threadId === a.threadId) pendingOpen = null;
   // Queued feedback isn't on the server: its panel's Delete drops it, and the rest queued on that element, from the queue.
   if (isQueuedId(a.threadId)) {
@@ -1255,6 +1324,7 @@ function turnBusy(): boolean {
 function refreshBusy(): void {
   $("stop").hidden = !(turnBusy() || noticeJobId || playback.isPlaying(performance.now()));
   const w = workingTurn();
+  if ((w?.threadId ?? null) !== pageWorkingThread) sendPageThreads();
   for (const v of views.values()) v.working.hidden = v !== w?.view;
   if (w) w.view.working.querySelector(".turn-working-text")!.textContent = w.background ? "handed over…" : w.intent ? `${INTENT_WORKING[w.intent]}…` : "thinking…";
   renderJobsPill();
@@ -1277,6 +1347,22 @@ function stopActiveTurn(turnId: string): void {
   playback.reset();
   cancelTurn(t, "stop");
   setStatus(queue.length ? `Stopped. ${queuedText()}` : "Stopped.");
+  refreshBusy();
+}
+
+/** A panel's Stop cancels both routing and its solver, and drops only that thread's held follow-ups. */
+function stopThread(threadId: string): void {
+  if (isQueuedId(threadId)) return;
+  for (const q of held.filter((q) => q.threadId === threadId)) removeHeld(q);
+  const t = workingTurn();
+  if (t?.threadId === threadId) stopActiveTurn(t.turnId);
+  sock.send({ type: "task.stop", task: { kind: "thread", threadId } });
+  if (noticeJobId && sayThreads.get(noticeJobId) === threadId) {
+    player?.reset();
+    playback.reset();
+    stopNotice();
+  }
+  setStatus("Stopped. You can send another message.");
   refreshBusy();
 }
 
@@ -1326,9 +1412,11 @@ function conversationEntries(): ConvoEntry[] {
       const spoken = c.spoken.hidden ? "" : c.spoken.textContent ?? "";
       const err = c.err.hidden ? "" : c.err.textContent ?? "";
       out.push({
+        session: c.info.session,
+        resumeContext: c.info.question,
         id: `job:${c.info.jobId}`, user: null, who: c.head.textContent ?? "Background task", badges: [],
         assistant: spoken || err || (c.question.hidden ? "" : c.question.textContent ?? ""),
-        ...(c.detail.hidden ? {} : { detail: c.detailPre.textContent ?? "" }),
+        ...(c.detail.hidden ? {} : { detail: c.detailText }),
       });
     } else if (n.classList.contains("say")) {
       const bot = n.querySelector(".bubble.bot");
@@ -1340,9 +1428,10 @@ function conversationEntries(): ConvoEntry[] {
       if (!id || !v) continue;
       const badges = [...v.badges.querySelectorAll(".badge, .tag")].map((b) => b.textContent ?? "").filter(Boolean);
       out.push({
+        session: v.session,
         ...(v.annotation ? { annotation: v.annotation } : {}),
         id, user: ownText(v.user) || (v.user.textContent ?? ""), assistant: v.bot.hidden ? "" : v.botText.data, badges,
-        ...(v.detail.hidden ? {} : { detail: v.detailPre.textContent ?? "" }),
+        ...(v.detail.hidden ? {} : { detail: v.detailText }),
         ...(n.classList.contains("held") ? { note: "queued", held: true } : n.classList.contains("queued") ? { note: "not sent yet" } : {}),
       });
     }
@@ -1359,10 +1448,10 @@ function sendConversation(now = false): void {
   const flush = () => {
     convoTimer = null;
     const entries = conversationEntries();
-    const key = JSON.stringify(entries);
+    const key = JSON.stringify({ entries, session: conversationSession });
     if (!now && key === convoSent) return;
     convoSent = key;
-    bridge.send({ type: "conversation", entries });
+    bridge.send({ type: "conversation", entries, session: conversationSession });
   };
   if (now) { if (convoTimer) clearTimeout(convoTimer); flush(); return; }
   convoTimer ??= setTimeout(flush, CONVO_THROTTLE_MS);
@@ -1430,7 +1519,7 @@ function press(how: "manual" | "vad" = "manual"): void {
   // the panel, not in the conversation.
   const pinned = !queued && panelThreadId && threads.has(panelThreadId) ? { threadId: panelThreadId } : {};
   const t: Turn = {
-    out, rec, turnId, tPress: now, audioStarted: Promise.resolve(),
+    out, rec, turnId, tPress: now, audioStarted: Promise.resolve(), threadId: pinned.threadId,
     sentUpTo: now - PRE_ROLL_MS - 1, detailed: new Map(), view: addTurnView(turnId, !pinned.threadId), voice: "", lineStart: 0, solver: "", segmentOpen: false, finished: false,
   };
   turn = t;
@@ -1888,7 +1977,7 @@ function sendComment(text: string, sample: CursorSample | null, threadId?: strin
   view.root.classList.add("comment");
   if (annotation) attachDrawing(view, annotation);
   const q: Queued = { turnId, rec: msgs.map((msg) => ({ msg })), view, comment: text, at: Date.now(), ...(threadId ? { threadId } : {}) };
-  const later = threadId || chat ? "" : !settings.instant ? "" : !player ? "Audio isn't enabled" : !sock.isOpen ? "Server not connected" : isRecording() ? "You're talking" : sending ? "The list is being sent" : "";
+  const later = threadId || chat ? "" : !settings.instant ? "" : !sock.isOpen ? "Server not connected" : isRecording() ? "You're talking" : sending ? "The list is being sent" : "";
   if (!threadId && !chat && (!settings.instant || later)) {
     queue.push(q);
     showQueued(q);
@@ -2161,13 +2250,17 @@ function stopSending(): void {
 /** Send the queue in order, one turn at a time. */
 async function sendQueue(): Promise<void> {
   if (sending || !queue.length) return;
-  if (!player) return setStatus("Click “Enable mic & audio” first.", true);
   if (isRecording()) return setStatus("Finish talking first, then send the queue.", true);
   if (held.length || sendingHeld) return setStatus("Your comments are still being sent; send the list after them.", true);
   if (turn && !turn.finished) cancelTurn(turn, "interrupt");
   sending = true;
   publishQueue();
   while (sending && queue.length) {
+    // Typed feedback has a silent reply and needs no audio setup.
+    if (!player && queue[0]!.comment === undefined) {
+      setStatus("Click “Enable mic & audio” to send voice feedback; the rest stay queued.", true);
+      break;
+    }
     if (!sock.isOpen) {
       setStatus("Server not connected; the rest stay queued.", true);
       break;
@@ -2208,7 +2301,7 @@ function replay(q: Queued): Promise<void> {
     turnId: q.turnId, tPress: (start?.msg.tPress ?? now) + d, tRelease: now,
     tAudioStart: audioStart && audioStart.msg.tAudioStart + d,
     auto: release?.msg.auto, audioStarted: Promise.resolve(), sentUpTo: Infinity, detailed: new Map(), view: v,
-    voice: "", lineStart: 0, solver: "", segmentOpen: false, finished: false, pageDone: true, silent: comment,
+    voice: "", lineStart: 0, solver: "", segmentOpen: false, finished: false, pageDone: true, silent: comment, threadId: q.threadId,
   };
   const ended = new Promise<void>((resolve) => { t.onEnd = resolve; });
   turn = t;
@@ -2250,6 +2343,12 @@ const INTENT_STATUS: Record<RouteIntent, string> = {
 };
 
 sock.on((msg: ServerMsg) => {
+  if (msg.type === "conversation.session") {
+    conversationSession = msg.session;
+    renderConversationSession();
+    sendConversation();
+    return;
+  }
   if ("turnId" in msg && msg.turnId && dictationIds.has(msg.turnId)) return onDictationMsg(msg);
   // A thread's background runs trace with jobId = threadId: no job card will claim them, so don't buffer them.
   if ((msg.type === "llm.prompt" || msg.type === "llm.response") && msg.jobId && threads.has(msg.jobId)) return;
@@ -2282,7 +2381,9 @@ sock.on((msg: ServerMsg) => {
   const v = t.view;
   switch (msg.type) {
     case "stt.partial":
-      v.user.textContent = msg.text || "…";
+      // The finalized words also drive the annotated transcript. Keep the two views in sync
+      // if a late partial from any speech engine arrives after stt.final.
+      if (v.words === undefined) v.user.textContent = msg.text || "…";
       break;
     case "stt.final":
       renderUserText(v, msg.text, msg.words, msg.language);
@@ -2315,8 +2416,7 @@ sock.on((msg: ServerMsg) => {
       break;
     case "solver.text": {
       t.solver += msg.delta;
-      const d = detailOf(t.solver);
-      if (d) { v.detail.hidden = false; v.detailPre.textContent = d; }
+      updateFullAnswer(v, detailOf(t.solver));
       if (!t.voice) setStatus("The solver is thinking…");
       break;
     }
@@ -2337,6 +2437,7 @@ sock.on((msg: ServerMsg) => {
       break;
     case "turn.done": {
       const run = msg.run;
+      if (run.solverText) updateFullAnswer(v, detailOf(run.solverText));
       if (run.annotation) attachDrawing(v, run.annotation);
       const filled = !t.voice && !!run.voiceText; // no voice.text deltas came: the run has the reply
       if (filled) t.voice = run.voiceText;
@@ -2504,6 +2605,9 @@ setInterval(() => {
 }, TICK_MS);
 
 function clearConversation(): void {
+  conversationSession = null;
+  renderConversationSession();
+  sendConversation();
   queueMicrotask(renderSessionCost);
   messages.querySelectorAll(".turn:not(.queued), .job, .job-row, .note").forEach((n) => n.remove());
   centralAsking = false;
@@ -2521,7 +2625,69 @@ function clearConversation(): void {
   drawOverlay();
 }
 
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** What a reset would lose, for the confirmation; null when there's nothing worth asking about. */
+function resetLosses(): string[] | null {
+  const all = [...threads.values()];
+  const working = all.filter((t) => t.state === "running").length;
+  const tasks = [...jobs.values()].filter((c) => c.info.state === "running").length;
+  if (!all.length && !tasks) return null;
+  const lines: string[] = [];
+  if (all.length) {
+    lines.push(`${plural(all.length, "thread")} will be deleted, on every page.`);
+    lines.push(working
+      ? `${working === 1 ? "1 thread is" : `${working} threads are`} still working and will be stopped.`
+      : "None of them are working, so nothing will be stopped.");
+  }
+  if (tasks) lines.push(`${tasks === 1 ? "1 background task is" : `${tasks} background tasks are`} running and will be stopped.`);
+  return lines;
+}
+
+let resetConfirm: HTMLElement | null = null;
+
+function closeResetConfirm(): void {
+  resetConfirm?.remove();
+  resetConfirm = null;
+}
+
+function openResetConfirm(lines: string[]): void {
+  closeResetConfirm();
+  const box = el("div", "reset-confirm");
+  box.setAttribute("role", "alertdialog");
+  box.setAttribute("aria-label", "Clear conversation?");
+  const cancel = el("button", "", "Cancel");
+  const ok = el("button", "danger", "Clear conversation");
+  cancel.type = ok.type = "button";
+  cancel.onclick = closeResetConfirm;
+  ok.onclick = () => { closeResetConfirm(); resetConversation(); };
+  box.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    closeResetConfirm();
+    $("reset").focus();
+  });
+  const actions = el("div", "reset-confirm-actions");
+  actions.append(cancel, ok);
+  box.append(el("strong", "", "Clear conversation?"), ...lines.map((l) => el("p", "", l)), actions);
+  $("reset").after(box);
+  resetConfirm = box;
+  cancel.focus();
+}
+
+// A click anywhere else dismisses the confirmation.
+document.addEventListener("pointerdown", (e) => {
+  if (resetConfirm && !resetConfirm.contains(e.target as Node) && e.target !== $("reset")) closeResetConfirm();
+}, true);
+
 $("reset").onclick = () => {
+  if (resetConfirm) { closeResetConfirm(); return; }
+  const lines = resetLosses();
+  if (lines) openResetConfirm(lines);
+  else resetConversation();
+};
+
+function resetConversation(): void {
   if (turn && !turn.finished) cancelTurn(turn, "stop");
   stopNotice();
   player?.reset();
@@ -2533,7 +2699,7 @@ $("reset").onclick = () => {
   threadsChanged();
   refreshBusy();
   setStatus("New conversation.");
-};
+}
 
 // The server keeps the conversation (and its jobs) per WebSocket connection: after a reconnect it starts fresh.
 {

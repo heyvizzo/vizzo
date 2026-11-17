@@ -15,7 +15,7 @@ import type { LlmChoice } from "../../shared/config.ts";
 import { MAX_LIVE_THREAD_SESSIONS } from "../../shared/threads.ts";
 import { SessionUnavailableError, type AgentSpec, type SessionRef, type SessionStart, type WarmAgent } from "./harnesses.ts";
 import type { HarnessThread, OpenHarnessThread, OpenHarnessThreadOpts, SessionDispatch, SessionMode } from "./types.ts";
-import { agentSpec, releaseSessionAgent, takeSessionAgent } from "./warmPool.ts";
+import { agentSpec, releaseSessionAgent, releaseSessionAgentForResume, takeSessionAgent } from "./warmPool.ts";
 
 type ThreadResult = Awaited<ReturnType<HarnessThread["send"]>>;
 
@@ -47,10 +47,17 @@ class Thread implements HarnessThread {
   private tail: Promise<void> = Promise.resolve();
   private stop: (() => void) | null = null;
   private closed = false;
+  private sessionKey = "";
   busy = false;
   lastUsed = 0;
 
-  constructor(private opts: OpenHarnessThreadOpts) {}
+  constructor(private opts: OpenHarnessThreadOpts) {
+    if (opts.restore) {
+      this.pinned = opts.restore.spec;
+      this.ref = opts.restore.ref;
+      this.begun = true;
+    }
+  }
   get choice(): LlmChoice { return this.opts.choice; }
   get spec(): AgentSpec | undefined { return this.pinned ?? undefined; }
 
@@ -59,6 +66,13 @@ class Thread implements HarnessThread {
   pid(): number | undefined { return this.live ? this.agent!.pid?.() : undefined; }
 
   session(): SessionRef | undefined { return this.agent?.session?.() ?? this.ref; }
+
+  private notifySession(): void {
+    const key = JSON.stringify([this.pinned?.harness, this.pinned?.project, this.session()]);
+    if (key === this.sessionKey) return;
+    this.sessionKey = key;
+    this.opts.onSession?.();
+  }
 
   send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void): Promise<ThreadResult> {
     if (this.closed) return Promise.reject(closedError());
@@ -81,6 +95,19 @@ class Thread implements HarnessThread {
     this.closed = true;
     this.abort();
     this.drop();
+  }
+
+  release(): Promise<void> {
+    // Serialize with sends: finish existing work, release the writer, then allow later Vizzo requests to resume.
+    const released = this.tail.then(async () => {
+      const agent = this.agent;
+      if (!agent) return;
+      this.ref = agent.session?.() ?? this.ref;
+      await releaseSessionAgentForResume(agent);
+      if (this.agent === agent) { this.agent = null; attached.delete(this); }
+    });
+    this.tail = released.catch(() => {});
+    return released;
   }
 
   /** Release the agent (evicted, dead, closed). The saved session stays. */
@@ -158,10 +185,18 @@ class Thread implements HarnessThread {
         }
         agent = at.agent;
         const { mode, message, images } = at;
+        this.notifySession();
         const known = agent.session?.() ?? (mode === "resumed" ? this.ref : undefined);
         onDispatch?.({ mode, message, ...(known ? { sessionId: known.id } : {}), ...(fallback ? { fallback } : {}) });
         const a = agent;
-        const inner = Promise.resolve().then(() => a.request(message, (d) => { if (!aborted) onText?.(d); }, timeoutMs, images));
+        const inner = Promise.resolve().then(() => {
+          const request = a.request(message, (d) => {
+            this.notifySession();
+            if (!aborted) onText?.(d);
+          }, timeoutMs, images);
+          this.notifySession(); // Some harnesses allocate their id synchronously when the request starts.
+          return request;
+        });
         settled = inner.then(() => true, () => true);
         try {
           const r = await Promise.race([inner, stopped]);
@@ -192,6 +227,7 @@ class Thread implements HarnessThread {
     this.lastUsed = ++useSeq;
     // Crashed, killed or timed out: the next request resumes the saved session in a new process.
     if (agent && this.agent === agent && !agent.alive()) this.drop();
+    this.notifySession();
     enforceCap(MAX_LIVE_THREAD_SESSIONS);
   }
 }

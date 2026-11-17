@@ -29,6 +29,7 @@ describe("attention", () => {
   it("counts only required permissions and orders failures first", () => {
     const rows = [
       { id: "microphone", name: "Microphone", ok: false, summary: "Not allowed", instruction: "Allow it." },
+      { id: "full-disk", name: "Full Disk Access", ok: false, optional: true, summary: "Not allowed", instruction: "Allow Safari cookie imports." },
       { id: "chrome-keychain", name: "Chrome keychain", ok: false, optional: true, summary: "Not found", instruction: "Open Chrome." },
     ];
     const problems: Problem[] = [{ tone: "warn", text: "w", section: "stt" }, { tone: "busy", text: "b", section: "tts" }, ...permissionProblems(rows), ...keyProblems(["X"], () => "X key")];
@@ -36,5 +37,6 @@ describe("attention", () => {
     expect(verdict(problems)).toEqual({ tone: "bad", title: "2 things need attention" });
     expect(verdict([{ tone: "busy", text: "b", section: "tts" }])).toEqual({ tone: "busy", title: "Starting up…" });
     expect(verdict([])).toEqual({ tone: "ok", title: "Everything works" });
+    expect(permissionProblems([{ ...rows[0]!, ok: true }, ...rows.slice(1)])).toEqual([]);
   });
 });

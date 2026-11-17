@@ -26,12 +26,14 @@ export class FillerScheduler {
 
   /**
    * @param speak  starts saying one line
+   * @param canSpeak  checked before each line: false ends the lines (the user left the page the turn is about)
    */
   constructor(
     private base: TurnBase,
     lines: Promise<string[]>,
     private speak: (line: string) => FillerTake,
     private gapMs = FILLER_GAP_MS,
+    private canSpeak: () => boolean = () => true,
   ) {
     this.done = lines.then((ls) => this.run(ls), () => {});
   }
@@ -63,6 +65,7 @@ export class FillerScheduler {
         await sleep(POLL_MS);
       }
       if (!this.live) return;
+      if (!this.canSpeak()) { this.stopped = true; return; }
       this.spoken.push(line);
       const take = this.speak(line);
       this.take = take;

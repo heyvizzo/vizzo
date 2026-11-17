@@ -74,6 +74,7 @@ export interface TurnHandlers {
 }
 
 export interface TurnResult {
+  session?: import("../../shared/harnessSession.ts").HarnessSessionInfo;
   transcript: string;
   pointing: PointingTarget[];
   voiceText: string;
@@ -97,6 +98,6 @@ export interface OrchestratorDeps {
   generateFillers?: GenerateFillers;
   /** ElevenLabs voice id (default: process.env.ELEVENLABS_VOICE_ID). */
   voiceId?: string;
-  /** Overall per-turn timeout from turn.start (default 60 s). */
+  /** Speech/routing watchdog from turn.start, reset after solver work (default 60 s). */
   turnTimeoutMs?: number;
 }

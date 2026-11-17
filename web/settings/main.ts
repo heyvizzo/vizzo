@@ -374,7 +374,7 @@ function loadServerState(triesLeft = 30): void {
 loadServerState();
 
 // ── display ────────────────────────────────────────
-for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"], ["capture-trace", "captureTrace"]] as const) {
+for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-full-answers", "showFullAnswers"], ["show-debug", "showDebug"], ["show-solver-session", "showSolverSession"], ["capture-trace", "captureTrace"]] as const) {
   const box = $<HTMLInputElement>(id);
   box.checked = settings[key];
   box.onchange = () => { settings[key] = box.checked; saveSettings(); dashboardChanged(); };
@@ -506,25 +506,49 @@ renderSettings();
 
 // ── cookies ────────────────────────────────────────
 // Importing copies another browser's cookies into the browser pane; Clear empties the pane's. Either reloads the page.
+let permissionRows: PermissionRow[] | undefined;
+let cookiesBusy = false;
+const cookieButtons = [...document.querySelectorAll<HTMLButtonElement>("#cookies button")];
+const cookiePermissions: Record<string, { id: string; name: string; reason: string }> = {
+  chrome: { id: "chrome-keychain", name: "Chrome keychain access", reason: "Importing from Chrome requires Chrome keychain access to decrypt its cookies." },
+  safari: { id: "full-disk", name: "Full Disk Access", reason: "Importing from Safari requires Full Disk Access to read its protected cookies." },
+};
+
+function renderCookieButtons(): void {
+  for (const button of cookieButtons) {
+    const browser = button.dataset.browser;
+    const required = browser ? cookiePermissions[browser] : undefined;
+    const allowed = !required || permissionRows?.some((row) => row.id === required.id && row.ok) === true;
+    button.disabled = cookiesBusy || !allowed;
+    if (required) {
+      const note = $(`cookies-${browser}-permission`);
+      note.hidden = allowed;
+      note.querySelector("span")!.textContent = permissionRows ? required.reason : `Checking ${required.name}…`;
+    }
+  }
+}
+renderCookieButtons();
+
 {
-  const buttons = [...document.querySelectorAll<HTMLButtonElement>("#cookies button")];
   const status = $("cookies-status");
   const show = (text: string, isErr = false) => {
     status.textContent = text;
     status.classList.toggle("error", isErr);
   };
   const run = async (button: HTMLButtonElement, work: () => Promise<void>) => {
-    for (const b of buttons) b.disabled = true;
+    cookiesBusy = true;
+    renderCookieButtons();
     try {
       await work();
     } catch (err) {
       show(err instanceof Error ? err.message : String(err), true);
     } finally {
-      for (const b of buttons) b.disabled = false;
-      button.focus();
+      cookiesBusy = false;
+      renderCookieButtons();
+      if (!button.disabled) button.focus();
     }
   };
-  for (const button of buttons) {
+  for (const button of cookieButtons) {
     const browser = button.dataset.browser;
     button.onclick = () => {
       if (!browser) {
@@ -546,15 +570,15 @@ const permissions = $("permissions");
 const fields = $("fields");
 const saveStatus = $("save-status");
 const savebar = $("savebar");
-let permissionRows: PermissionRow[] | undefined;
 let unreadableKeys: string[] = [];
 
 function renderPermissions(rows: PermissionRow[]): void {
   permissionRows = rows;
+  renderCookieButtons();
   dashboardChanged();
   permissions.replaceChildren(...rows.map((row) => {
     const article = document.createElement("article");
-    article.className = row.ok ? "row ok" : "row";
+    article.className = `row${row.ok ? " ok" : ""}${row.optional ? " optional" : ""}`;
     const dot = document.createElement("span");
     dot.className = "dot";
     dot.title = row.summary;
@@ -567,10 +591,21 @@ function renderPermissions(rows: PermissionRow[]): void {
     summary.className = "summary";
     summary.textContent = " · " + row.summary;
     title.append(name, summary);
+    const kind = document.createElement("span");
+    kind.className = "permission-kind";
+    kind.textContent = row.optional ? "Optional" : "Required";
+    title.append(kind);
+    body.append(title);
+    if (row.description) {
+      const description = document.createElement("p");
+      description.className = "permission-description";
+      description.textContent = row.description;
+      body.append(description);
+    }
     const instruction = document.createElement("p");
     instruction.className = "instruction";
     instruction.textContent = row.instruction;
-    body.append(title, instruction);
+    body.append(instruction);
     if (row.action) {
       const { id, label } = row.action;
       const button = document.createElement("button");
@@ -805,12 +840,12 @@ function renderDashboard(): void {
   const stt = speechLine("stt");
   const tts = speechLine("tts");
   const tierTone = (tier: LlmTier): Tone => serverDown || tierProblems(tier).length ? "bad" : "ok";
-  const perms = permissionRows;
+  const perms = permissionRows?.filter((r) => !r.optional);
   const granted = perms?.filter((r) => r.ok).length ?? 0;
-  const missingRequired = perms?.some((r) => !r.ok && !r.optional) ?? false;
+  const missingRequired = perms?.some((r) => !r.ok) ?? false;
   const keyFields = envFields.filter((f) => !f.param);
   const keysSet = keyFields.filter((f) => envValues[f.key]?.trim()).length;
-  const display = ([["showCost", "Cost"], ["showRam", "RAM"], ["showDebug", "Details"], ["debugOutlines", "Outlines"], ["hoverOutline", "Hover outline"]] as const)
+  const display = ([["showCost", "Cost"], ["showRam", "RAM"], ["showFullAnswers", "Full answers"], ["showDebug", "Details"], ["showSolverSession", "Solver session"], ["debugOutlines", "Outlines"], ["hoverOutline", "Hover outline"]] as const)
     .filter(([k]) => settings[k]).map(([, l]) => l);
   const lines: { label: string; text: string; detail?: string; tone?: Tone; section: Section }[] = [
     { label: "Fast model", text: fast.text, detail: [fast.loads, "router and progress lines"].filter(Boolean).join(" · "), tone: tierTone("fast"), section: "models" },
@@ -818,8 +853,8 @@ function renderDashboard(): void {
     { label: "Speech to text", ...stt, section: "stt" },
     { label: "Text to speech", ...tts, section: "tts" },
     {
-      label: "Permissions", text: perms ? `${granted} of ${perms.length} granted` : "Checking…",
-      detail: perms?.filter((r) => !r.ok).map((r) => r.optional ? `${r.name} (optional)` : r.name).join(", ") || undefined,
+      label: "Permissions", text: perms ? `${granted} of ${perms.length} required ${perms.length === 1 ? "permission" : "permissions"} granted` : "Checking…",
+      detail: perms?.map((r) => `${r.name}: ${r.summary}`).join(" · ") || undefined,
       tone: perms ? (missingRequired ? "bad" : "ok") : "busy", section: "permissions",
     },
     { label: "Turns", text: `Router ${settings.routerMode === "auto" ? "auto (may answer)" : "forced (always the solver)"}`, detail: `Long tasks: over ${settings.longTaskSeconds} s · time limit ${settings.taskTimeoutMinutes} min`, section: "models" },

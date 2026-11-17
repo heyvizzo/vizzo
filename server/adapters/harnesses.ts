@@ -97,6 +97,8 @@ export interface WarmAgent {
   ready(): boolean;
   request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult>;
   kill(): void;
+  /** Finish releasing a saved session's native connection before a terminal can attach. */
+  release?(): Promise<void>;
   /**
    * Sessions: from now on a request doesn't end the session, the next one continues it. Only on a pooled agent not
    * used yet whose conversation is saved (AgentSpec.persist); false = can't (the caller makes a new agent instead).
@@ -777,6 +779,7 @@ class CodexServer {
   private id = 0;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private threads = new Map<string, Notify>();
+  private closedWaiters = new Map<string, Set<() => void>>();
   private stderr = "";
   exited = false;
   readonly ready: Promise<void>;
@@ -794,6 +797,8 @@ class CodexServer {
       const err = new Error(`codex app-server exited (${code}): ${this.stderr.trim().slice(-300)}`);
       for (const p of this.pending.values()) p.reject(err);
       this.pending.clear();
+      for (const waiters of this.closedWaiters.values()) for (const done of waiters) done();
+      this.closedWaiters.clear();
       for (const n of this.threads.values()) n("server/exited", { message: err.message });
     });
     this.proc.on("error", (e) => { this.exited = true; this.stderr += String(e); });
@@ -822,6 +827,10 @@ class CodexServer {
     }
     const params = (m.params ?? {}) as Record<string, unknown>;
     const tid = (params.threadId ?? (params.thread as { id?: string } | undefined)?.id) as string | undefined;
+    if (tid && m.method === "thread/closed") {
+      for (const done of this.closedWaiters.get(tid) ?? []) done();
+      this.closedWaiters.delete(tid);
+    }
     if (tid) this.threads.get(tid)?.(String(m.method), params);
   }
 
@@ -835,6 +844,27 @@ class CodexServer {
   }
 
   listen(threadId: string, fn: Notify | null): void { if (fn) this.threads.set(threadId, fn); else this.threads.delete(threadId); }
+
+  async releaseThread(threadId: string): Promise<void> {
+    if (this.exited) return;
+    let done!: () => void;
+    const closed = new Promise<void>((resolve) => { done = resolve; });
+    const waiters = this.closedWaiters.get(threadId) ?? new Set<() => void>();
+    waiters.add(done);
+    this.closedWaiters.set(threadId, waiters);
+    try {
+      await withTimeout((async () => {
+        const r = await this.call("thread/unsubscribe", { threadId }) as { status?: string };
+        // Unsubscribe only removes the subscription. The writer lock stays until thread/closed.
+        if (r.status !== "notLoaded") await closed;
+      })(), 10_000, "Releasing the Codex session for terminal resume", () => {});
+    } catch (e) {
+      if (!this.exited) throw e;
+    } finally {
+      waiters.delete(done);
+      if (!waiters.size) this.closedWaiters.delete(threadId);
+    }
+  }
 }
 
 /**
@@ -865,6 +895,7 @@ class CodexAgent implements WarmAgent {
   private used = false;
   private failed = false;
   private turnId: string | null = null;
+  private releasing: Promise<void> | null = null;
 
   private readonly kept: boolean;
 
@@ -877,7 +908,8 @@ class CodexAgent implements WarmAgent {
     this.thread = this.server.mcpServers.then((mcp) => {
       const common = {
         ...(spec.model ? { model: spec.model } : {}),
-        config: codexConfig(spec, mcp),
+        // No grace period after unsubscribe: the user may be taking this session over in a terminal.
+        config: { ...codexConfig(spec, mcp), thread_unload_delay_secs: 0 },
         ...(spec.speed === "fast" ? { serviceTier: "priority" } : {}),
         cwd: cwdOf(spec), approvalPolicy: "never", sandbox: "danger-full-access",
         // The router's prompt replaces Codex's own; the solver keeps Codex's (it explains the tools) with ours added.
@@ -966,7 +998,15 @@ class CodexAgent implements WarmAgent {
   kill(): void {
     this.failed = true;
     this.interrupt();
-    if (this.kept && this.threadId) void this.server.call("thread/unsubscribe", { threadId: this.threadId }).catch(() => {});
+    if (this.kept) void this.release().catch(() => {});
+  }
+
+  release(): Promise<void> {
+    this.failed = true;
+    return this.releasing ??= this.thread.then((id) => this.server.releaseThread(id)).catch((e: unknown) => {
+      this.releasing = null;
+      throw e;
+    });
   }
 }
 

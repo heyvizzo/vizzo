@@ -24,6 +24,7 @@ import { COMMENT_CSS, createCommentOverlay } from "../web/cursor/commentOverlay.
 import { INLINE_FORM_CSS, createFormHub, type FormHub } from "../web/cursor/inlineForm.ts";
 import { DRAWING_CSS, createDrawingOverlay } from "../web/cursor/drawingOverlay.ts";
 import { installTooltips } from "./tooltip.ts";
+import { MOMENTUM_MS, installHistoryNav, type NavDir } from "../web/cursor/historyNav.ts";
 
 const SAMPLE_BATCH_MS = 100;
 /** React info for an element is fetched again after this long (the page may have re-rendered it). */
@@ -71,6 +72,26 @@ window.addEventListener("pointerdown", () => talk.pointerdown(), true);
 window.addEventListener("contextmenu", (e) => { if (held && e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault(); }, true);
 window.addEventListener("blur", talkUp);
 window.addEventListener("pagehide", talkUp);
+
+// ── back/forward: the mouse's side buttons and the trackpad's two-finger swipe ──
+
+// Whether history has an entry each way: asked once, then pushed by main on every navigation.
+let history = { back: false, forward: false };
+const setHistory = (state: unknown) => {
+  const s = state as { back?: unknown; forward?: unknown } | null;
+  if (s) history = { back: s.back === true, forward: s.forward === true };
+};
+ipcRenderer.on("page:history-state", (_e, state: unknown) => setHistory(state));
+const historyNav = installHistoryNav({ go: (dir, via) => ipcRenderer.send("page:history", dir, via), can: (dir: NavDir) => history[dir] });
+// DEBUG-HISTORY (temporary)
+for (const type of ["mousedown", "mouseup", "auxclick"]) window.addEventListener(type, (e) => { const m = e as MouseEvent; if (m.button !== 0) ipcRenderer.send("history:debug", `${type} button ${m.button}`); }, true);
+window.addEventListener("wheel", (e) => { if (e.deltaX) ipcRenderer.send("history:debug", `wheel dx ${e.deltaX} dy ${e.deltaY} mode ${e.deltaMode}`); }, { capture: true, passive: true });
+window.addEventListener("keydown", (e) => { if (e.metaKey || e.ctrlKey || e.altKey) ipcRenderer.send("history:debug", `keydown ${e.key} meta ${e.metaKey} ctrl ${e.ctrlKey} alt ${e.altKey}`); }, true);
+// Opened by a swipe just now: the wheel events still coming are that swipe's momentum, not a new one.
+void ipcRenderer.invoke("page:history-state").then((state: { swipedAgo?: unknown } | null) => {
+  setHistory(state);
+  if (typeof state?.swipedAgo === "number" && state.swipedAgo < MOMENTUM_MS) historyNav.momentum();
+});
 
 // ── recording and overlay (once the document exists) ──
 
@@ -178,6 +199,9 @@ function init(): void {
     send: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction | PageHeldAction) => ipcRenderer.send("page:thread", action),
     sampleAt: (x, y) => sampler.sampleAt(x, y),
     forms: hub,
+    copyText: (text) => ipcRenderer.invoke("clipboard:write", text),
+    releaseSession: (id) => ipcRenderer.invoke("session:release", id),
+    continueSession: (id, context) => ipcRenderer.invoke("session:continue", id, context),
   });
   const comments = createCommentOverlay({
     layer: commentLayer,
@@ -310,6 +334,8 @@ function init(): void {
         draw();
         comments.setAlwaysHover(cmd.hover);
         threads.setDetails(cmd.details);
+        threads.setSession(cmd.session);
+        threads.setFullAnswers(cmd.fullAnswers);
         break;
       case "threads":
         threads.setThreads(cmd.threads);
@@ -322,7 +348,7 @@ function init(): void {
         threads.setOrb(cmd.state, cmd.pos);
         break;
       case "conversation":
-        threads.setConversation(cmd.entries);
+        threads.setConversation(cmd.entries, cmd.session);
         break;
       case "held":
         threads.setHeld(cmd.items);

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WebSocket } from "ws";
 import { DEFAULT_CONFIG } from "../shared/config.ts";
 import type { RunRecord, ServerMsg } from "../shared/protocol.ts";
@@ -8,6 +8,8 @@ import { createPipelineOrchestrator } from "./orchestrators/pipeline.ts";
 import { Session } from "./session.ts";
 import { getConversation } from "./conversation.ts";
 import { resetThreadStore } from "./threads/store.ts";
+import type { HarnessThread } from "./adapters/types.ts";
+import { releaseSessionForResume } from "./sessionResume.ts";
 
 class FakeWs extends EventEmitter {
   readonly OPEN = 1;
@@ -35,6 +37,27 @@ async function turn(ws: FakeWs, turnId: string): Promise<RunRecord> {
 describe("Session + element threads", () => {
   const anchor = { pageUrl: "http://localhost/demo.html", selector: "#red", domPath: "body > #red", dataSource: null, label: null, text: null, role: null, tag: "button", bounds: { x: 0, y: 0, width: 1, height: 1 } };
   const msgs = (ws: FakeWs) => ws.sent.filter((m): m is ServerMsg => !Buffer.isBuffer(m));
+
+  it("only releases the requested native session and includes its metadata in reconnect snapshots", async () => {
+    const store = resetThreadStore();
+    const a = store.create(anchor, "red", "task");
+    const b = store.create(anchor, "blue", "task");
+    const releaseA = vi.fn();
+    const releaseB = vi.fn();
+    store.get(a.threadId)!.handle = { session: () => ({ id: "native-a" }), release: releaseA } as unknown as HarnessThread;
+    store.get(b.threadId)!.handle = { session: () => ({ id: "native-b" }), release: releaseB } as unknown as HarnessThread;
+    store.update(a.threadId, (t) => { t.session = { provider: "codex", id: "native-a", resumeCommand: "cd /project && codex resume native-a" }; });
+    const ws = new FakeWs();
+    new Session(ws as unknown as WebSocket, { orchestrators: {}, persist: false });
+    expect(msgs(ws)[0]).toMatchObject({ type: "threads.snapshot", threads: [{ session: { id: "native-a" } }, {}] });
+    expect(msgs(ws)[1]).toEqual({ type: "conversation.session", session: null });
+    await expect(releaseSessionForResume("hthread-1")).rejects.toThrow("no longer available");
+    expect(releaseA).not.toHaveBeenCalled();
+    await releaseSessionForResume("native-a");
+    expect(releaseA).toHaveBeenCalledOnce();
+    expect(releaseB).not.toHaveBeenCalled();
+    ws.emit("close");
+  });
 
   it("snapshot on connect; focus marks the result told; delete removes it everywhere; reset clears all", () => {
     const store = resetThreadStore();

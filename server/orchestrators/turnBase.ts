@@ -153,7 +153,7 @@ export class TurnBase {
   private finished = false;
   private resolveDone!: (r: TurnResult) => void;
   private cleanups: ((reason: CleanupReason) => void)[] = [];
-  private timer: ReturnType<typeof setTimeout>;
+  private timer?: ReturnType<typeof setTimeout>;
   private errors: string[] = [];
 
   constructor(readonly ctx: TurnContext, private opts: TurnBaseOpts) {
@@ -163,7 +163,13 @@ export class TurnBase {
       const extra = this.markMeta[name];
       ctx.mark(name, extra ? { ...meta, ...extra } : meta);
     };
-    const timeoutMs = opts.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
+    this.resetTimeout();
+  }
+
+  /** Start a fresh watchdog for the next phase; solver requests have their own task time limit. */
+  resetTimeout(timeoutMs = this.opts.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS): void {
+    clearTimeout(this.timer);
+    if (this.finished) return;
     this.timer = setTimeout(() => this.fail("timeout", new Error(`turn exceeded ${timeoutMs} ms`)), timeoutMs);
     (this.timer as { unref?: () => void }).unref?.();
   }

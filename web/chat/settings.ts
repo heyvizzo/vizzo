@@ -55,8 +55,12 @@ export interface Settings {
   showRam: boolean;
   /** Show costs and savings (header total, per turn, per task, per thread). */
   showCost: boolean;
-  /** Show each turn's debugging details (decision badges, pointing chips, timings, prompts & responses). */
+  /** Show the expandable full written answer, independently of debugging details. */
+  showFullAnswers: boolean;
+  /** Show each turn's debugging details. */
   showDebug: boolean;
+  /** Show the smart-tier solver's native session ID; clicking it copies the terminal resume command. */
+  showSolverSession: boolean;
   /** Where the conversation orb was dragged to on the page (fractions of the viewport); null: bottom center. */
   orbPos: OrbPos | null;
   /** The keyboard shortcuts (shared/hotkeys.ts); main reads them from here too. */
@@ -66,7 +70,7 @@ export interface Settings {
 /** What the Settings window changes. */
 export const PANEL_KEYS = [
   "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "sttLanguages", "pointingWords", "llm", "llmModels", "ttsVoices", "ttsStyle",
-  "debugOutlines", "hoverOutline", "showRam", "showCost", "showDebug", "captureTrace", "hotkeys", "selectionVersion",
+  "debugOutlines", "hoverOutline", "showRam", "showCost", "showFullAnswers", "showDebug", "showSolverSession", "captureTrace", "hotkeys", "selectionVersion",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
 export const SIDEBAR_KEYS = ["alwaysListen", "listenThreshold", "listenHangMs", "instant", "orbPos"] as const satisfies readonly (keyof Settings)[];
@@ -86,7 +90,7 @@ export function normalizeSettings(saved: unknown): Settings {
     routerMode: "auto", ttsModel: DEFAULT_CONFIG.ttsModel, sttModel: DEFAULT_CONFIG.sttModel, longTaskSeconds: 20,
     taskTimeoutMinutes: DEFAULT_CONFIG.taskTimeoutMinutes,
     sttLanguages: {}, pointingWords: {}, llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
-    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showDebug: false, captureTrace: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
+    ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showFullAnswers: true, showDebug: false, showSolverSession: false, captureTrace: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
   };
   if (saved && typeof saved === "object") Object.assign(settings, saved);
   settings.ttsStyle = { ...DEFAULT_TTS_STYLE, ...settings.ttsStyle };
@@ -124,7 +128,11 @@ export function normalizeSettings(saved: unknown): Settings {
   settings.hoverOutline = settings.hoverOutline === true;
   settings.showRam = settings.showRam === true;
   settings.showCost = settings.showCost === true;
+  settings.showFullAnswers = settings.showFullAnswers !== false;
   settings.showDebug = settings.showDebug === true;
+  // Saved before the solver session had its own switch: it was part of Debugging details.
+  const savedSession = (saved as { showSolverSession?: unknown } | null)?.showSolverSession;
+  settings.showSolverSession = typeof savedSession === "boolean" ? savedSession : settings.showDebug;
   settings.captureTrace = settings.captureTrace === true;
   const o = settings.orbPos;
   settings.orbPos = o && Number.isFinite(o.x) && Number.isFinite(o.y) ? { x: Math.min(1, Math.max(0, o.x)), y: Math.min(1, Math.max(0, o.y)) } : null;

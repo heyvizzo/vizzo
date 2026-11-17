@@ -30,6 +30,28 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
   });
   const http = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (req.method === "POST" && (url.pathname === "/api/sessions/release" || url.pathname === "/api/sessions/continue")) {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let sessionId: unknown;
+      let context: unknown;
+      try { ({ sessionId, context } = JSON.parse(body)); } catch { /* invalid below */ }
+      if (typeof sessionId !== "string" || !sessionId) { res.writeHead(400); return res.end(); }
+      try {
+        if (url.pathname === "/api/sessions/continue") {
+          const { continueConversationSession } = await import("./centralSession.ts");
+          continueConversationSession(sessionId, typeof context === "string" ? context.slice(0, 32_000) : undefined);
+        } else {
+          const { releaseSessionForResume } = await import("./sessionResume.ts");
+          await releaseSessionForResume(sessionId);
+        }
+        res.writeHead(204);
+        return res.end();
+      } catch (e) {
+        res.writeHead(409, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+      }
+    }
     if (req.method === "GET" && url.pathname === "/api/project/events") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       res.write(": connected\n\n");

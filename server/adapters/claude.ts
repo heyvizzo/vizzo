@@ -166,7 +166,7 @@ export function projectNote(harness: LlmProvider, toggles?: HarnessToggles): str
   return [
     `Your working directory is the project you're answering about. Find the code behind the pointed elements ${claude ? "with Glob, Grep and Read" : "with your file search and read tools"}: start from what identifies the element (its JSX location or data-source when given, else its \`selector\` line, data-testid, classes and text), then read the markup, styles and script that render it. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, ${claude ? "make the change with Edit or Write" : "make the change with your file editing tools"}, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`,
     has("shell")
-      ? `You have a shell. Use it to look things up when the request needs it (git log, blame and diff, the project's own type check or tests); the request's git state block shows where things stood when it was sent. Don't commit, push, switch branches, install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served, and the user decides what gets committed.`
+      ? `You have a shell. Use it to look things up when the request needs it (git status, log, blame and diff, the project's own type check or tests). Don't commit, push, switch branches, install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served, and the user decides what gets committed.`
       : `You have no shell, so you can't run git, builds or tests, and the files under .git/ are compressed: don't read them or hunt for other copies of a file. Use the request's git state block (status, recent commits, uncommitted changes), and say plainly when an answer needs history it doesn't show, or when a change should be checked by running something.`,
     ...(has("web") ? [`You can search and fetch the web: use it for documentation the project doesn't contain, never for what the project's own code answers.`] : []),
   ].join(" ");
@@ -582,6 +582,14 @@ export function buildSolverParams(
   };
 }
 
+/** Only solvers without a shell need a snapshot; an existing session's pinned switches take precedence. */
+async function solverGitContext(choice: LlmChoice | undefined, spec?: AgentSpec): Promise<string> {
+  const harness = spec?.harness ?? choice?.provider;
+  const toggles = spec ? spec.toggles : choice?.toggles;
+  if (harness && isHarness(harness) && toggleOn(harness, toggles, "shell", "smart")) return "";
+  return gitContext(projectDir());
+}
+
 export const solveTask: SolveTask = async ({ mark, question, original, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation }) => {
   const t0 = performance.now();
   const choice = choiceFor(llm, "solver");
@@ -594,7 +602,7 @@ export const solveTask: SolveTask = async ({ mark, question, original, pointing,
     onSpokenLine(line);
   });
   const params = attachDrawing(buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues, original), annotation, history);
-  const git = await gitContext(projectDir());
+  const git = await solverGitContext(choice);
   if (git) params.messages.at(-1)!.content += `\n\n${git}`;
   onPrompt?.(harnessPromptInfo("solver", choice, params));
   mark("solver.request", {
@@ -684,7 +692,7 @@ export const solveInThread: SolveInThread = async ({
     mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-  const git = await gitContext(projectDir());
+  const git = await solverGitContext(choice, thread.spec);
   const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues, original) + (annotation ? `\n\n${drawingContext(annotation)}` : "") + (git ? `\n\n${git}` : "");
   const params: ChatParams = { messages: [{ role: "user", content: user }], ...(annotation ? { annotations: [annotation] } : {}) };
   // The prompt goes to the debug view as it is dispatched: with the history or notes the session added, and how the

@@ -5,6 +5,7 @@
 import { isDrawingAnnotation, type DrawingAnnotation } from "../../shared/annotations.ts";
 import type { CursorRest, CursorSample, ElementDetails, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
 import type { ThreadAnchor, ThreadInfo, ThreadSay } from "../../shared/threads.ts";
+import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
 
 /** Chat → page. `start.t` is epoch ms. */
 export type PageCmd =
@@ -22,17 +23,19 @@ export type PageCmd =
   /** The conversation orb (the page as a whole): its state, and where it was dragged to (null: the default spot). */
   | { type: "orb"; state: OrbState; pos: OrbPos | null }
   /** The conversation as the sidebar shows it, for the orb's panel. */
-  | { type: "conversation"; entries: ConvoEntry[] }
+  | { type: "conversation"; entries: ConvoEntry[]; session?: HarnessSessionInfo | null }
   /** Comments typed in a thread's panel that wait for the current turn to end: shown at the bottom of that panel. */
   | { type: "held"; items: HeldComment[] }
   /** Turn released: draw a provisional marker on the element under the pointer until `decision.threadId` arrives. */
   | { type: "provisional"; turnId: string; anchor?: ThreadAnchor } | { type: "provisional.clear"; turnId: string }
   /**
-   * Settings toggles, off until the sidebar says otherwise. outlines (debugging): draw the `overlay` outlines.
+   * Settings toggles. outlines (debugging): draw the `overlay` outlines.
    * hover: the comment mode's hover box on the element under the pointer, outside the mode too.
-   * details: the thread panel's "Full answer" (Debugging → Details).
+   * details: edited files in the panels (off by default).
+   * session: the solver's native session / resume command in the panels (off by default).
+   * fullAnswers: the panels' expandable "Full answer" (on by default).
    */
-  | { type: "debug"; outlines: boolean; hover: boolean; details: boolean }
+  | { type: "debug"; outlines: boolean; hover: boolean; details: boolean; session: boolean; fullAnswers: boolean }
   /** The comment bubble (web/cursor/commentOverlay.ts): Send or Add to list, dictation running, its live words. */
   | { type: "comment.state"; state: CommentState }
   /** Dictated words to insert at the comment field's caret. */
@@ -48,6 +51,9 @@ export interface OrbPos { x: number; y: number }
 
 /** One entry of the conversation (web/chat/main.ts conversationEntries): a turn, a background task, or a line said outside a turn. */
 export interface ConvoEntry {
+  /** Saved task context, independent of the conversation's currently selected session. */
+  session?: HarnessSessionInfo;
+  resumeContext?: string;
   id: string;
   /** What the user said (null: not a turn). */
   user: string | null;
@@ -127,13 +133,15 @@ export interface PageEventsMsg { doc: string; events: PageEvents; final: boolean
 export type PageThreadAction =
   | { type: "thread.focus"; threadId: string }
   | { type: "thread.delete"; threadId: string }
+  /** Stop its active turn and solver, keeping the thread and its draft. Handled by the chat. */
+  | { type: "thread.stop"; threadId: string }
   /** The panel's "Always use the smart model" checkbox. */
   | { type: "thread.smart"; threadId: string; on: boolean };
 
 export function isPageThreadAction(m: unknown): m is PageThreadAction {
   const a = m as { type?: unknown; threadId?: unknown; on?: unknown } | null;
   if (!a || typeof a.threadId !== "string" || !a.threadId) return false;
-  return a.type === "thread.focus" || a.type === "thread.delete" || (a.type === "thread.smart" && typeof a.on === "boolean");
+  return a.type === "thread.focus" || a.type === "thread.delete" || a.type === "thread.stop" || (a.type === "thread.smart" && typeof a.on === "boolean");
 }
 
 /**

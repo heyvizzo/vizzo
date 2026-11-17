@@ -204,6 +204,12 @@ export function releaseSessionAgent(agent: WarmAgent): void {
   if (kept.delete(agent)) releaseShared();
 }
 
+/** Terminal handoff must wait for the native writer to close, rather than just schedule a kill. */
+export async function releaseSessionAgentForResume(agent: WarmAgent): Promise<void> {
+  await agent.release?.();
+  releaseSessionAgent(agent);
+}
+
 /** Every warm pool: role, harness, model, and how many agents wait (and of those, how many finished starting). */
 export function warmStatus(): { role: CliRole; harness: HarnessId; model: string; level?: string; speed?: string; waiting: number; ready: number }[] {
   return [...pools.values()].map((p) => ({

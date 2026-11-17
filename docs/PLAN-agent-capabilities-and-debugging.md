@@ -9,7 +9,7 @@ Status: workstreams 1–4 and 6 implemented, and the capture/persistence half of
 - Every delegated turn of the central conversation runs on one harness session of its own, kept until New conversation (its saved session stays on disk; Vizzo no longer continues it). A long task runs on a session forked from it, so the conversation stays free; its result reaches the central session as a note.
 - Sessions are reused as much as possible; replaying the history as text is only the fallback. Up to 15 live processes (the central session included).
 - A session keeps what it was opened with (harness, model, level, switches, prompt, saved instructions). Changes in Settings, saved instructions included, apply to sessions opened after them; running sessions are not relaunched and not told.
-- Stop and correction interrupt the turn, never the session. Sessions are only ended when their thread is deleted (or New conversation), and the harness's saved session stays so the user can take it over later with the harness's own resume command (UI for that later).
+- Stop and correction interrupt the turn, never the session. Sessions are only ended when their thread is deleted (or New conversation), and the harness's saved session stays so the user can take it over later with the harness's own resume command (click the session ID with Debugging details enabled).
 - Headless harness modes are kept (no terminal/tmux driving): resume and takeover give the full harness when wanted.
 - Local projects are trusted: no untrusted-page-content rule or sandbox change. A one-time notice says what the migration turned on.
 

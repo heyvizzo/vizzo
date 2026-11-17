@@ -41,6 +41,32 @@ export function reminderText(titles: readonly string[], language?: string): stri
     : `The tasks on ${joinTitles(uniq, language)} finished. Want to hear about them?`;
 }
 
+/**
+ * A page as it's said aloud: the last meaningful part of its path ("…/pricing.html" → "the pricing page"), the
+ * home page for "/" or an index.
+ */
+export function pageName(url: string, language?: string): string {
+  let path = "";
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    path = url.split(/[?#]/)[0] ?? "";
+  }
+  const parts = path.split("/").map((p) => decodeURIComponent(p).replace(/\.[a-z0-9]+$/i, "")).filter(Boolean);
+  const name = parts.reverse().find((p) => !/^(index|default|home)$/i.test(p) && !/^[0-9a-f-]{6,}$/i.test(p) && !/^\d+$/.test(p));
+  const words = name?.replace(/[-_+.]+/g, " ").trim();
+  if (isRo(language)) return words ? `pagina ${words}` : "pagina principală";
+  return words ? `the ${words} page` : "the home page";
+}
+
+/** A thread finished while the user was on another page: the full result waits until they're back there. */
+export function awayText(title: string, pageUrl: string, language?: string): string {
+  const page = pageName(pageUrl, language);
+  return isRo(language)
+    ? `Sarcina pentru ${title} de pe ${page} s-a terminat. Îți spun despre ea când te întorci acolo, sau întreabă-mă.`
+    : `The task on ${title} on ${page} finished. I'll tell you about it when you're back there, or just ask.`;
+}
+
 /** Spoken when a thread's run failed. */
 export function failureText(title: string, language?: string): string {
   return isRo(language) ? `Sarcina pentru ${title} nu a reușit.` : `The task on ${title} failed.`;

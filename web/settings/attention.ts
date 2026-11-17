@@ -17,7 +17,7 @@ export const isSection = (s: unknown): s is Section => (SECTIONS as readonly unk
 
 /** One thing to fix (or wait for). `focusKey`: the API key field it's about. */
 export interface Problem { tone: Tone; text: string; section: Section; focusKey?: string }
-export interface PermissionRow { id: string; name: string; ok: boolean; optional?: boolean; summary: string; instruction: string; action?: { id: string; label: string } }
+export interface PermissionRow { id: string; name: string; ok: boolean; optional?: boolean; summary: string; description?: string; instruction: string; action?: { id: string; label: string } }
 export type ProviderInfo = Omit<HarnessScan, "models" | "error">;
 /** The picked speech model and what its row says. */
 export interface SpeechStatus { row: ModelRow; notes: RowNote[]; voice?: string }

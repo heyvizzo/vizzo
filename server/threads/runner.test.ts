@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setBrowserUrl } from "../browserPage.ts";
 import { DEFAULT_CONFIG } from "../../shared/config.ts";
 import type { ServerMsg } from "../../shared/protocol.ts";
 import type { ThreadAnchor } from "../../shared/threads.ts";
@@ -29,6 +30,7 @@ beforeEach(() => {
   store = resetThreadStore();
   sent = [];
 });
+afterEach(() => setBrowserUrl(null));
 
 const deps = (sc: Partial<FakeScenario> = {}) => createFakeDeps(FAST_TIMING, { ...DEFAULT_SCENARIO, threadRunMs: 30, ...sc });
 const subscribe = () => {
@@ -81,19 +83,23 @@ describe("thread runner", () => {
     const p2 = submitRun(t.threadId, spec("and round it", "followup"), d);
     await until(() => d.log.threadSends.length === 1);
     expect(cancelRun(t.threadId)).toBe(true);
+    expect(cancelRun(t.threadId)).toBe(false); // turn.cancel and task.stop can arrive before abort settles
+    expect(store.info(t.threadId)!.messages.filter((m) => m.kind === "stopped")).toHaveLength(1);
+    // A correction can be submitted immediately, while the aborted request is still settling.
+    const next = submitRun(t.threadId, spec("make it blue"), d);
     expect(await p1).toBeNull();
     expect(await p2).toBeNull();
     expect(d.log.threadAborts).toEqual(["thread#1"]);
     const info = store.info(t.threadId)!;
-    expect(info.state).toBe("idle");
+    expect(info.state).toBe("running"); // the replacement request is already queued
     expect(info.messages.at(-1)).toMatchObject({ role: "system", kind: "stopped" });
     expect(info.messages.some((m) => m.kind === "result")).toBe(false);
     expect(says()).toEqual([]);
-    expect(cancelRun(t.threadId)).toBe(false); // nothing running now
     // Same session, next request.
-    const r = await submitRun(t.threadId, spec("make it blue"), d);
+    const r = await next;
     expect(r?.spoken).toMatch(/^Done: make it blue/);
     expect(d.log.threadSends.map((s) => s.threadId)).toEqual(["thread#1", "thread#1"]);
+    expect(store.info(t.threadId)!.state).toBe("idle");
   });
 
   it("reconcile: overlapping runs that touched a same file → one follow-up on the later-finishing thread", async () => {
@@ -144,6 +150,53 @@ describe("thread runner", () => {
     await until(() => store.info(t3.threadId)!.unread === false);
     expect(store.info(t3.threadId)!.state).toBe("idle");
     expect(store.info(t1.threadId)!.state).toBe("pending"); // the reminder never tells the result itself
+  });
+
+  it("finished while the user is on another page: a line naming its page, then the full result once they're back", async () => {
+    subscribe();
+    setBrowserUrl("http://localhost/pricing.html");
+    const t = store.create(anchor("#red"), "the red button", "task");
+    await submitRun(t.threadId, spec("bigger"), deps());
+    await until(() => says().length === 1);
+    expect(says()[0]).toMatchObject({ threadId: t.threadId, text: "The task on the red button on the demo page finished. I'll tell you about it when you're back there, or just ask." });
+    expect(store.info(t.threadId)).toMatchObject({ state: "pending", unread: true });
+    setBrowserUrl("http://localhost/about.html"); // another page: still held
+    await new Promise((r) => setTimeout(r, 50));
+    expect(says()).toHaveLength(1);
+    setBrowserUrl("http://localhost/demo.html#top");
+    await until(() => says().length === 2);
+    expect(says()[1]).toMatchObject({ threadId: t.threadId, text: "Done: bigger" });
+    await until(() => store.info(t.threadId)!.unread === false);
+    expect(store.info(t.threadId)!.state).toBe("idle");
+  });
+
+  it("a held result the user already heard about (opened its panel) isn't read out again on return", async () => {
+    subscribe();
+    setBrowserUrl("http://localhost/pricing.html");
+    const t = store.create(anchor("#red"), "the red button", "task");
+    await submitRun(t.threadId, spec("bigger"), deps());
+    await until(() => says().length === 1);
+    store.focus(t.threadId);
+    setBrowserUrl("http://localhost/demo.html");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(says()).toHaveLength(1);
+  });
+
+  it("a failure on the focused thread is spoken only while the user is on its page", async () => {
+    subscribe();
+    setBrowserUrl("http://localhost/pricing.html");
+    const t = store.create(anchor("#red"), "the red button", "task");
+    const d = deps();
+    d.solveInThread = async () => { throw new Error("fake thread: 500"); };
+    await submitRun(t.threadId, spec("bigger"), d).catch(() => {});
+    await until(() => store.info(t.threadId)!.state === "failed");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(says()).toEqual([]);
+    expect(store.info(t.threadId)!.messages.at(-1)).toMatchObject({ kind: "error" });
+    setBrowserUrl("http://localhost/demo.html"); // on its page, the next failure is spoken
+    await submitRun(t.threadId, spec("smaller"), d).catch(() => {});
+    await until(() => says().length === 1);
+    expect(says()[0]).toMatchObject({ threadId: t.threadId, text: "The task on the red button failed." });
   });
 
   it("replay: the thread's history as plain text, up to the current request", () => {

@@ -8,6 +8,7 @@
 // (0,0), so everything is placed in document coords. While the mode is on, clicks on the page are swallowed.
 import type { CursorSample } from "../../shared/protocol.ts";
 import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
+import { enablePanelDrag } from "./panelDrag.ts";
 
 export { insertAtCaret } from "./inlineForm.ts";
 
@@ -24,7 +25,9 @@ export const COMMENT_CSS = `
 .cm-pin { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border-radius: 50% 50% 50% 0; border: 2px solid #fff; background: var(--ui-accent-fill); box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 1px 4px rgba(0,0,0,.35); pointer-events: none; }
 .cm-bubble { position: absolute; width: ${BUBBLE_WIDTH}px; box-sizing: border-box; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 14px; box-shadow: 0 8px 28px var(--ui-shadow); pointer-events: auto; text-align: left; cursor: default; }
 .cm-bubble.nudge { animation: cm-nudge .35s ease-in-out; }
-.cm-head { display: flex; align-items: center; gap: 6px; padding: 0 0 0 4px; }
+.cm-head { display: flex; align-items: center; gap: 6px; padding: 0 0 0 4px; cursor: grab; touch-action: none; user-select: none; }
+.cm-bubble.dragging { user-select: none; }
+.cm-bubble.dragging .cm-head { cursor: grabbing; }
 .cm-title { flex: 1; min-width: 0; font-size: 12px; color: var(--ui-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cm-title b { color: var(--ui-text); font-weight: 600; }
 .cm-close { flex: none; width: 22px; height: 22px; padding: 0; font: 15px/20px ui-sans-serif, system-ui, sans-serif; color: var(--ui-muted); background: transparent; border: 0; border-radius: 50%; cursor: pointer; }
@@ -113,6 +116,8 @@ interface Draft {
   y: number;
   pin: HTMLElement;
   bubble: HTMLElement;
+  /** A dragged bubble keeps its document position until closed. */
+  position: { left: number; top: number } | null;
   queued: HTMLElement;
   form: InlineForm;
 }
@@ -232,7 +237,12 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
   }
 
   function placeBubble(d: Draft): void {
-    const { left, top } = bubblePosition(d.x, d.y, BUBBLE_WIDTH, d.bubble.offsetHeight || 90, view());
+    const height = d.bubble.offsetHeight || 90;
+    const v = view();
+    const { left, top } = d.position ? {
+      left: Math.max(v.sx + GAP, Math.min(d.position.left, v.sx + v.vw - BUBBLE_WIDTH - GAP)),
+      top: Math.max(v.sy + GAP, Math.min(d.position.top, v.sy + v.vh - height - GAP)),
+    } : bubblePosition(d.x, d.y, BUBBLE_WIDTH, height, v);
     d.bubble.style.left = `${left}px`;
     d.bubble.style.top = `${top}px`;
   }
@@ -280,13 +290,17 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     head.append(title, close);
     const queued = h("div", "cm-queued");
     const d: Draft = {
-      sample: hit.sample, el: hit.el, x: x + scrollX, y: y + scrollY, pin, bubble, queued,
+      sample: hit.sample, el: hit.el, x: x + scrollX, y: y + scrollY, pin, bubble, queued, position: null,
       form: forms.create({
         placeholder: `What should change? Type, or ${talkHint()} to talk`,
         submit: (text) => submit(d, text),
         escape: (empty) => { if (empty) closeDraft(); else d.form.field.blur(); },
       }),
     };
+    enablePanelDrag(bubble, ".cm-head", (left, top) => {
+      d.position = { left: left + scrollX, top: top + scrollY };
+      placeBubble(d);
+    });
     bubble.append(head, queued, d.form.root);
     layer.append(pin, bubble);
     draft = d;

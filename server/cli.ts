@@ -28,6 +28,14 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   // PROJECT_DIR=/path/to/project: the folder the demo page and the solver read (checked before anything starts).
   try { setProjectDir(process.env.PROJECT_DIR); } catch (e) { console.error(`[server] ${(e as Error).message}`); process.exit(1); }
   const opts = process.env.FAKE_VENDORS === "1" ? await fakeVendorOpts() : {};
+  // Threads are kept between runs, like in the app (fake vendors: not saved).
+  if (opts.persist !== false) {
+    const { threadStore } = await import("./threads/store.ts");
+    const { threadsFile } = await import("./threads/persist.ts");
+    const store = threadStore();
+    store.persistTo(threadsFile());
+    for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => { store.flush(); process.exit(0); });
+  }
   try {
     await startServer(port, opts);
   } catch (e) {
