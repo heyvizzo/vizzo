@@ -154,6 +154,20 @@ async function main() {
   send({ type: 'thread.removed', threadId: 't1' });
   await until(async () => await listed() === 3, 'single deletion confirmed');
 
+  // The server already removed a good target before this request ran. Only the correlated acknowledgment arrives.
+  await evaluate('document.querySelector(".thread-del").click()');
+  await until(() => previews().length === 5, 'another deletion preview requested');
+  assert.deepEqual(previews()[4].threadIds, ['t2']);
+  reply(previews()[4], states);
+  await until(() => mutations().length === 3, 'another deletion sent');
+  send({ type: 'thread.delete.done', requestId: mutations()[1].requestId });
+  send({ type: 'thread', thread: { ...threads[2], title: 'Still here' } });
+  await until(() => evaluate('document.querySelector(".thread-item[data-thread-id=t3] .thread-title").textContent === "Still here"'), 'stale acknowledgment processed');
+  assert.equal(await listed(), 3, 'old acknowledgment does not remove the new target');
+  assert.equal(await evaluate('document.getElementById("threads-clear").disabled'), true, 'old acknowledgment does not release the new mutation');
+  send({ type: 'thread.delete.done', requestId: mutations()[2].requestId });
+  await until(async () => await listed() === 2 && await evaluate('!document.getElementById("threads-clear").disabled'), 'correlated acknowledgment completes an already-applied deletion');
+
   // Reset during a sent turn. It sends one mutation, with no earlier turn.cancel or task.stop.
   send({ type: 'threads.snapshot', threads });
   send({ type: 'job', job: { jobId: 'working-job', state: 'running', question: 'Background', startedAt: 0 } });
@@ -166,8 +180,8 @@ async function main() {
   })()`);
   await until(() => received.some(m => m.type === 'turn.release'), 'turn in flight');
   await clickReset();
-  await until(() => previews().length === 5, 'reset preflights before cancellation');
-  reply(previews()[4], states);
+  await until(() => previews().length === 6, 'reset preflights before cancellation');
+  reply(previews()[5], states);
   await until(confirmReady, 'reset shows commit, keep and work warning');
   assert.match(await confirmText(), /1 background task is running and will be stopped/);
   chat.webContents.send('page:comment', { type: 'comment.send', threadId: 't1', text: 'A follow-up held locally after the preview',
@@ -175,13 +189,13 @@ async function main() {
   await until(() => heldFeedback.some(c => c.threadId === 't1'), 'new follow-up waits behind the active turn');
   await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
   await until(() => resets() === 1, 'reset sent');
-  assert.deepEqual(mutations().map(m => m.type), ['threads.delete', 'thread.delete', 'conversation.reset']);
-  assert.deepEqual(mutations()[2].threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'a newly held follow-up also caps the mode at keep');
+  assert.deepEqual(mutations().map(m => m.type), ['threads.delete', 'thread.delete', 'thread.delete', 'conversation.reset']);
+  assert.deepEqual(mutations()[3].threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'a newly held follow-up also caps the mode at keep');
   assert.equal(await confirmText(), null);
   assert.equal(await listed(), 4, 'reset keeps threads during durable handoff');
   assert.equal(await evaluate('!!document.querySelector(".turn")'), true, 'conversation remains until reset completes');
   send({ type: 'threads.snapshot', threads: [] });
-  send({ type: 'conversation.reset.done', requestId: mutations()[2].requestId });
+  send({ type: 'conversation.reset.done', requestId: mutations()[3].requestId });
   await until(async () => await listed() === 0 && await evaluate('!document.querySelector(".turn")'), 'reset acknowledgment clears conversation');
 
   // Nothing to lose: no question.

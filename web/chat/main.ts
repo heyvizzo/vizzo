@@ -2428,8 +2428,17 @@ const INTENT_STATUS: Record<RouteIntent, string> = {
   answer: "Answering…",
 };
 
-sock.on((msg: ServerMsg) => {
+sock.on((msg: ServerMsg | { type: "thread.delete.done"; requestId?: string }) => {
   if (msg.type === "thread.delete.preview") return deletePreviews.get(msg.requestId)?.(msg.threads);
+  if (msg.type === "thread.delete.done") {
+    if (!pendingDelete || pendingDelete.reset || pendingDelete.requestId !== msg.requestId) return;
+    // An already-removed thread can complete without another thread.removed broadcast.
+    for (const id of pendingDelete.waiting) {
+      threads.delete(id);
+      threadRemovalConfirmed(id);
+    }
+    return threadsChanged();
+  }
   if (msg.type === "conversation.reset.done") {
     if (!pendingDelete?.reset || pendingDelete.requestId !== msg.requestId) return;
     pendingDelete = null;
