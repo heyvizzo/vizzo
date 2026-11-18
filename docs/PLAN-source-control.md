@@ -482,3 +482,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Startup verifies the worktree's ref transaction has settled before concluding an unfinished publication failed
   or releasing its abandoned index lock. In both ref formats, a Git child survived its parent with `commit`
   queued while the branch and reflog still showed the base. A competing ref verification detects that window.
+- A selected entry that converts to the same mode and blob as its base is refused before publication. In the
+  observed CRLF case, the entry stayed dirty in the working folder under unselected attributes. An empty tree
+  change would create a commit while dropping ownership of bytes that were still uncommitted.
