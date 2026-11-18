@@ -113,14 +113,10 @@ export class CliAgent {
       let text = "";
       let stopReason: string | null = null;
       let assistant: unknown = null;
-      const done = (fn: () => void, end = !keep) => {
+      const complete = (fn: () => void) => {
         clearTimeout(timer);
         clearTimeout(grace);
         this.listeners.delete(listener);
-        if (end) {
-          try { this.proc.stdin.end(); } catch { /* already closed */ }
-          setTimeout(() => this.kill(), keep ? 0 : 2000).unref();
-        }
         fn();
         settle();
       };
@@ -128,6 +124,7 @@ export class CliAgent {
         new Error(`${this.bin} (${this.role}) timed out after ${timeoutMs} ms`), { name: "TimeoutError" },
       );
       let overtime = false;
+      let sawResult = false;
       let grace: NodeJS.Timeout | undefined;
       const timer = setTimeout(() => {
         overtime = true;
@@ -136,6 +133,17 @@ export class CliAgent {
         reject(timedOut());
         if (!handlers.turn) grace = setTimeout(force, INTERRUPT_GRACE_MS).unref();
       }, timeoutMs);
+      const result = (fn: () => void) => {
+        sawResult = true;
+        clearTimeout(timer);
+        if (!keep) this.proc.stdin.end();
+        if (overtime || handlers.turn?.stopping) {
+          void this.native.waitForStoppedTurn(keep).then(() => complete(fn));
+        } else {
+          if (!keep) setTimeout(() => this.kill(), 2000).unref();
+          complete(fn);
+        }
+      };
       const listener = (ev: Record<string, unknown>): void => {
         handlers.onEvent?.(ev);
         if (ev.type === "stream_event") {
@@ -148,16 +156,15 @@ export class CliAgent {
           }
         } else if (ev.type === "assistant") {
           assistant = ev.message ?? ev;
-        } else if (ev.type === "result") {
+        } else if (ev.type === "result" && !sawResult) {
           const r = ev as { subtype?: string; is_error?: boolean; result?: string; usage?: unknown; total_cost_usd?: number; duration_ms?: number; duration_api_ms?: number; modelUsage?: Record<string, unknown> };
-          clearTimeout(grace);
-          if (overtime) { done(() => reject(timedOut())); return; }
+          if (overtime) { result(() => reject(timedOut())); return; }
           if (r.is_error || (r.subtype && r.subtype !== "success")) {
-            done(() => reject(new Error(`${this.bin} (${this.role}) failed: ${r.subtype ?? "error"}: ${String(r.result ?? "").slice(0, 300)}`)));
+            result(() => reject(new Error(`${this.bin} (${this.role}) failed: ${r.subtype ?? "error"}: ${String(r.result ?? "").slice(0, 300)}`)));
             return;
           }
           const model = (assistant as { model?: string } | null)?.model ?? Object.keys(r.modelUsage ?? {})[0];
-          done(() => resolve({
+          result(() => resolve({
             text: text || (typeof r.result === "string" ? r.result : ""), stopReason, usage: r.usage,
             cliCostUsd: r.total_cost_usd, durationMs: r.duration_ms, durationApiMs: r.duration_api_ms, model,
             raw: { result: ev, assistant }, warm,
@@ -167,7 +174,7 @@ export class CliAgent {
       this.listeners.add(listener);
       this.exit.then((code) => {
         // `exitedEarly`: the process went before a result (a session that couldn't be resumed ends this way).
-        if (this.listeners.has(listener)) done(() => reject(Object.assign(new Error(`${this.bin} (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`), { exitedEarly: true })));
+        if (!sawResult) complete(() => reject(Object.assign(new Error(`${this.bin} (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`), { exitedEarly: true })));
       });
       if (this.paused) this.native.start();
       if (user === null) this.proc.stdin.end();
