@@ -485,3 +485,5 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - A selected entry that converts to the same mode and blob as its base is refused before publication. In the
   observed CRLF case, the entry stayed dirty in the working folder under unselected attributes. An empty tree
   change would create a commit while dropping ownership of bytes that were still uncommitted.
+- `server/instructions.ts` also needs the solver's commit rule. Its built-in text previously treated a saved
+  request as standing authorization to commit. Project-scoped instructions now use the execution's pinned folder.
