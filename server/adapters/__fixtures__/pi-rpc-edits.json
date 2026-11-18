@@ -1,0 +1,28 @@
+{
+  "version": "0.73.1",
+  "description": "Real Pi RPC tool events from a loopback deterministic model. The reconnect responses retain only session fields with sanitized IDs and paths. Identical edits used LF, no final newline, CRLF, and UTF-8 BOM files. created.txt and empty.txt were initially absent. overwrite.txt had prior content.",
+  "boot": {"id": "boot-fixture", "type": "response", "command": "get_state", "success": true, "data": {"sessionId": "fixture-pi-session", "sessionFile": "/fixture/sessions/pi.jsonl", "messageCount": 0}},
+  "events": [
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_0", "toolName": "edit", "args": {"path": "normal.txt", "edits": [{"oldText": "old", "newText": "new"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_0", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Successfully replaced 1 block(s) in normal.txt."}], "details": {"diff": " 1 header\n-2 old\n+2 new\n 3 footer", "firstChangedLine": 2}}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_1", "toolName": "edit", "args": {"path": "no-newline.txt", "edits": [{"oldText": "old", "newText": "new"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_1", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Successfully replaced 1 block(s) in no-newline.txt."}], "details": {"diff": " 1 header\n-2 old\n+2 new\n 3 footer", "firstChangedLine": 2}}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_2", "toolName": "edit", "args": {"path": "crlf.txt", "edits": [{"oldText": "old", "newText": "new"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_2", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Successfully replaced 1 block(s) in crlf.txt."}], "details": {"diff": " 1 header\n-2 old\n+2 new\n 3 footer", "firstChangedLine": 2}}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_3", "toolName": "edit", "args": {"path": "bom.txt", "edits": [{"oldText": "old", "newText": "new"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_3", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Successfully replaced 1 block(s) in bom.txt."}], "details": {"diff": " 1 header\n-2 old\n+2 new\n 3 footer", "firstChangedLine": 2}}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_4", "toolName": "edit", "args": {"path": "eof.txt", "edits": [{"oldText": "old", "newText": "old\n"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_4", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Successfully replaced 1 block(s) in eof.txt."}], "details": {"diff": "-1 old\n+1 old", "firstChangedLine": 1}}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_5", "toolName": "write", "args": {"path": "created.txt", "content": "fresh content\n"}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_5", "toolName": "write", "result": {"content": [{"type": "text", "text": "Successfully wrote 14 bytes to created.txt"}]}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_6", "toolName": "write", "args": {"path": "overwrite.txt", "content": "fresh content\n"}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_6", "toolName": "write", "result": {"content": [{"type": "text", "text": "Successfully wrote 14 bytes to overwrite.txt"}]}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_7", "toolName": "write", "args": {"path": "empty.txt", "content": ""}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_7", "toolName": "write", "result": {"content": [{"type": "text", "text": "Successfully wrote 0 bytes to empty.txt"}]}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_8", "toolName": "edit", "args": {"path": "missing.txt", "edits": [{"oldText": "old", "newText": "never applies"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_8", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Could not edit file: missing.txt. Error code: ENOENT."}], "details": {}}, "isError": true},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_9", "toolName": "edit", "args": {"path": "normal.txt", "edits": [{"oldText": "not found", "newText": "never applies"}]}},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_9", "toolName": "edit", "result": {"content": [{"type": "text", "text": "Could not find the exact text in normal.txt. The old text must match exactly including all whitespace and newlines."}], "details": {}}, "isError": true}
+  ],
+  "reconnect": {"id": "reconnect-fixture", "type": "response", "command": "get_state", "success": true, "data": {"sessionId": "fixture-pi-session", "sessionFile": "/fixture/sessions/pi.jsonl", "messageCount": 22}}
+}
