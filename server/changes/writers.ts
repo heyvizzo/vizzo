@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LlmProvider } from "../../shared/config.ts";
 import type { NativeProcessIdentity } from "../adapters/nativeProcess.ts";
 import type { EditChange } from "./evidence.ts";
+import { isLedgerLeaseRefused } from "./ledgerLease.ts";
 import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
 
@@ -74,7 +75,12 @@ export class WriterRegistry {
   }
 
   async project(folder: string): Promise<ProjectDiscovery> {
-    await this.restore();
+    try { await this.restore(); }
+    catch (error) {
+      // A voice process that never opened the journal can run solvers without registering them.
+      if (isLedgerLeaseRefused(error)) return { reason: error.message };
+      throw error;
+    }
     return this.ledger().discover(folder);
   }
 
