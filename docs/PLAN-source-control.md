@@ -479,3 +479,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - A partial patch that exactly matches multiple recorded versions remains Other. Choosing the newest match would
   let a repeated line at the same offset assign a user's deletion to the wrong writer. Explicit patch positions
   are retained when assigning owners so a new diff cannot move an edit between identical lines.
+- Startup verifies the worktree's ref transaction has settled before concluding an unfinished publication failed
+  or releasing its abandoned index lock. In both ref formats, a Git child survived its parent with `commit`
+  queued while the branch and reflog still showed the base. A competing ref verification detects that window.
