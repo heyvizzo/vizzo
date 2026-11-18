@@ -14,6 +14,7 @@ import { setAgentFactory, stopWarm } from "../adapters/warmPool.ts";
 import { startServer } from "../index.ts";
 import { resetSelectionCache } from "../llmSelection.ts";
 import { ChangesService } from "./changesService.ts";
+import { IndexLock } from "./gitPublication.ts";
 import type { ChangesHttpOptions } from "./http.ts";
 import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import { WriterRegistry, type ExecutionOutcome } from "./writers.ts";
@@ -90,7 +91,14 @@ async function setup(opts: ChangesHttpOptions = {}, format = "files") {
     expect(response.status).toBe(200);
     return await response.json() as ChangesView;
   };
-  return { edit, writer, put, git, original, root, scope, otherScope, folder, project, service, ledger, server, baseUrl, api, post, status, review };
+  const losePreparedIndex = () => {
+    const journal = ledger.checkpointCommit.bind(ledger);
+    vi.spyOn(ledger, "checkpointCommit").mockImplementation(async (record, proof) => {
+      await journal(record, proof);
+      if (record.phase === "index-ready" && record.step === "install") unlinkSync(join(root, ".git", "index.lock"));
+    });
+  };
+  return { edit, writer, put, git, original, root, scope, otherScope, folder, project, service, ledger, server, baseUrl, api, post, status, review, losePreparedIndex };
 }
 
 it("validates HTTP shapes, reviews and exact diff scope, and broadcasts readiness and project changes to local WebSockets", async () => {
@@ -195,15 +203,16 @@ it("uses the saved fast-tier harness with tools and the project directory disabl
   expect(Object.values(specs[0]?.toggles ?? {})).not.toContain(true);
 });
 
-it("refuses publication if the served scope changes after freezing under the locks", async () => {
-  const repo = await setup();
+it.each(["files", "reftable"])("refuses publication when the served scope changes during the final index-lock check on %s refs", async (format) => {
+  const repo = await setup({}, format);
   await repo.edit("A", "shared.txt", BASE, WITH_FIRST);
   const view = await repo.review();
-  const checkpoint = repo.ledger.checkpointCommit.bind(repo.ledger);
-  vi.spyOn(repo.ledger, "checkpointCommit").mockImplementation(async (record, proof) => {
-    await checkpoint(record, proof);
-    if (record.phase === "index-ready" && record.step === "publish") await repo.service.scanner.setProject(repo.otherScope);
+  const assertOwned = IndexLock.prototype.assertOwned;
+  const check = vi.spyOn(IndexLock.prototype, "assertOwned").mockImplementation(async function (this: IndexLock) {
+    await assertOwned.call(this);
+    await repo.service.scanner.setProject(repo.otherScope);
   });
+  cleanup.push(() => { check.mockRestore(); });
   const response = await repo.post("/commit", { project: repo.project, generation: view.generation,
     components: view.groups[0]!.own, message: "Refuse stale served scope", separately: false });
   expect(await response.json()).toMatchObject({ reason: "Changed meanwhile: review again" });
@@ -361,11 +370,7 @@ it("offers only real scoped recovery and restart actions, and refuses untrusted 
   expect(await (await repo.post("/restart", restartCodex, { origin: repo.baseUrl, "sec-fetch-site": "same-origin" })).json()).toEqual({ ok: true });
   expect(restart).toHaveBeenCalledExactlyOnceWith("codex");
 
-  const journal = repo.ledger.checkpointCommit.bind(repo.ledger);
-  vi.spyOn(repo.ledger, "checkpointCommit").mockImplementation(async (record, proof) => {
-    await journal(record, proof);
-    if (record.phase === "index-ready" && record.step === "install") unlinkSync(join(repo.root, ".git", "index.lock"));
-  });
+  repo.losePreparedIndex();
   const committed = await repo.post("/commit", commit, { origin: repo.baseUrl });
   const published = repo.git("rev-parse", "HEAD").trim();
   expect(committed.status).toBe(409);
@@ -393,6 +398,41 @@ it("offers only real scoped recovery and restart actions, and refuses untrusted 
   expect(repo.git("show", ":project/shared.txt")).toBe(WITH_FIRST);
   expect((await repo.post("/fix", fix)).status).toBe(409);
   expect(await (await repo.api(`/jobs?project=${repo.project}`)).json()).toMatchObject({ jobs: [] });
+});
+
+it.each(["files", "reftable"])("leaves the index unchanged when Fix loses its scope during pre-install checks on %s refs", async (format) => {
+  const repo = await setup({}, format);
+  await repo.edit("A", "shared.txt", BASE, WITH_FIRST);
+  const view = await repo.review();
+  repo.losePreparedIndex();
+  const response = await repo.post("/commit", { project: repo.project, generation: view.generation,
+    components: view.groups[0]!.own, message: "Publish without installing staging", separately: false });
+  expect(response.status).toBe(409);
+  const published = repo.git("rev-parse", "HEAD").trim();
+  expect(await response.json()).toMatchObject({ commits: [published] });
+  const { jobs } = await (await repo.api(`/jobs?project=${repo.project}`)).json();
+  const fix = { project: repo.project, jobId: jobs[0].id };
+  const index = join(repo.root, ".git", "index");
+  const oldBytes = readFileSync(index);
+  const install = IndexLock.prototype.install;
+  const intercepted = vi.spyOn(IndexLock.prototype, "install").mockImplementationOnce(function (this: IndexLock, evidence, assertContext) {
+    const installing = install.call(this, evidence, assertContext);
+    // The real install starts its asynchronous lock check before this microtask switches the scope.
+    queueMicrotask(() => { void repo.service.scanner.setProject(repo.otherScope); });
+    return installing;
+  });
+  cleanup.push(() => { intercepted.mockRestore(); });
+  const refused = await repo.post("/fix", fix);
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ reason: "Changed meanwhile: review again" });
+  expect(intercepted).toHaveBeenCalledTimes(1);
+  expect(readFileSync(index)).toEqual(oldBytes);
+  expect(repo.git("rev-parse", "HEAD").trim()).toBe(published);
+  expect(existsSync(index + ".lock")).toBe(false);
+
+  await repo.service.scanner.setProject(repo.scope);
+  expect(await (await repo.post("/fix", fix)).json()).toEqual({ ok: true });
+  expect(repo.git("show", ":project/shared.txt")).toBe(WITH_FIRST);
 });
 
 it("explains Grok's ownership limitation when its served scope has Other changes", async () => {

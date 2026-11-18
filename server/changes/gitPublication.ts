@@ -22,7 +22,7 @@ const GIT_OPTIONS = [
 export type PublicationEvidence = "published" | "not-published" | "indeterminate";
 
 export class GitPublicationError extends Error {
-  constructor(readonly code: "busy" | "index-layout" | "index-lock-lost" | "index-not-ready" | "head-layout" | "detached-head" | "head-moved", message: string, cause?: unknown) {
+  constructor(readonly code: "busy" | "index-layout" | "index-lock-lost" | "index-not-ready" | "head-layout" | "detached-head" | "head-moved" | "stale-context", message: string, cause?: unknown) {
     super(message, { cause });
   }
 }
@@ -150,7 +150,7 @@ export class IndexLock {
     });
   }
 
-  install(evidence: PublicationEvidence): Promise<void> {
+  install(evidence: PublicationEvidence, assertContext?: () => void): Promise<void> {
     return this.#serialize(async () => {
       if (evidence !== "published") throw new Error("Publication must be confirmed before installing the Git index");
       await this.#assertOwned();
@@ -159,6 +159,7 @@ export class IndexLock {
       }
       await assertRegularIndex(this.indexPath);
       await this.#assertOwned();
+      assertContext?.();
       await rename(lockPath(this.indexPath), this.indexPath);
       await this.#closeHandle();
       const dir = await open(dirname(this.indexPath), "r");

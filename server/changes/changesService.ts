@@ -7,6 +7,7 @@ import { runCommitTransaction, type CommitContext, type CommitJournal, type Comm
 import { changeWriterId } from "./components.ts";
 import { ABSENT, type ReadEntry } from "./entries.ts";
 import { MAX_FILE_BYTES } from "./evidence.ts";
+import { GitPublicationError } from "./gitPublication.ts";
 import type { GitEntryChange } from "./gitTree.ts";
 import type { CommitJobKey, CommitJobRecord, CommitJobSummary } from "./ledger.ts";
 import { changesLedger, type LedgerWorkerClient } from "./ledgerWorkerClient.ts";
@@ -28,8 +29,10 @@ const execGit = promisify(execFile);
 const busy = new Map<string, Promise<void>>();
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
-class ReviewChangedError extends Error {
-  constructor() { super(REVIEW_AGAIN); }
+function assertCurrentScope(isCurrent?: () => boolean): (() => void) | undefined {
+  return isCurrent && (() => {
+    if (!isCurrent()) throw new GitPublicationError("stale-context", REVIEW_AGAIN);
+  });
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -182,10 +185,8 @@ export class ChangesService {
           if (!current || current.journal.phase === "queued") return null;
           return { ...current.journal, project: current.project, recovery: current.recovery };
         },
-        checkpoint: async (_job, checkpoint) => {
-          await this.ledger.checkpointRecovery(key, checkpoint);
-          if (checkpoint.step === "install-index" && isCurrent && !isCurrent()) throw new ReviewChangedError();
-        },
+        checkpoint: (_job, checkpoint) => this.ledger.checkpointRecovery(key, checkpoint),
+        assertInstallContext: assertCurrentScope(isCurrent),
         finish: async (_job, outcome) => {
           await this.ledger.finishRecovery(key, outcome);
           finished = true;
@@ -196,7 +197,7 @@ export class ChangesService {
         if (!finished && result.status === "blocked") await this.ledger.finishRecovery(key, result);
         return result;
       } catch (error) {
-        if (error instanceof ReviewChangedError) return { status: "skipped", reason: "missing-job" };
+        if (error instanceof GitPublicationError && error.code === "stale-context") return { status: "skipped", reason: "missing-job" };
         await this.reportIssue(key, `Vizzo could not finish commit recovery. ${message(error)}`);
         throw error;
       }
@@ -238,7 +239,6 @@ export class ChangesService {
           const proof = record.phase === "publishing" && record.step === "prepare-ref"
             ? await prepareBase(pinned, record) : undefined;
           await this.ledger.checkpointCommit(record, proof);
-          if (record.phase === "index-ready" && record.step === "publish" && isCurrent && !isCurrent()) throw new ReviewChangedError();
         },
         reserveWriters: async () => this.writers.reserve(pinned.id, request.writerIds.map(writerId)),
         scanAndFreeze: async (context) => {
@@ -247,6 +247,7 @@ export class ChangesService {
           const ownership = await this.ledger.pinCommit(key, frozen);
           return { ...frozen, ownership };
         },
+        assertPublicationContext: assertCurrentScope(isCurrent),
         settle: (record) => this.ledger.checkpointCommit(record),
       }).catch(async (error) => {
         await this.reportIssue(key, `Vizzo could not finish the commit. ${message(error)}`);

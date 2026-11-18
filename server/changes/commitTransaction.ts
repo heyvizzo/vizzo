@@ -140,6 +140,8 @@ export interface CommitTransactionPorts<Ownership> {
    * assessed by the scanner and Git primitives. Every entry returned contains only content the selection authorizes.
    */
   scanAndFreeze(context: CommitContext): Promise<FrozenCommitSelection<Ownership> | null>;
+  /** Check interactive review context synchronously immediately before sending the ref commit. */
+  assertPublicationContext?(): void;
   /** In one durable ledger mutation, mark the job done and drop exactly the committed ownership. */
   settle(record: CommitSettlement<Ownership>): Promise<void>;
 }
@@ -273,6 +275,7 @@ async function executeCommit<Ownership>(job: CommitJob, ports: CommitTransaction
     await index.write(preparedIndex);
     await journal({ ...built, phase: "index-ready", step: "publish" });
     await index.assertOwned();
+    ports.assertPublicationContext?.();
 
     publicationStarted = true;
     const receipt = await ref.commit();
