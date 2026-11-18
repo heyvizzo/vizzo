@@ -438,3 +438,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   nominal lock would replace the symlink itself.
 - Vizzo refuses commits when HEAD selects a branch that is itself a symbolic ref. This keeps the branch captured
   before the transaction, checked under the prepared lock, and used for publication evidence the same ref.
+- Scans may run the repository's configured Git filters and allow their side effects before a commit. Both
+  `git status` and `git cat-file --filters` ran filters that wrote files in temporary repositories, with both
+  ref formats. The product owner approved this exception to preserve Git conversion and LFS support. Scans do
+  not stage changes or update refs.
