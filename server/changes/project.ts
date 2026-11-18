@@ -315,13 +315,23 @@ export function readBaseEntry(project: LedgerProject, repoPath: string, head: Le
   for (let depth = 1; depth <= parts.length; depth++) ancestors.push(parts.slice(0, depth).join(sep));
   const result = runProjectGit(project, ["ls-tree", "-z", head.oid, "--", ...ancestors]);
   if (result.status !== 0) throw new Error("Could not read the base tree");
-  for (const row of utf8(result.stdout).split("\0").filter(Boolean)) {
-    const match = /^(\d+) (blob|tree|commit) ([a-f0-9]+)\t([\s\S]+)$/.exec(row);
+  const paths = new Set(ancestors.map((path) => Buffer.from(path).toString("hex")));
+  const target = Buffer.from(repoPath);
+  // Alongside a requested descendant, ls-tree can emit siblings within a requested directory ancestor.
+  for (let offset = 0; offset < result.stdout.length;) {
+    const end = result.stdout.indexOf(0, offset);
+    const tab = result.stdout.indexOf(9, offset);
+    if (end === -1 || tab === -1 || tab >= end) throw new Error("Unexpected base-tree entry");
+    const path = result.stdout.subarray(tab + 1, end);
+    const start = offset;
+    offset = end + 1;
+    if (!paths.has(path.toString("hex"))) continue;
+    const match = /^(\d+) (blob|tree|commit) ([a-f0-9]+)$/.exec(result.stdout.toString("latin1", start, tab));
     if (!match) throw new Error("Unexpected base-tree entry");
-    const [, mode, type, object, path] = match;
+    const [, mode, type, object] = match;
     if (!OID.test(object!)) throw new Error("Unexpected base-tree object");
     if (type === "commit") return { kind: "opaque", reason: "Submodule path" };
-    if (path !== repoPath) {
+    if (!path.equals(target)) {
       if (type === "blob") return { kind: "opaque", reason: "Base has a non-directory ancestor" };
       continue;
     }
