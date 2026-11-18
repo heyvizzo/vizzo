@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Changes</title>
+  <link rel="icon" href="/favicon.png" type="image/png" />
+</head>
+<body>
+  <header class="window-head">
+    <div class="window-width head-row">
+      <h1>Changes</h1>
+      <div id="branch" hidden>
+        <span id="branch-name"></span>
+        <span id="branch-state" class="hint"></span>
+      </div>
+      <span id="file-count" class="hint"></span>
+    </div>
+  </header>
+  <main id="main">
+    <div class="window-width review">
+      <p id="availability" class="hint" role="status">Loading changes…</p>
+      <div id="notices" class="notices" role="status"></div>
+      <div id="jobs" class="notices" aria-label="Commit jobs"></div>
+      <p id="scope-note" class="hint" role="status" hidden></p>
+      <div id="groups"></div>
+    </div>
+  </main>
+  <footer class="commit-bar">
+    <div class="window-width">
+      <div id="result" class="result" role="status"></div>
+      <form id="commit-form" hidden>
+        <div class="message-head">
+          <label for="commit-message">Commit message</label>
+          <span id="message-status" class="hint" role="status"></span>
+        </div>
+        <textarea id="commit-message" rows="2" spellcheck="false"></textarea>
+        <p id="selection-note" class="hint" role="status" hidden></p>
+        <div class="commit-actions">
+          <p class="hint">Pre-commit and commit-msg hooks don’t run.</p>
+          <button type="button" id="commit-separately" disabled>Commit separately</button>
+          <button type="submit" id="commit" class="primary" disabled>Commit</button>
+        </div>
+      </form>
+    </div>
+  </footer>
+  <script type="module" src="/changes/main.ts"></script>
+</body>
+</html>

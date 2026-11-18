@@ -5,6 +5,7 @@ import type { LlmChoice, RunConfig } from "./config.ts";
 import type { MarkName, Metrics } from "./marks.ts";
 import type { ThreadInfo, ThreadSay } from "./threads.ts";
 import type { HarnessSessionInfo } from "./harnessSession.ts";
+import type { ChangesStatus } from "./changes.ts";
 
 /**
  * Audio segments. "ack" = first thing the voice layer says; "filler" = progress lines while the solver works
@@ -345,6 +346,8 @@ export type TaskRef = { kind: "job"; jobId: string } | { kind: "thread"; threadI
 
 // ── server → client ──────────────────────────────
 export type ServerMsg =
+  | { type: "changes.updated"; project: string; generation: number }
+  | { type: "changes.status"; status: ChangesStatus }
   | { type: "pong"; id: number; clientNow: number; serverNow: number }
   | { type: "mark"; turnId: string; name: MarkName; serverNow: number; meta?: Record<string, unknown> }
   | { type: "stt.partial"; turnId: string; text: string }

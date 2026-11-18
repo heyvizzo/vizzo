@@ -1,0 +1,82 @@
+/* Theme tokens come from shared/theme.ts, as in Settings. */
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100vh; }
+[hidden] { display: none !important; }
+main { overflow: auto; }
+p, h1, h2 { margin: 0; }
+h1 { font-size: 18px; font-weight: 650; }
+h2 { min-width: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+.hint { color: var(--muted); }
+.error { color: var(--err-text); }
+.window-width { width: min(100%, 940px); margin: 0 auto; padding-inline: 24px; }
+.window-head, .commit-bar { background: var(--panel); }
+.window-head { border-bottom: 1px solid var(--line); }
+.head-row { display: flex; align-items: baseline; gap: 12px; padding-block: 14px; }
+#branch { min-width: 0; display: flex; align-items: baseline; gap: 4px; }
+#branch-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#branch-state, #file-count { flex: none; white-space: nowrap; }
+#file-count { margin-left: auto; }
+
+.review { display: grid; gap: 12px; padding-block: 16px 24px; }
+.review > :empty, .commit-bar:not(:has(form:not([hidden]), #result:not(:empty))) { display: none; }
+#groups, .notices { display: grid; gap: 10px; }
+.notice { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--raised); overflow-wrap: anywhere; }
+.job { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.group-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 3px 12px; padding: 10px 12px; }
+.group-state { grid-column: 1 / -1; }
+.component { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 10px; padding: 5px 12px; border-top: 1px solid var(--line); }
+.component:has(input:checked) { background: var(--accent-soft); }
+.component:last-child { border-radius: 0 0 11px 11px; }
+.component > input { width: 16px; height: 16px; margin: 7px 0 0; accent-color: var(--accent); cursor: pointer; }
+.component > input:disabled { cursor: default; }
+.component-note { margin: 1px 0 4px 21px; font-size: 12px; }
+
+summary { cursor: pointer; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+summary::before { content: ""; width: 6px; height: 6px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); margin: 0 1px 0 2px; }
+details[open] > summary::before { transform: translateY(-1px) rotate(45deg); }
+.other-threads > summary { display: flex; align-items: center; gap: 10px; padding: 6px 4px; font-weight: 600; border-radius: 6px; }
+.other-threads[open] > .card { margin-top: 8px; }
+.file-summary { display: grid; grid-template-columns: 13px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: 30px; padding: 4px 8px 4px 0; border-radius: 6px; }
+.file-summary:hover, .other-threads > summary:hover { background: var(--hover); }
+.file-path { grid-column: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.file-kind { grid-column: 3; font-size: 12px; }
+.file-counts { grid-column: 4; display: flex; justify-content: end; gap: 8px; font-variant-numeric: tabular-nums; font-size: 12px; }
+.added { color: color-mix(in srgb, var(--ok) 70%, var(--text)); }
+.removed { color: var(--err-text); }
+.diff { border: 1px solid var(--line); border-radius: 7px; margin: 3px 0 6px 0; overflow: hidden; background: var(--sunken); }
+.diff:not(:has(.hunk)) { padding: 7px 8px; color: var(--muted); }
+.hunk + .hunk { border-top: 1px solid var(--line); }
+.hunk-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; padding: 5px 8px; color: var(--muted); font-size: 12px; }
+.hunk-head span { color: var(--text); overflow-wrap: anywhere; }
+.hunk-note { padding: 3px 8px; }
+pre { margin: 0; padding: 3px 8px; overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+pre.added { background: color-mix(in srgb, var(--ok) 10%, var(--sunken)); }
+pre.removed { background: color-mix(in srgb, var(--err) 10%, var(--sunken)); }
+
+.commit-bar { border-top: 1px solid var(--line); }
+.commit-bar .window-width { padding-block: 12px; }
+.result { display: grid; gap: 4px; overflow-wrap: anywhere; }
+.result:not(:empty) + form { margin-top: 8px; }
+form { display: grid; gap: 6px; }
+.message-head, .commit-actions { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 8px; }
+.message-head label { font-weight: 650; }
+textarea { width: 100%; min-height: 54px; max-height: 28vh; padding: 8px 10px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; background: var(--field); color: var(--text); font: inherit; }
+.commit-actions { margin-top: 3px; align-items: center; justify-content: end; }
+.commit-actions p { margin-right: auto; }
+button { min-height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--line); color: var(--text); font: inherit; cursor: pointer; }
+button:hover:not(:disabled) { filter: brightness(.97); }
+button:disabled { opacity: .55; cursor: default; }
+button.primary { background: var(--accent-gradient); color: var(--on-accent); }
+button.primary:hover:not(:disabled) { background: var(--accent-gradient-hover); filter: none; }
+:is(button, input, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+
+@media (max-width: 470px) {
+  .window-width { padding-inline: 14px; }
+  .head-row { flex-wrap: wrap; gap: 3px 8px; }
+  #branch { order: 1; width: 100%; }
+  .commit-actions p { width: 100%; }
+}
