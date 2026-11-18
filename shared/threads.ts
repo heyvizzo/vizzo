@@ -26,6 +26,7 @@ export interface ThreadDeletePreview {
   reason?: string;
   defaultMode: ThreadDeleteMode;
   owned?: boolean;
+  willCommit?: boolean;
 }
 
 /** The element a thread is about, as seen when the thread was created (re-resolved on the page by the overlay). */

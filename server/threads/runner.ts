@@ -28,6 +28,7 @@ import { onBrowserUrl, onPage } from "../browserPage.ts";
 import { threadStore, type ThreadRecord, type ThreadRunState, type ThreadStore } from "./store.ts";
 import { fitLines } from "../conversation.ts";
 import { harnessSessionInfo } from "../adapters/sessionInfo.ts";
+import { refreshThreadCompletion } from "./lifecycle.ts";
 
 const SUMMARY_MAX = 160;
 const noMark: Mark = () => {};
@@ -90,6 +91,7 @@ export interface RunSpec {
   turnId: string | null;
   config: RunConfig;
   intent: Intent;
+  continuation?: { executionId: string; nativeSessionId: string; request: string };
   pointing?: PointingTarget[];
   pageContext?: string;
   language?: string;
@@ -113,6 +115,7 @@ class ThreadRunner implements ThreadRunState {
   private queue: Queued[] = [];
   private current: { q: Queued; abortedBy: "correction" | "stop" | "user" | null; failed?: boolean } | null = null;
   private stopped = false;
+  private readonly settling = new Set<WriterExecution>();
   /** The current run's own message: the replay stops before it (it's sent as the request itself). */
   private replayCut: string | null = null;
 
@@ -120,6 +123,7 @@ class ThreadRunner implements ThreadRunState {
 
   get busy(): boolean { return this.current !== null; }
   get pending(): number { return this.queue.length; }
+  get working(): boolean { return this.busy || this.pending > 0 || this.settling.size > 0; }
 
   enqueue(spec: RunSpec, front = false): Promise<RunResult | null> {
     return new Promise((resolve, reject) => {
@@ -129,9 +133,10 @@ class ThreadRunner implements ThreadRunState {
         : this.rec.projectFolder !== undefined ? this.rec.projectFolder : projectDir();
       this.rec.projectFolder = folder;
       const execution = writerRegistry().queue({
-        writer: { kind: "thread", id: this.threadId }, title: this.rec.info.title, request: spec.original ?? spec.question,
+        writer: { kind: "thread", id: this.threadId }, title: this.rec.info.title, request: spec.continuation?.request ?? spec.original ?? spec.question,
         folder, purpose: spec.kind, harness: (handle?.choice ?? this.rec.resume?.choice ?? spec.config.llm.smart).provider,
-      });
+        continuesExecutionId: spec.continuation?.executionId,
+      }, spec.continuation?.nativeSessionId);
       const q = { spec, execution, resolve, reject };
       if (front) this.queue.unshift(q); else this.queue.push(q);
       if (spec.kind !== "reconcile") this.store.update(this.threadId, (t) => { t.state = "running"; t.intent = spec.intent; delete t.interrupted; });
@@ -185,18 +190,47 @@ class ThreadRunner implements ThreadRunState {
     try { h?.close(); } catch { /* ignore */ }
   }
 
+  async stopForDeletion(): Promise<void> {
+    const dropped = this.queue.splice(0);
+    for (const q of dropped) { q.execution.cancelQueued(); q.resolve(null); }
+    const cur = this.current;
+    if (cur && !cur.abortedBy) {
+      cur.abortedBy = "user";
+      cur.q.execution.stopping();
+      this.rec.handle?.abort();
+    }
+    if (cur || dropped.length) {
+      this.store.update(this.threadId, (t) => { t.state = "idle"; t.awaitingReply = false; });
+    }
+    await Promise.all([...this.settling].map((execution) => execution.awaitStop()));
+  }
+
   private next(): void {
     if (this.stopped || this.current) return;
     const q = this.queue.shift();
     if (!q) return;
     const cur: NonNullable<ThreadRunner["current"]> = { q, abortedBy: null };
     this.current = cur;
+    const { spec, execution } = q;
+    if (spec.kind !== "reconcile") this.rec.activeRequest = { executionId: execution.id, request: spec.continuation?.request ?? spec.original ?? spec.question };
+    this.settling.add(execution);
     // Tracked so the app asks before quitting while it works (server/activity.ts).
     const end = beginTask(displayTitle(this.store.info(this.threadId)?.title ?? "a thread"));
-    void this.exec(q).finally(() => {
-      end(cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done");
+    void this.exec(q).catch((error) => {
+      // Opening a restored handle can fail before dispatch starts.
+      execution.cancelQueued();
+      cur.failed = true;
+      this.failed(spec, spec.kind, error);
+      q.reject(error);
+    }).finally(() => {
+      if (this.rec.activeRequest?.executionId === execution.id) delete this.rec.activeRequest;
       this.current = null;
       this.next();
+      void execution.settled.then(async () => {
+        this.settling.delete(execution);
+        if (execution.folder) await refreshThreadCompletion(this.store, this.threadId);
+        end(cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done");
+      });
     });
   }
 
@@ -389,6 +423,7 @@ export function replayAnnotations(t: ThreadInfo | undefined, cut: string | null 
 }
 
 function runnerOf(store: ThreadStore, threadId: string, deps: ThreadDeps): ThreadRunner | null {
+  if (store.blocksRun(threadId)) return null;
   const rec = store.get(threadId);
   if (!rec) return null;
   if (!(rec.run instanceof ThreadRunner)) rec.run = new ThreadRunner(store, threadId, rec, deps);

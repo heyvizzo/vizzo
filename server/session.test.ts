@@ -59,7 +59,7 @@ describe("Session + element threads", () => {
     ws.emit("close");
   });
 
-  it("snapshot on connect; focus marks the result told; delete removes it everywhere; reset clears all", () => {
+  it("snapshot on connect; focus marks the result told; delete removes it everywhere; reset clears all", async () => {
     const store = resetThreadStore();
     const t = store.create(anchor, "the red button", "task");
     store.update(t.threadId, (x) => { x.state = "pending"; x.unread = true; x.awaitingReply = true; });
@@ -73,16 +73,17 @@ describe("Session + element threads", () => {
     expect(store.info(t.threadId)).toMatchObject({ state: "idle", unread: false, awaitingReply: false });
     expect(msgs(other).at(-1)).toMatchObject({ type: "thread", thread: { threadId: t.threadId, unread: false } });
 
-    ws.client({ type: "thread.delete", threadId: t.threadId });
-    expect(store.list()).toEqual([]);
+    ws.client({ type: "thread.delete", threadId: t.threadId, mode: "keep" });
+    await vi.waitFor(() => expect(store.list()).toEqual([]));
     expect(msgs(other).at(-1)).toEqual({ type: "thread.removed", threadId: t.threadId });
 
     store.create(anchor, "the red button", "task");
     getConversation().push({ turnId: "x", approach: "pipeline", user: "u", assistant: "a", detail: "" });
-    ws.client({ type: "conversation.reset" });
+    ws.client({ type: "conversation.reset", requestId: "reset" });
+    await vi.waitFor(() => expect(msgs(other).at(-1)).toEqual({ type: "conversation.reset.done", requestId: "reset" }));
     expect(store.list()).toEqual([]);
     expect(getConversation()).toEqual([]);
-    expect(msgs(other).at(-1)).toEqual({ type: "threads.snapshot", threads: [] });
+    expect(msgs(other)).toContainEqual({ type: "threads.snapshot", threads: [] });
 
     ws.emit("close");
     const n = ws.sent.length;

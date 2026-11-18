@@ -3,7 +3,7 @@
 // harness session needs to be resumed: the spec it was opened with (harness, model, prompt, project folder) and the
 // harness's own saved session id. The next request on a restored thread resumes that session natively.
 // File: $VIZZO_THREADS_FILE, default ~/.config/vizzo/threads.json (the packaged app: Application Support).
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LlmChoice } from "../../shared/config.ts";
@@ -23,6 +23,7 @@ export interface SavedThread {
   info: ThreadInfo;
   projectFolder?: string | null;
   resume?: ThreadResume;
+  activeRequest?: { executionId: string; request: string };
 }
 
 export function threadsFile(): string {
@@ -30,25 +31,42 @@ export function threadsFile(): string {
 }
 
 /** The saved threads; [] when there is no file or it can't be read. */
-export function loadThreads(file: string): SavedThread[] {
+export function loadThreads(file: string, strict = false): SavedThread[] {
   let raw: string;
-  try { raw = readFileSync(file, "utf8"); } catch { return []; }
+  try { raw = readFileSync(file, "utf8"); } catch (error) {
+    if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return [];
+  }
   try {
     const data = JSON.parse(raw) as { version?: unknown; threads?: unknown };
-    if (data.version !== VERSION || !Array.isArray(data.threads)) return [];
-    return data.threads.filter((t): t is SavedThread => isSaved(t));
+    if (data.version !== VERSION || !Array.isArray(data.threads)) throw new Error("Unsupported thread file version");
+    const threads = data.threads.filter((t): t is SavedThread => isSaved(t));
+    if (strict && threads.length !== data.threads.length) throw new Error("Invalid records in the saved thread file");
+    return threads;
   } catch (e) {
+    if (strict) throw e;
     console.warn(`[threads] can't read ${file}:`, e instanceof Error ? e.message : e);
     return [];
   }
 }
 
 /** Written whole, through a temp file, so a crash mid-write leaves the previous list. */
-export function writeThreads(file: string, threads: SavedThread[]): void {
-  mkdirSync(dirname(file), { recursive: true });
+export function writeThreads(file: string, threads: SavedThread[], durable = false): void {
+  const dir = dirname(file);
+  mkdirSync(dir, { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ version: VERSION, threads }));
-  renameSync(tmp, file);
+  try {
+    const fd = openSync(tmp, "w", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify({ version: VERSION, threads }));
+      if (durable) fsyncSync(fd);
+    } finally { closeSync(fd); }
+    renameSync(tmp, file);
+    if (durable) {
+      const parent = openSync(dir, "r");
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    }
+  } finally { rmSync(tmp, { force: true }); }
 }
 
 function isSaved(t: unknown): boolean {
