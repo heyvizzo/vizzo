@@ -126,6 +126,11 @@ export class IndexLock {
     }
   }
 
+  /** Recheck the held lock after the caller's final checkpoint and before ref publication. */
+  assertOwned(): Promise<void> {
+    return this.#serialize(() => this.#assertOwned());
+  }
+
   /** Write the prepared index without installing it. */
   write(bytes: Uint8Array): Promise<void> {
     return this.#serialize(async () => {

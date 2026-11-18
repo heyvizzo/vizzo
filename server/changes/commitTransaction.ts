@@ -74,8 +74,12 @@ interface Refusal {
 
 type Cleanup = Partial<IndexLocation & Pick<CommitContext, "lock" | "head">> & { readonly refusal: Refusal };
 
+export interface CommitStart extends CommitJob {
+  readonly phase: "locking";
+  readonly step: "resolve-index";
+}
+
 type LockingJournal<Ownership> = { readonly phase: "locking" } & (
-  | (CommitJob & { readonly step: "resolve-index" })
   | (CommitJob & IndexLocation & { readonly step: "acquire-index" })
   | (CommitJob & IndexLocation & { readonly step: "capture-base"; readonly lock: IndexLockIdentity })
   | (CommitContext & { readonly step: "reserve-writers" | "freeze-selection" | "validate-selection" })
@@ -103,10 +107,11 @@ export type CommitSettlement<Ownership> = BuiltCommit<Ownership> & {
 };
 
 export type CommitJournal<Ownership> =
+  | CommitStart
   | LockingJournal<Ownership>
   | PublishingJournal<Ownership>
   | IndexReadyJournal<Ownership>
-  | (CommitJob & Cleanup & { readonly phase: "refused" })
+  | (CommitJob & Cleanup & { readonly phase: "refused"; readonly ownership?: Ownership })
   | (BuiltCommit<Ownership> & {
     readonly phase: "not-published" | "indeterminate";
     readonly receipt: RefCommitResult;
@@ -119,9 +124,15 @@ export type CommitResult =
   | ({ readonly status: "refused" } & Refusal)
   | { readonly status: "not-published" | "indeterminate" | "repair-needed"; readonly commit: string; readonly reason: string };
 
+type CommitCheckpoint<Ownership> = Exclude<CommitJournal<Ownership>, CommitStart | CommitSettlement<Ownership>>;
+
 export interface CommitTransactionPorts<Ownership> {
-  /** Durably replace the job's journal record. Keep ledger ownership and closed groups intact. */
-  journal(record: Exclude<CommitJournal<Ownership>, CommitSettlement<Ownership>>): Promise<void>;
+  /** Atomically persist the initial record for a new job or claim its matching queued request.
+   * Return false if the job already started and leave its record untouched.
+   */
+  begin(record: CommitStart): Promise<boolean>;
+  /** Durably replace the claimed job's journal record. Keep ledger ownership and closed groups intact. */
+  journal(record: CommitCheckpoint<Ownership>): Promise<void>;
   /** Atomically reserve all requested writers against new executions and return a synchronous release. Existing runs must still be reported. */
   reserveWriters(context: CommitContext): Promise<() => void>;
   /** Scan against the captured HEAD and re-resolve the exact selection, including paths, bytes, ties and registry state.
@@ -137,14 +148,14 @@ const pendingByRepository = new Map<string, Promise<void>>();
 const reviewAgain = "Changed meanwhile: review again";
 
 class SelectionError extends Error {
-  constructor(readonly code: "selection" | "stale" | "working" | "other" | "delete-selection", message: string) {
+  constructor(readonly code: "selection" | "stale" | "working" | "other" | "delete-selection" | "unchanged-entry", message: string) {
     super(message);
   }
 }
 
-function validateRequest({ project, request }: CommitJob): void {
+function validateRequest(request: CommitRequest): void {
   const components = new Set(request.componentIds);
-  if (request.projectId !== project.id || components.size === 0 || components.size !== request.componentIds.length ||
+  if (components.size === 0 || components.size !== request.componentIds.length ||
       new Set(request.writerIds).size !== request.writerIds.length) {
     throw new SelectionError("selection", "Invalid commit selection");
   }
@@ -211,6 +222,15 @@ function asRefusal(error: unknown): Refusal {
 }
 
 async function executeCommit<Ownership>(job: CommitJob, ports: CommitTransactionPorts<Ownership>): Promise<CommitResult> {
+  if (job.request.projectId !== job.project.id) {
+    return { status: "refused", code: "selection", reason: "Invalid commit selection" };
+  }
+  const start: CommitStart = { ...job, phase: "locking", step: "resolve-index" };
+  if (!(await ports.begin(structuredClone(start)))) {
+    return { status: "refused", code: "duplicate-job", reason: "This commit job has already started" };
+  }
+
+  const journal = (record: CommitCheckpoint<Ownership>) => ports.journal(structuredClone(record));
   const root = job.project.root;
   let indexPath: string | undefined;
   let index: IndexLock | undefined;
@@ -220,61 +240,65 @@ async function executeCommit<Ownership>(job: CommitJob, ports: CommitTransaction
   let ref: PreparedGitRefUpdate | undefined;
   let publicationStarted = false;
   try {
-    validateRequest(job);
-    await ports.journal({ ...job, phase: "locking", step: "resolve-index" });
+    validateRequest(job.request);
     indexPath = await gitIndexPath(root);
-    await ports.journal({ ...job, indexPath, phase: "locking", step: "acquire-index" });
+    await journal({ ...job, indexPath, phase: "locking", step: "acquire-index" });
     index = await acquireIndexLock(indexPath);
-    await ports.journal({ ...job, indexPath, lock: index.identity, phase: "locking", step: "capture-base" });
+    await journal({ ...job, indexPath, lock: index.identity, phase: "locking", step: "capture-base" });
     head = await captureGitHead(root);
     const captured = { ...job, indexPath, lock: index.identity, head };
 
-    await ports.journal({ ...captured, phase: "locking", step: "reserve-writers" });
-    releaseWriters = await ports.reserveWriters(captured);
-    await ports.journal({ ...captured, phase: "locking", step: "freeze-selection" });
+    await journal({ ...captured, phase: "locking", step: "reserve-writers" });
+    releaseWriters = await ports.reserveWriters(structuredClone(captured));
+    await journal({ ...captured, phase: "locking", step: "freeze-selection" });
     // Copy the scanner's snapshot before another await can expose it to edits to its cache.
-    const frozen = snapshotSelection(await ports.scanAndFreeze(captured));
-    await ports.journal({ ...captured, phase: "locking", step: "validate-selection" });
+    const frozen = snapshotSelection(await ports.scanAndFreeze(structuredClone(captured)));
+    await journal({ ...captured, phase: "locking", step: "validate-selection" });
     validateFrozen(job.request, frozen);
 
-    await ports.journal({ ...captured, ownership: frozen.ownership, phase: "locking", step: "build-commit" });
+    await journal({ ...captured, ownership: frozen.ownership, phase: "locking", step: "build-commit" });
     const candidate = await buildCommitTree({
       root, indexPath, base: head.oid, entries: frozen.entries, message: job.request.message,
     });
     built = { ...captured, ...candidate, ownership: frozen.ownership };
-    await ports.journal({ ...built, phase: "publishing", step: "prepare-ref" });
+    const unchanged = candidate.entries.find(({ base, next }) => base?.mode === next?.mode && base?.oid === next?.oid);
+    if (unchanged) {
+      throw new SelectionError("unchanged-entry", `${reviewAgain}. Git produces the same entry for ${JSON.stringify(unchanged.path)}.`);
+    }
+    await journal({ ...built, phase: "publishing", step: "prepare-ref" });
     ref = await prepareGitRefUpdate(root, head, candidate.commit);
-    await ports.journal({ ...built, phase: "publishing", step: "prepare-index" });
+    await journal({ ...built, phase: "publishing", step: "prepare-index" });
     const preparedIndex = await prepareIndexBytes({ root, indexPath, entries: built.entries });
-    await ports.journal({ ...built, phase: "publishing", step: "write-index" });
+    await journal({ ...built, phase: "publishing", step: "write-index" });
     await index.write(preparedIndex);
-    await ports.journal({ ...built, phase: "index-ready", step: "publish" });
+    await journal({ ...built, phase: "index-ready", step: "publish" });
+    await index.assertOwned();
 
     publicationStarted = true;
     const receipt = await ref.commit();
     ref = undefined;
-    await ports.journal({ ...built, phase: "index-ready", step: "classify", receipt });
+    await journal({ ...built, phase: "index-ready", step: "classify", receipt });
     const evidence = await classifyGitPublication(root, head, candidate.commit, receipt);
     if (evidence === "published") {
-      await ports.journal({ ...built, phase: "index-ready", step: "install", receipt, evidence });
+      await journal({ ...built, phase: "index-ready", step: "install", receipt, evidence });
       try {
         await index.install(evidence);
       } catch (error) {
-        const reason = `Vizzo committed ${candidate.commit}, but Git's staging area wasn't updated: ${asRefusal(error).reason}`;
-        await ports.journal({ ...built, phase: "index-ready", step: "repair", receipt, evidence, reason });
+        const reason = `Vizzo committed ${candidate.commit}. It couldn't confirm the staging area update: ${asRefusal(error).reason}`;
+        await journal({ ...built, phase: "index-ready", step: "repair", receipt, evidence, reason });
         await index.release();
         return { status: "repair-needed", commit: candidate.commit, reason };
       }
-      await ports.settle({ ...built, phase: "done", receipt, evidence });
+      await ports.settle(structuredClone({ ...built, phase: "done", receipt, evidence }));
       return { status: "done", commit: candidate.commit };
     }
 
-    await ports.journal({ ...built, phase: "index-ready", step: "release", receipt, evidence });
+    await journal({ ...built, phase: "index-ready", step: "release", receipt, evidence });
     await index.release();
     const reason = evidence === "indeterminate"
       ? "Vizzo can't tell whether this commit was made: check git log"
       : receipt.kind === "failed" ? `Git did not publish this commit: ${receipt.detail}` : "Git did not publish this commit";
-    await ports.journal({ ...built, phase: evidence, receipt, reason });
+    await journal({ ...built, phase: evidence, receipt, reason });
     return { status: evidence, commit: candidate.commit, reason };
   } catch (error) {
     if (publicationStarted) {
@@ -287,13 +311,13 @@ async function executeCommit<Ownership>(job: CommitJob, ports: CommitTransaction
     const refusal = asRefusal(error);
     const cleanup = { ...job, ...(indexPath && { indexPath }), ...(index && { lock: index.identity }), ...(head && { head }), refusal };
     try {
-      if (built) await ports.journal({ ...built, phase: "publishing", step: "cleanup", refusal });
-      else await ports.journal({ ...cleanup, phase: "locking", step: "cleanup" });
+      if (built) await journal({ ...built, phase: "publishing", step: "cleanup", refusal });
+      else await journal({ ...cleanup, phase: "locking", step: "cleanup" });
     } finally {
       try { await ref?.abort(); }
       finally { await index?.release(); }
     }
-    await ports.journal({ ...cleanup, phase: "refused" });
+    await journal({ ...cleanup, ...(built && { ownership: built.ownership }), phase: "refused" });
     return { status: "refused", ...refusal };
   } finally {
     releaseWriters?.();

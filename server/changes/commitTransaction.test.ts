@@ -109,6 +109,7 @@ function component(overrides: Partial<FrozenCommitComponent> = {}): FrozenCommit
 function job(project: CommitProject, options: {
   request?: Partial<CommitRequest>;
   frozen?: Partial<FrozenCommitSelection<Ownership>>;
+  begin?: (record: Journal) => void | Promise<void>;
   journal?: (record: Journal) => void | Promise<void>;
   freeze?: NonNullable<Ports["scanAndFreeze"]>;
   settle?: (record: Journal) => void | Promise<void>;
@@ -124,10 +125,17 @@ function job(project: CommitProject, options: {
   const reserved = new Set<string>();
   let ledger = { record: null as Journal | null, closedGroup: true, ownedEvents: ["selected-edit", "other-writer-edit"] };
   const ports: Ports = {
+    async begin(record) {
+      if (ledger.record !== null) return false;
+      await options.begin?.(record);
+      history.push(structuredClone(record));
+      ledger = { ...ledger, record: structuredClone(record) };
+      return true;
+    },
     async journal(record) {
       await options.journal?.(record);
       history.push(structuredClone(record));
-      ledger = { ...ledger, record };
+      ledger = { ...ledger, record: structuredClone(record) };
     },
     async reserveWriters(context) {
       const prior = ledger.record;
@@ -230,6 +238,10 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
     expect(readFileSync(join(root, "side.txt"), "utf8")).toBe("unselected newer edit\n");
     expect(transaction.ledger()).toMatchObject({ closedGroup: false, ownedEvents: ["other-writer-edit"] });
     expect(transaction.reserved.size).toBe(0);
+    const completed = transaction.ledger();
+    await expect(transaction.run()).resolves.toMatchObject({ status: "refused", code: "duplicate-job" });
+    expect(transaction.ledger()).toBe(completed);
+    expect(existsSync(index + ".lock")).toBe(false);
     expect(transaction.history.map(step)).toEqual([
       "locking/resolve-index", "locking/acquire-index", "locking/capture-base", "locking/reserve-writers", "locking/freeze-selection",
       "locking/validate-selection", "locking/build-commit", "publishing/prepare-ref", "publishing/prepare-index",
@@ -249,6 +261,68 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
     expect(readFileSync(fixture.index)).toEqual(before);
     expect(existsSync(fixture.index + ".lock")).toBe(false);
     expect(transaction.ledger()).toMatchObject({ record: { phase: "refused" }, closedGroup: true });
+  });
+
+  it("refuses the entire selection when conversion leaves one selected entry equal to its base", async () => {
+    const { git, file, project, index } = repo(format);
+    file(".gitattributes", "*.txt text\n");
+    git("add", ".gitattributes");
+    git("commit", "-qm", "Base text attributes");
+    const base = git("rev-parse", "HEAD");
+    const before = readFileSync(index);
+    const crlf = "base A\r\nseparator\r\nbase B\r\n";
+    file(".gitattributes", "*.txt -text\n");
+    file("main.txt", crlf);
+    file("side.txt", "Selected real change\n");
+    expect(git("status", "--porcelain", "--", "main.txt")).toContain("M main.txt");
+    const transaction = job(project, {
+      frozen: {
+        components: [component({ paths: ["main.txt", "side.txt"] })],
+        entries: [{ ...frozenEntry("main.txt", crlf), kind: "whole" }, frozenEntry("side.txt", "Selected real change\n")],
+      },
+    });
+    await expect(transaction.run()).resolves.toMatchObject({ status: "refused", code: "unchanged-entry", reason: expect.stringContaining("main.txt") });
+    expect(transaction.history.map(step)).not.toContain("publishing/prepare-ref");
+    expect(transaction.ledger()).toMatchObject({ record: { phase: "refused", ownership }, closedGroup: true,
+      ownedEvents: ["selected-edit", "other-writer-edit"] });
+    expect(git("rev-parse", "HEAD")).toBe(base);
+    expect(readFileSync(index)).toEqual(before);
+    expect(existsSync(index + ".lock")).toBe(false);
+  });
+
+  it("isolates transaction snapshots from mutations by journal callbacks", async () => {
+    const { git, project, index, base } = repo(format);
+    let publishedEntries: unknown;
+    const transaction = job(project, {
+      begin(record) {
+        Object.assign(record.project, { root: "/missing" });
+        (record.request.componentIds as string[]).push("injected");
+      },
+      journal(record) {
+        if (record.phase === "locking" && record.step === "reserve-writers") {
+          Object.assign(record.lock, { inode: "foreign" });
+          Object.assign(record.head, { oid: "0".repeat(40) });
+          (record.request.writerIds as string[]).push(writerB);
+        }
+        if (record.phase === "publishing" && record.step === "prepare-ref") {
+          record.ownership.eventIds.push("wrong-writer-edit");
+          Object.assign(record.entries[0]?.next ?? {}, { oid: "0".repeat(40), mode: "100755" });
+          (record.request.componentIds as string[]).push("another-component");
+        }
+        if (record.phase === "index-ready" && record.step === "install") publishedEntries = structuredClone(record.entries);
+      },
+      settle(record) {
+        expect(record).toMatchObject({ ownership, entries: publishedEntries });
+        expect(record.request.writerIds).toEqual([writerA]);
+        expect(record.request.componentIds).toEqual([selectedComponent]);
+        expect(git("show", ":main.txt")).toBe("selected A\nseparator\nbase B");
+      },
+    });
+    await expect(transaction.run()).resolves.toMatchObject({ status: "done" });
+    expect(git("rev-parse", "HEAD^")).toBe(base);
+    expect(git("show", "HEAD:main.txt")).toBe(git("show", ":main.txt"));
+    expect(transaction.ledger()).toMatchObject({ ownedEvents: ["other-writer-edit"] });
+    expect(existsSync(index + ".lock")).toBe(false);
   });
 
   it.each([
@@ -308,7 +382,10 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
         events.push("first settled");
       },
     });
-    const second = job(linked.project, { journal: (record) => { events.push(`second ${step(record)}`); } });
+    const second = job(linked.project, {
+      begin: (record) => { events.push(`second ${step(record)}`); },
+      journal: (record) => { events.push(`second ${step(record)}`); },
+    });
     const pendingFirst = first.run();
     await Promise.race([
       entered.wait,
@@ -378,6 +455,32 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
     git("symbolic-ref", "HEAD", "refs/heads/other");
     expect(readFileSync(index)).toEqual(before);
     expect(transaction.reserved.size).toBe(0);
+  });
+
+  it("aborts publication if the final checkpoint loses the index lock to newer user staging", async () => {
+    const { git, file, project, index, base } = repo(format);
+    const lock = index + ".lock";
+    let userIndex: Buffer | undefined;
+    let userLock: bigint | undefined;
+    const transaction = job(project, {
+      journal(record) {
+        if (step(record) !== "index-ready/publish") return;
+        renameSync(lock, lock + "-saved");
+        file("main.txt", "Newer user staging\n");
+        git("add", "main.txt");
+        userIndex = readFileSync(index);
+        writeFileSync(lock, "A foreign index lock");
+        userLock = lstatSync(lock, { bigint: true }).ino;
+      },
+    });
+    await expect(transaction.run()).resolves.toMatchObject({ status: "refused", code: "index-lock-lost" });
+    expect(git("rev-parse", "HEAD")).toBe(base);
+    expect(git("show", ":main.txt")).toBe("Newer user staging");
+    expect(readFileSync(index)).toEqual(userIndex);
+    expect(lstatSync(lock, { bigint: true }).ino).toBe(userLock);
+    expect(readFileSync(lock, "utf8")).toBe("A foreign index lock");
+    expect(transaction.ledger()).toMatchObject({ record: { phase: "refused" }, closedGroup: true });
+    expect(transaction.history.map(step)).not.toContain("index-ready/classify");
   });
 
   it("leaves the original index byte-identical after a failed publication with no ref or reflog change", async () => {
@@ -469,6 +572,26 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
     expect(existsSync(index + ".lock")).toBe(false);
   });
 
+  it("retains the repair checkpoint if index installation throws after the rename", async () => {
+    const { project, git, index } = repo(format);
+    const install = publication.IndexLock.prototype.install;
+    vi.spyOn(publication.IndexLock.prototype, "install").mockImplementationOnce(async function (this: publication.IndexLock, evidence) {
+      await install.call(this, evidence);
+      throw new Error("Injected directory sync failure after index rename");
+    });
+    const transaction = job(project);
+    const result = await transaction.run();
+    const published = git("rev-parse", "HEAD");
+    expect(result).toMatchObject({ status: "repair-needed", commit: published });
+    expect(git("show", ":main.txt")).toBe(git("show", "HEAD:main.txt"));
+    expect(git("diff", "--cached", "--name-only")).toBe("");
+    expect(existsSync(index + ".lock")).toBe(false);
+    expect(transaction.ledger()).toMatchObject({ record: {
+      phase: "index-ready", step: "repair", commit: published, evidence: "published",
+      reason: expect.stringContaining("couldn't confirm the staging area update"),
+    }, closedGroup: true, ownedEvents: ["selected-edit", "other-writer-edit"] });
+  });
+
   it("preserves the prepared owned lock when the post-publish journal write fails", async () => {
     const { project, git, index, base } = repo(format);
     const before = readFileSync(index);
@@ -484,7 +607,15 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
       lock: { device: String(stat.dev), inode: String(stat.ino) },
     }, closedGroup: true });
     expect(readFileSync(index)).toEqual(before);
-    expect(readFileSync(index + ".lock").subarray(0, 4).toString("ascii")).toBe("DIRC");
+    const durableBeforeRetry = transaction.ledger();
+    const historyLength = transaction.history.length;
+    const preparedBytes = readFileSync(index + ".lock");
+    expect(preparedBytes.subarray(0, 4).toString("ascii")).toBe("DIRC");
+    await expect(transaction.run()).resolves.toMatchObject({ status: "refused", code: "duplicate-job" });
+    expect(transaction.ledger()).toBe(durableBeforeRetry);
+    expect(transaction.history).toHaveLength(historyLength);
+    expect(lstatSync(index + ".lock", { bigint: true }).ino).toBe(stat.ino);
+    expect(readFileSync(index + ".lock")).toEqual(preparedBytes);
     expect(transaction.reserved.size).toBe(0);
   });
 
