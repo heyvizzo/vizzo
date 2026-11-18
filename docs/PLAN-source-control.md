@@ -534,3 +534,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   pathname cannot obscure the selected file's base.
 - Structural ownership receipts omit absent line ranges and hashes. The serialized journal and in-memory pin
   must compare identically for file creation and independent executable-mode changes to commit.
+- Interactive Commit and Fix check the served scope immediately before sending the ref commit or submitting
+  the index rename. The independent review reproduced a project switch during the asynchronous Git lock checks
+  immediately after the earlier scope check. Startup recovery and background jobs use their pinned project.
