@@ -1,0 +1,1121 @@
+{
+  "openCodeVersion": "1.19.3",
+  "capture": "Selected data records from opencode serve --pure GET /event?directory=... around POST /session/:id/message, with a loopback OpenAI-compatible model returning deterministic tool calls. Only generated IDs and temporary paths are replaced.",
+  "initialFiles": {
+    "/fixture/edit-write/edit.txt": "one\r\nold café\r\nlast\r\n",
+    "/fixture/edit-write/overwrite.txt": "",
+    "/fixture/edit-write/overwrite-nonempty.txt": "first\r\noriginal 🌱\r\nlast",
+    "/fixture/patch/overwritten-by-add.txt": "already exists\n",
+    "/fixture/patch-variants/delete-empty.txt": "",
+    "/fixture/patch-variants/move-dst.txt": "already here\n"
+  },
+  "connections": [
+    {
+      "name": "beforeReconnect",
+      "events": [
+        {
+          "id": "evt_fixture_1",
+          "type": "server.connected",
+          "properties": {}
+        },
+        {
+          "id": "evt_fixture_2",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "id": "prt_fixture_1",
+              "messageID": "msg_fixture_1",
+              "sessionID": "ses_fixture_1",
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020163489
+          }
+        },
+        {
+          "id": "evt_fixture_3",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit",
+              "state": {
+                "status": "running",
+                "input": {
+                  "filePath": "/fixture/edit-write/edit.txt",
+                  "oldString": "old café",
+                  "newString": "new 🌱"
+                },
+                "time": {
+                  "start": 1795020163584
+                }
+              },
+              "id": "prt_fixture_1",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_1"
+            },
+            "time": 1795020163585
+          }
+        },
+        {
+          "id": "evt_fixture_4",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit",
+              "state": {
+                "metadata": {
+                  "diff": "Index: /fixture/edit-write/edit.txt\n===================================================================\n--- /fixture/edit-write/edit.txt\n+++ /fixture/edit-write/edit.txt\n@@ -1,3 +1,3 @@\n one\n-old café\n+new 🌱\n last\n",
+                  "filediff": {
+                    "file": "/fixture/edit-write/edit.txt",
+                    "patch": "Index: /fixture/edit-write/edit.txt\n===================================================================\n--- /fixture/edit-write/edit.txt\n+++ /fixture/edit-write/edit.txt\n@@ -1,3 +1,3 @@\n one\n-old café\n+new 🌱\n last\n",
+                    "additions": 1,
+                    "deletions": 1
+                  },
+                  "diagnostics": {}
+                },
+                "status": "running",
+                "input": {
+                  "filePath": "/fixture/edit-write/edit.txt",
+                  "oldString": "old café",
+                  "newString": "new 🌱"
+                },
+                "time": {
+                  "start": 1795020163584
+                }
+              },
+              "id": "prt_fixture_1",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_1"
+            },
+            "time": 1795020164329
+          }
+        },
+        {
+          "id": "evt_fixture_5",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "/fixture/edit-write/edit.txt",
+                  "oldString": "old café",
+                  "newString": "new 🌱"
+                },
+                "output": "Edit applied successfully.",
+                "metadata": {
+                  "diagnostics": {},
+                  "diff": "Index: /fixture/edit-write/edit.txt\n===================================================================\n--- /fixture/edit-write/edit.txt\n+++ /fixture/edit-write/edit.txt\n@@ -1,3 +1,3 @@\n one\n-old café\n+new 🌱\n last\n",
+                  "filediff": {
+                    "file": "/fixture/edit-write/edit.txt",
+                    "patch": "Index: /fixture/edit-write/edit.txt\n===================================================================\n--- /fixture/edit-write/edit.txt\n+++ /fixture/edit-write/edit.txt\n@@ -1,3 +1,3 @@\n one\n-old café\n+new 🌱\n last\n",
+                    "additions": 1,
+                    "deletions": 1
+                  },
+                  "truncated": false
+                },
+                "title": "edit.txt",
+                "time": {
+                  "start": 1795020163584,
+                  "end": 1795020164555
+                }
+              },
+              "id": "prt_fixture_1",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_1"
+            },
+            "time": 1795020164563
+          }
+        }
+      ]
+    },
+    {
+      "name": "afterReconnect",
+      "events": [
+        {
+          "id": "evt_fixture_6",
+          "type": "server.connected",
+          "properties": {}
+        },
+        {
+          "id": "evt_fixture_7",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "id": "prt_fixture_2",
+              "messageID": "msg_fixture_2",
+              "sessionID": "ses_fixture_1",
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_create",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020183384
+          }
+        },
+        {
+          "id": "evt_fixture_8",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_create",
+              "state": {
+                "status": "running",
+                "input": {
+                  "filePath": "/fixture/edit-write/created.txt",
+                  "content": "created café 🌱\r\nwithout newline"
+                },
+                "time": {
+                  "start": 1795020183472
+                }
+              },
+              "id": "prt_fixture_2",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_2"
+            },
+            "time": 1795020183478
+          }
+        },
+        {
+          "id": "evt_fixture_9",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_create",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "/fixture/edit-write/created.txt",
+                  "content": "created café 🌱\r\nwithout newline"
+                },
+                "output": "Wrote file successfully.",
+                "metadata": {
+                  "diagnostics": {},
+                  "filepath": "/fixture/edit-write/created.txt",
+                  "exists": false,
+                  "truncated": false
+                },
+                "title": "created.txt",
+                "time": {
+                  "start": 1795020183472,
+                  "end": 1795020183521
+                }
+              },
+              "id": "prt_fixture_2",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_2"
+            },
+            "time": 1795020183521
+          }
+        },
+        {
+          "id": "evt_fixture_10",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "id": "prt_fixture_3",
+              "messageID": "msg_fixture_3",
+              "sessionID": "ses_fixture_1",
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_overwrite_empty",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020187959
+          }
+        },
+        {
+          "id": "evt_fixture_11",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_overwrite_empty",
+              "state": {
+                "status": "running",
+                "input": {
+                  "filePath": "/fixture/edit-write/overwrite.txt",
+                  "content": "used to be empty\n"
+                },
+                "time": {
+                  "start": 1795020187973
+                }
+              },
+              "id": "prt_fixture_3",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_3"
+            },
+            "time": 1795020187973
+          }
+        },
+        {
+          "id": "evt_fixture_12",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_overwrite_empty",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "/fixture/edit-write/overwrite.txt",
+                  "content": "used to be empty\n"
+                },
+                "output": "Wrote file successfully.",
+                "metadata": {
+                  "diagnostics": {},
+                  "filepath": "/fixture/edit-write/overwrite.txt",
+                  "exists": true,
+                  "truncated": false
+                },
+                "title": "overwrite.txt",
+                "time": {
+                  "start": 1795020187973,
+                  "end": 1795020188024
+                }
+              },
+              "id": "prt_fixture_3",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_3"
+            },
+            "time": 1795020188027
+          }
+        },
+        {
+          "id": "evt_fixture_13",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "id": "prt_fixture_4",
+              "messageID": "msg_fixture_4",
+              "sessionID": "ses_fixture_1",
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_overwrite",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020194151
+          }
+        },
+        {
+          "id": "evt_fixture_14",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_overwrite",
+              "state": {
+                "status": "running",
+                "input": {
+                  "filePath": "/fixture/edit-write/overwrite-nonempty.txt",
+                  "content": "overwritten\n"
+                },
+                "time": {
+                  "start": 1795020194195
+                }
+              },
+              "id": "prt_fixture_4",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_4"
+            },
+            "time": 1795020194195
+          }
+        },
+        {
+          "id": "evt_fixture_15",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "write",
+              "callID": "call_fixture_write_overwrite",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "/fixture/edit-write/overwrite-nonempty.txt",
+                  "content": "overwritten\n"
+                },
+                "output": "Wrote file successfully.",
+                "metadata": {
+                  "diagnostics": {},
+                  "filepath": "/fixture/edit-write/overwrite-nonempty.txt",
+                  "exists": true,
+                  "truncated": false
+                },
+                "title": "overwrite-nonempty.txt",
+                "time": {
+                  "start": 1795020194195,
+                  "end": 1795020194300
+                }
+              },
+              "id": "prt_fixture_4",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_4"
+            },
+            "time": 1795020194301
+          }
+        },
+        {
+          "id": "evt_fixture_16",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "id": "prt_fixture_5",
+              "messageID": "msg_fixture_5",
+              "sessionID": "ses_fixture_1",
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit_failed",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020203581
+          }
+        },
+        {
+          "id": "evt_fixture_17",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit_failed",
+              "state": {
+                "status": "running",
+                "input": {
+                  "filePath": "/fixture/edit-write/edit.txt",
+                  "oldString": "no such content",
+                  "newString": "do not attribute"
+                },
+                "time": {
+                  "start": 1795020203659
+                }
+              },
+              "id": "prt_fixture_5",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_5"
+            },
+            "time": 1795020203659
+          }
+        },
+        {
+          "id": "evt_fixture_18",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_1",
+            "part": {
+              "type": "tool",
+              "tool": "edit",
+              "callID": "call_fixture_edit_failed",
+              "state": {
+                "status": "error",
+                "input": {
+                  "filePath": "/fixture/edit-write/edit.txt",
+                  "oldString": "no such content",
+                  "newString": "do not attribute"
+                },
+                "error": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+                "time": {
+                  "start": 1795020203659,
+                  "end": 1795020204036
+                }
+              },
+              "id": "prt_fixture_5",
+              "sessionID": "ses_fixture_1",
+              "messageID": "msg_fixture_5"
+            },
+            "time": 1795020204036
+          }
+        }
+      ]
+    },
+    {
+      "name": "applyPatch",
+      "events": [
+        {
+          "id": "evt_fixture_19",
+          "type": "server.connected",
+          "properties": {}
+        },
+        {
+          "id": "evt_fixture_20",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_2",
+            "part": {
+              "id": "prt_fixture_6",
+              "messageID": "msg_fixture_6",
+              "sessionID": "ses_fixture_2",
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_patch",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020261507
+          }
+        },
+        {
+          "id": "evt_fixture_21",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_2",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_patch",
+              "state": {
+                "status": "running",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Update File: update.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n start\n-old moved text\n+new moved text\n end\n*** Delete File: delete.txt\n*** Add File: added.txt\n+fresh café 🌱\n*** Add File: overwritten-by-add.txt\n+changed existing file\n*** End Patch"
+                },
+                "time": {
+                  "start": 1795020261529
+                }
+              },
+              "id": "prt_fixture_6",
+              "sessionID": "ses_fixture_2",
+              "messageID": "msg_fixture_6"
+            },
+            "time": 1795020261529
+          }
+        },
+        {
+          "id": "evt_fixture_22",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_2",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_patch",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Update File: update.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n start\n-old moved text\n+new moved text\n end\n*** Delete File: delete.txt\n*** Add File: added.txt\n+fresh café 🌱\n*** Add File: overwritten-by-add.txt\n+changed existing file\n*** End Patch"
+                },
+                "output": "Success. Updated the following files:\nM update.txt\nM moved.txt\nD delete.txt\nA added.txt\nA overwritten-by-add.txt",
+                "metadata": {
+                  "diff": "Index: /fixture/patch/update.txt\n===================================================================\n--- /fixture/patch/update.txt\n+++ /fixture/patch/update.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n\nIndex: /fixture/patch/move.txt\n===================================================================\n--- /fixture/patch/move.txt\n+++ /fixture/patch/move.txt\n@@ -1,3 +1,3 @@\n start\n-old moved text\n+new moved text\n end\n\nIndex: /fixture/patch/delete.txt\n===================================================================\n--- /fixture/patch/delete.txt\n+++ /fixture/patch/delete.txt\n@@ -1,1 +0,0 @@\n-remove me\n\nIndex: /fixture/patch/added.txt\n===================================================================\n--- /fixture/patch/added.txt\n+++ /fixture/patch/added.txt\n@@ -0,0 +1,1 @@\n+fresh café 🌱\n\nIndex: /fixture/patch/overwritten-by-add.txt\n===================================================================\n--- /fixture/patch/overwritten-by-add.txt\n+++ /fixture/patch/overwritten-by-add.txt\n@@ -0,0 +1,1 @@\n+changed existing file\n\n",
+                  "files": [
+                    {
+                      "filePath": "/fixture/patch/update.txt",
+                      "relativePath": "update.txt",
+                      "type": "update",
+                      "patch": "Index: /fixture/patch/update.txt\n===================================================================\n--- /fixture/patch/update.txt\n+++ /fixture/patch/update.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n",
+                      "additions": 1,
+                      "deletions": 1
+                    },
+                    {
+                      "filePath": "/fixture/patch/move.txt",
+                      "relativePath": "moved.txt",
+                      "type": "move",
+                      "patch": "Index: /fixture/patch/move.txt\n===================================================================\n--- /fixture/patch/move.txt\n+++ /fixture/patch/move.txt\n@@ -1,3 +1,3 @@\n start\n-old moved text\n+new moved text\n end\n",
+                      "additions": 1,
+                      "deletions": 1,
+                      "movePath": "/fixture/patch/moved.txt"
+                    },
+                    {
+                      "filePath": "/fixture/patch/delete.txt",
+                      "relativePath": "delete.txt",
+                      "type": "delete",
+                      "patch": "Index: /fixture/patch/delete.txt\n===================================================================\n--- /fixture/patch/delete.txt\n+++ /fixture/patch/delete.txt\n@@ -1,1 +0,0 @@\n-remove me\n",
+                      "additions": 0,
+                      "deletions": 2
+                    },
+                    {
+                      "filePath": "/fixture/patch/added.txt",
+                      "relativePath": "added.txt",
+                      "type": "add",
+                      "patch": "Index: /fixture/patch/added.txt\n===================================================================\n--- /fixture/patch/added.txt\n+++ /fixture/patch/added.txt\n@@ -0,0 +1,1 @@\n+fresh café 🌱\n",
+                      "additions": 1,
+                      "deletions": 0
+                    },
+                    {
+                      "filePath": "/fixture/patch/overwritten-by-add.txt",
+                      "relativePath": "overwritten-by-add.txt",
+                      "type": "add",
+                      "patch": "Index: /fixture/patch/overwritten-by-add.txt\n===================================================================\n--- /fixture/patch/overwritten-by-add.txt\n+++ /fixture/patch/overwritten-by-add.txt\n@@ -0,0 +1,1 @@\n+changed existing file\n",
+                      "additions": 1,
+                      "deletions": 0
+                    }
+                  ],
+                  "diagnostics": {},
+                  "truncated": false
+                },
+                "title": "Success. Updated the following files:\nM update.txt\nM moved.txt\nD delete.txt\nA added.txt\nA overwritten-by-add.txt",
+                "time": {
+                  "start": 1795020261529,
+                  "end": 1795020261691
+                }
+              },
+              "id": "prt_fixture_6",
+              "sessionID": "ses_fixture_2",
+              "messageID": "msg_fixture_6"
+            },
+            "time": 1795020261692
+          }
+        },
+        {
+          "id": "evt_fixture_23",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_2",
+            "part": {
+              "id": "prt_fixture_7",
+              "messageID": "msg_fixture_7",
+              "sessionID": "ses_fixture_2",
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_patch_failed",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020271956
+          }
+        },
+        {
+          "id": "evt_fixture_24",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_2",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_patch_failed",
+              "state": {
+                "status": "running",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Add File: partial.txt\n+potential partial\n*** Delete File: missing-should-fail.txt\n*** End Patch"
+                },
+                "time": {
+                  "start": 1795020271985
+                }
+              },
+              "id": "prt_fixture_7",
+              "sessionID": "ses_fixture_2",
+              "messageID": "msg_fixture_7"
+            },
+            "time": 1795020271986
+          }
+        },
+        {
+          "id": "evt_fixture_25",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_2",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_patch_failed",
+              "state": {
+                "status": "error",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Add File: partial.txt\n+potential partial\n*** Delete File: missing-should-fail.txt\n*** End Patch"
+                },
+                "error": "apply_patch verification failed: NotFound: FileSystem.readFile (/fixture/patch/missing-should-fail.txt)",
+                "time": {
+                  "start": 1795020271985,
+                  "end": 1795020272005
+                }
+              },
+              "id": "prt_fixture_7",
+              "sessionID": "ses_fixture_2",
+              "messageID": "msg_fixture_7"
+            },
+            "time": 1795020272005
+          }
+        }
+      ]
+    },
+    {
+      "name": "patchVariants",
+      "events": [
+        {
+          "id": "evt_fixture_26",
+          "type": "server.connected",
+          "properties": {}
+        },
+        {
+          "id": "evt_fixture_27",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "id": "prt_fixture_8",
+              "messageID": "msg_fixture_8",
+              "sessionID": "ses_fixture_3",
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_update",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020455628
+          }
+        },
+        {
+          "id": "evt_fixture_28",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_update",
+              "state": {
+                "status": "running",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Update File: update-crlf.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: update-mixed.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: update-no-eof.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: update-lf.txt\n@@\n header\n-old\n+new\n footer\n*** End Patch"
+                },
+                "time": {
+                  "start": 1795020455779
+                }
+              },
+              "id": "prt_fixture_8",
+              "sessionID": "ses_fixture_3",
+              "messageID": "msg_fixture_8"
+            },
+            "time": 1795020455779
+          }
+        },
+        {
+          "id": "evt_fixture_29",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_update",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Update File: update-crlf.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: update-mixed.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: update-no-eof.txt\n@@\n header\n-old\n+new\n footer\n*** Update File: update-lf.txt\n@@\n header\n-old\n+new\n footer\n*** End Patch"
+                },
+                "output": "Success. Updated the following files:\nM update-crlf.txt\nM update-mixed.txt\nM update-no-eof.txt\nM update-lf.txt",
+                "metadata": {
+                  "diff": "Index: /fixture/patch-variants/update-crlf.txt\n===================================================================\n--- /fixture/patch-variants/update-crlf.txt\n+++ /fixture/patch-variants/update-crlf.txt\n@@ -1,3 +1,3 @@\n-header\r\n-old\r\n-footer\r\n+header\n+new\n+footer\n\nIndex: /fixture/patch-variants/update-mixed.txt\n===================================================================\n--- /fixture/patch-variants/update-mixed.txt\n+++ /fixture/patch-variants/update-mixed.txt\n@@ -1,3 +1,3 @@\n header\n-old\r\n-footer\n\\ No newline at end of file\n+new\n+footer\n\nIndex: /fixture/patch-variants/update-no-eof.txt\n===================================================================\n--- /fixture/patch-variants/update-no-eof.txt\n+++ /fixture/patch-variants/update-no-eof.txt\n@@ -1,3 +1,3 @@\n header\n-old\n-footer\n\\ No newline at end of file\n+new\n+footer\n\nIndex: /fixture/patch-variants/update-lf.txt\n===================================================================\n--- /fixture/patch-variants/update-lf.txt\n+++ /fixture/patch-variants/update-lf.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n\n",
+                  "files": [
+                    {
+                      "filePath": "/fixture/patch-variants/update-crlf.txt",
+                      "relativePath": "update-crlf.txt",
+                      "type": "update",
+                      "patch": "Index: /fixture/patch-variants/update-crlf.txt\n===================================================================\n--- /fixture/patch-variants/update-crlf.txt\n+++ /fixture/patch-variants/update-crlf.txt\n@@ -1,3 +1,3 @@\n-header\r\n-old\r\n-footer\r\n+header\n+new\n+footer\n",
+                      "additions": 3,
+                      "deletions": 3
+                    },
+                    {
+                      "filePath": "/fixture/patch-variants/update-mixed.txt",
+                      "relativePath": "update-mixed.txt",
+                      "type": "update",
+                      "patch": "Index: /fixture/patch-variants/update-mixed.txt\n===================================================================\n--- /fixture/patch-variants/update-mixed.txt\n+++ /fixture/patch-variants/update-mixed.txt\n@@ -1,3 +1,3 @@\n header\n-old\r\n-footer\n\\ No newline at end of file\n+new\n+footer\n",
+                      "additions": 2,
+                      "deletions": 2
+                    },
+                    {
+                      "filePath": "/fixture/patch-variants/update-no-eof.txt",
+                      "relativePath": "update-no-eof.txt",
+                      "type": "update",
+                      "patch": "Index: /fixture/patch-variants/update-no-eof.txt\n===================================================================\n--- /fixture/patch-variants/update-no-eof.txt\n+++ /fixture/patch-variants/update-no-eof.txt\n@@ -1,3 +1,3 @@\n header\n-old\n-footer\n\\ No newline at end of file\n+new\n+footer\n",
+                      "additions": 2,
+                      "deletions": 2
+                    },
+                    {
+                      "filePath": "/fixture/patch-variants/update-lf.txt",
+                      "relativePath": "update-lf.txt",
+                      "type": "update",
+                      "patch": "Index: /fixture/patch-variants/update-lf.txt\n===================================================================\n--- /fixture/patch-variants/update-lf.txt\n+++ /fixture/patch-variants/update-lf.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n",
+                      "additions": 1,
+                      "deletions": 1
+                    }
+                  ],
+                  "diagnostics": {},
+                  "truncated": false
+                },
+                "title": "Success. Updated the following files:\nM update-crlf.txt\nM update-mixed.txt\nM update-no-eof.txt\nM update-lf.txt",
+                "time": {
+                  "start": 1795020455779,
+                  "end": 1795020456278
+                }
+              },
+              "id": "prt_fixture_8",
+              "sessionID": "ses_fixture_3",
+              "messageID": "msg_fixture_8"
+            },
+            "time": 1795020456278
+          }
+        },
+        {
+          "id": "evt_fixture_30",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "id": "prt_fixture_9",
+              "messageID": "msg_fixture_9",
+              "sessionID": "ses_fixture_3",
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_delete",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020461920
+          }
+        },
+        {
+          "id": "evt_fixture_31",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_delete",
+              "state": {
+                "status": "running",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Delete File: delete-crlf.txt\n*** Delete File: delete-no-eof.txt\n*** Delete File: delete-empty.txt\n*** End Patch"
+                },
+                "time": {
+                  "start": 1795020461940
+                }
+              },
+              "id": "prt_fixture_9",
+              "sessionID": "ses_fixture_3",
+              "messageID": "msg_fixture_9"
+            },
+            "time": 1795020461940
+          }
+        },
+        {
+          "id": "evt_fixture_32",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_delete",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Delete File: delete-crlf.txt\n*** Delete File: delete-no-eof.txt\n*** Delete File: delete-empty.txt\n*** End Patch"
+                },
+                "output": "Success. Updated the following files:\nD delete-crlf.txt\nD delete-no-eof.txt\nD delete-empty.txt",
+                "metadata": {
+                  "diff": "Index: /fixture/patch-variants/delete-crlf.txt\n===================================================================\n--- /fixture/patch-variants/delete-crlf.txt\n+++ /fixture/patch-variants/delete-crlf.txt\n@@ -1,3 +0,0 @@\n-header\r\n-old\r\n-footer\r\n\nIndex: /fixture/patch-variants/delete-no-eof.txt\n===================================================================\n--- /fixture/patch-variants/delete-no-eof.txt\n+++ /fixture/patch-variants/delete-no-eof.txt\n@@ -1,3 +0,0 @@\n-header\n-old\n-footer\n\\ No newline at end of file\n\nIndex: /fixture/patch-variants/delete-empty.txt\n===================================================================\n--- /fixture/patch-variants/delete-empty.txt\n+++ /fixture/patch-variants/delete-empty.txt\n\n",
+                  "files": [
+                    {
+                      "filePath": "/fixture/patch-variants/delete-crlf.txt",
+                      "relativePath": "delete-crlf.txt",
+                      "type": "delete",
+                      "patch": "Index: /fixture/patch-variants/delete-crlf.txt\n===================================================================\n--- /fixture/patch-variants/delete-crlf.txt\n+++ /fixture/patch-variants/delete-crlf.txt\n@@ -1,3 +0,0 @@\n-header\r\n-old\r\n-footer\r\n",
+                      "additions": 0,
+                      "deletions": 4
+                    },
+                    {
+                      "filePath": "/fixture/patch-variants/delete-no-eof.txt",
+                      "relativePath": "delete-no-eof.txt",
+                      "type": "delete",
+                      "patch": "Index: /fixture/patch-variants/delete-no-eof.txt\n===================================================================\n--- /fixture/patch-variants/delete-no-eof.txt\n+++ /fixture/patch-variants/delete-no-eof.txt\n@@ -1,3 +0,0 @@\n-header\n-old\n-footer\n\\ No newline at end of file\n",
+                      "additions": 0,
+                      "deletions": 3
+                    },
+                    {
+                      "filePath": "/fixture/patch-variants/delete-empty.txt",
+                      "relativePath": "delete-empty.txt",
+                      "type": "delete",
+                      "patch": "Index: /fixture/patch-variants/delete-empty.txt\n===================================================================\n--- /fixture/patch-variants/delete-empty.txt\n+++ /fixture/patch-variants/delete-empty.txt\n",
+                      "additions": 0,
+                      "deletions": 1
+                    }
+                  ],
+                  "diagnostics": {},
+                  "truncated": false
+                },
+                "title": "Success. Updated the following files:\nD delete-crlf.txt\nD delete-no-eof.txt\nD delete-empty.txt",
+                "time": {
+                  "start": 1795020461940,
+                  "end": 1795020461994
+                }
+              },
+              "id": "prt_fixture_9",
+              "sessionID": "ses_fixture_3",
+              "messageID": "msg_fixture_9"
+            },
+            "time": 1795020461995
+          }
+        },
+        {
+          "id": "evt_fixture_33",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "id": "prt_fixture_10",
+              "messageID": "msg_fixture_10",
+              "sessionID": "ses_fixture_3",
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_move",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020466715
+          }
+        },
+        {
+          "id": "evt_fixture_34",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_move",
+              "state": {
+                "status": "running",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Update File: move-src.txt\n*** Move to: move-dst.txt\n@@\n header\n-old\n+new\n footer\n*** End Patch"
+                },
+                "time": {
+                  "start": 1795020466739
+                }
+              },
+              "id": "prt_fixture_10",
+              "sessionID": "ses_fixture_3",
+              "messageID": "msg_fixture_10"
+            },
+            "time": 1795020466739
+          }
+        },
+        {
+          "id": "evt_fixture_35",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_3",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_move",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Update File: move-src.txt\n*** Move to: move-dst.txt\n@@\n header\n-old\n+new\n footer\n*** End Patch"
+                },
+                "output": "Success. Updated the following files:\nM move-dst.txt",
+                "metadata": {
+                  "diff": "Index: /fixture/patch-variants/move-src.txt\n===================================================================\n--- /fixture/patch-variants/move-src.txt\n+++ /fixture/patch-variants/move-src.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n\n",
+                  "files": [
+                    {
+                      "filePath": "/fixture/patch-variants/move-src.txt",
+                      "relativePath": "move-dst.txt",
+                      "type": "move",
+                      "patch": "Index: /fixture/patch-variants/move-src.txt\n===================================================================\n--- /fixture/patch-variants/move-src.txt\n+++ /fixture/patch-variants/move-src.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n",
+                      "additions": 1,
+                      "deletions": 1,
+                      "movePath": "/fixture/patch-variants/move-dst.txt"
+                    }
+                  ],
+                  "diagnostics": {},
+                  "truncated": false
+                },
+                "title": "Success. Updated the following files:\nM move-dst.txt",
+                "time": {
+                  "start": 1795020466739,
+                  "end": 1795020466828
+                }
+              },
+              "id": "prt_fixture_10",
+              "sessionID": "ses_fixture_3",
+              "messageID": "msg_fixture_10"
+            },
+            "time": 1795020466828
+          }
+        }
+      ]
+    },
+    {
+      "name": "patchDeleteBatch",
+      "events": [
+        {
+          "id": "evt_fixture_delete_batch_1",
+          "type": "server.connected",
+          "properties": {}
+        },
+        {
+          "id": "evt_fixture_delete_batch_2",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_delete_batch_1",
+            "part": {
+              "id": "prt_fixture_delete_batch_1",
+              "messageID": "msg_fixture_delete_batch_1",
+              "sessionID": "ses_fixture_delete_batch_1",
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_delete_exact",
+              "state": {
+                "status": "pending",
+                "input": {},
+                "raw": ""
+              }
+            },
+            "time": 1795020801029
+          }
+        },
+        {
+          "id": "evt_fixture_delete_batch_3",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_delete_batch_1",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_delete_exact",
+              "state": {
+                "status": "running",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Delete File: delete-crlf.txt\n*** Delete File: delete-no-eof.txt\n*** Update File: update-lf.txt\n@@\n header\n-old\n+new\n footer\n*** End Patch"
+                },
+                "time": {
+                  "start": 1795020801053
+                }
+              },
+              "id": "prt_fixture_delete_batch_1",
+              "sessionID": "ses_fixture_delete_batch_1",
+              "messageID": "msg_fixture_delete_batch_1"
+            },
+            "time": 1795020801053
+          }
+        },
+        {
+          "id": "evt_fixture_delete_batch_4",
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_fixture_delete_batch_1",
+            "part": {
+              "type": "tool",
+              "tool": "apply_patch",
+              "callID": "call_fixture_delete_exact",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "patchText": "*** Begin Patch\n*** Delete File: delete-crlf.txt\n*** Delete File: delete-no-eof.txt\n*** Update File: update-lf.txt\n@@\n header\n-old\n+new\n footer\n*** End Patch"
+                },
+                "output": "Success. Updated the following files:\nD delete-crlf.txt\nD delete-no-eof.txt\nM update-lf.txt",
+                "metadata": {
+                  "diff": "Index: /fixture/patch-exact-delete/delete-crlf.txt\n===================================================================\n--- /fixture/patch-exact-delete/delete-crlf.txt\n+++ /fixture/patch-exact-delete/delete-crlf.txt\n@@ -1,3 +0,0 @@\n-header\r\n-old\r\n-footer\r\n\nIndex: /fixture/patch-exact-delete/delete-no-eof.txt\n===================================================================\n--- /fixture/patch-exact-delete/delete-no-eof.txt\n+++ /fixture/patch-exact-delete/delete-no-eof.txt\n@@ -1,3 +0,0 @@\n-header\n-old\n-footer\n\\ No newline at end of file\n\nIndex: /fixture/patch-exact-delete/update-lf.txt\n===================================================================\n--- /fixture/patch-exact-delete/update-lf.txt\n+++ /fixture/patch-exact-delete/update-lf.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n\n",
+                  "files": [
+                    {
+                      "filePath": "/fixture/patch-exact-delete/delete-crlf.txt",
+                      "relativePath": "delete-crlf.txt",
+                      "type": "delete",
+                      "patch": "Index: /fixture/patch-exact-delete/delete-crlf.txt\n===================================================================\n--- /fixture/patch-exact-delete/delete-crlf.txt\n+++ /fixture/patch-exact-delete/delete-crlf.txt\n@@ -1,3 +0,0 @@\n-header\r\n-old\r\n-footer\r\n",
+                      "additions": 0,
+                      "deletions": 4
+                    },
+                    {
+                      "filePath": "/fixture/patch-exact-delete/delete-no-eof.txt",
+                      "relativePath": "delete-no-eof.txt",
+                      "type": "delete",
+                      "patch": "Index: /fixture/patch-exact-delete/delete-no-eof.txt\n===================================================================\n--- /fixture/patch-exact-delete/delete-no-eof.txt\n+++ /fixture/patch-exact-delete/delete-no-eof.txt\n@@ -1,3 +0,0 @@\n-header\n-old\n-footer\n\\ No newline at end of file\n",
+                      "additions": 0,
+                      "deletions": 3
+                    },
+                    {
+                      "filePath": "/fixture/patch-exact-delete/update-lf.txt",
+                      "relativePath": "update-lf.txt",
+                      "type": "update",
+                      "patch": "Index: /fixture/patch-exact-delete/update-lf.txt\n===================================================================\n--- /fixture/patch-exact-delete/update-lf.txt\n+++ /fixture/patch-exact-delete/update-lf.txt\n@@ -1,3 +1,3 @@\n header\n-old\n+new\n footer\n",
+                      "additions": 1,
+                      "deletions": 1
+                    }
+                  ],
+                  "diagnostics": {},
+                  "truncated": false
+                },
+                "title": "Success. Updated the following files:\nD delete-crlf.txt\nD delete-no-eof.txt\nM update-lf.txt",
+                "time": {
+                  "start": 1795020801053,
+                  "end": 1795020801106
+                }
+              },
+              "id": "prt_fixture_delete_batch_1",
+              "sessionID": "ses_fixture_delete_batch_1",
+              "messageID": "msg_fixture_delete_batch_1"
+            },
+            "time": 1795020801106
+          }
+        }
+      ]
+    }
+  ]
+}
