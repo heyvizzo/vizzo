@@ -1,15 +1,30 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 
 const harness = process.env.VIZZO_FAKE_NATIVE_HARNESS;
 const late = process.env.VIZZO_FAKE_STOP_MODE === "late";
+const descendant = process.env.VIZZO_FAKE_STOP_MODE === "descendant";
 const sid = "native-session";
 const tid = "native-turn";
 const text = "working";
 const stdout = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const afterStop = (fn) => setTimeout(fn, 60);
+const terminal = () => { if (descendant) writeFileSync("terminal", ""); };
+const childWriter = () => {
+  writeFileSync("created", "proved");
+  return spawn(process.execPath, ["-e", `
+    const { existsSync, writeFileSync } = require("node:fs");
+    setInterval(() => {
+      if (!existsSync("release-descendant")) return;
+      writeFileSync("created", "late");
+      process.exit(0);
+    }, 10);
+  `], { stdio: "ignore" });
+};
 
 if (harness === "opencode") {
   const ports = process.argv.slice(2);
@@ -64,14 +79,17 @@ if (harness === "opencode") {
     } else respond(true);
   }).listen(port, "127.0.0.1", () => console.log(`opencode server listening on http://127.0.0.1:${port}`));
 } else if (harness === "grok") {
+  if (descendant) childWriter().on("exit", () => process.exit(0));
   stdout({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text } } });
-  process.on("SIGTERM", () => { if (late) afterStop(() => {
+  process.on("SIGTERM", () => { if (late || descendant) afterStop(() => {
     stdout({ type: "result", subtype: "success" });
-    process.exit(0);
+    terminal();
+    if (late) process.exit(0);
   }); });
   setInterval(() => {}, 1000);
 } else {
   const inLines = createInterface({ input: process.stdin });
+  let turn = 0;
   inLines.on("line", (line) => {
     const m = JSON.parse(line);
     if (harness === "codex") {
@@ -98,27 +116,48 @@ if (harness === "opencode") {
       if (m.method === "thread/unsubscribe") reply({ status: "notLoaded" });
     } else if (harness === "claude-code") {
       const receive = (value) => stdout({ session_id: sid, ...value });
-      if (m.type === "user") receive({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text } } });
+      if (m.type === "user") {
+        if (descendant && ++turn > 1) { receive({ type: "result", subtype: "success", result: "resumed" }); return; }
+        if (descendant) childWriter();
+        receive({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text } } });
+      }
       if (m.type === "control_request") afterStop(() => {
         const path = join(process.cwd(), "created");
-        receive({ type: "assistant", message: { role: "assistant", content: [
-          { type: "tool_use", id: "native-tool", name: "Write", input: { file_path: path, content: "late" } },
-        ] } });
-        receive({ type: "user", message: { role: "user", content: [
-          { type: "tool_result", tool_use_id: "native-tool", content: "Written" },
-        ] }, tool_use_result: {
-          type: "create", filePath: path, originalFile: null, structuredPatch: [], userModified: false, content: "late",
-        } });
-        if (late) receive({ type: "result", subtype: "success" });
+        const content = descendant ? "proved" : "late";
+        const report = () => {
+          receive({ type: "assistant", message: { role: "assistant", content: [
+            { type: "tool_use", id: "native-tool", name: "Write", input: { file_path: path, content } },
+          ] } });
+          receive({ type: "user", message: { role: "user", content: [
+            { type: "tool_result", tool_use_id: "native-tool", content: "Written" },
+          ] }, tool_use_result: {
+            type: "create", filePath: path, originalFile: null, structuredPatch: [], userModified: false, content,
+          } });
+          if (late) receive({ type: "result", subtype: "success" });
+        };
+        if (descendant) { receive({ type: "result", subtype: "success" }); terminal(); afterStop(report); }
+        else report();
       });
     } else {
       if (m.type === "get_state") stdout({ type: "response", id: "boot", data: { sessionId: sid, messageCount: 0 } });
-      if (m.type === "prompt") stdout({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+      if (m.type === "prompt") {
+        if (descendant && ++turn > 1) {
+          stdout({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "resumed" } });
+          stdout({ type: "agent_end" });
+          return;
+        }
+        if (descendant) childWriter();
+        stdout({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+      }
       if (m.type === "abort") afterStop(() => {
-        stdout({ type: "tool_execution_start", toolCallId: "native-tool", toolName: "edit", args: { input: "exact" } });
-        stdout({ type: "tool_execution_end", toolCallId: "native-tool", toolName: "edit", isError: false,
-          result: { details: { path: join(process.cwd(), "f"), op: "update", oldText: "before", newText: "after" } } });
-        if (late) stdout({ type: "agent_end" });
+        const report = () => {
+          stdout({ type: "tool_execution_start", toolCallId: "native-tool", toolName: "edit", args: { input: "exact" } });
+          stdout({ type: "tool_execution_end", toolCallId: "native-tool", toolName: "edit", isError: false,
+            result: { details: { path: join(process.cwd(), descendant ? "created" : "f"), op: "update", oldText: "before", newText: descendant ? "proved" : "after" } } });
+          if (late) stdout({ type: "agent_end" });
+        };
+        if (descendant) { stdout({ type: "agent_end" }); terminal(); afterStop(report); }
+        else report();
       });
     }
   });

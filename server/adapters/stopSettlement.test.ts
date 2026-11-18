@@ -1,10 +1,12 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HarnessId } from "../../shared/config.ts";
-import type { WriterExecution } from "../changes/writers.ts";
+import { LedgerWorkerClient } from "../changes/ledgerWorkerClient.ts";
+import { WriterRegistry, type WriterExecution } from "../changes/writers.ts";
 import { restartSharedHarness, STOP_CONFIRM_MS } from "./harnesses.ts";
 import { openHarnessThread } from "./harnessThread.ts";
 import { stopWarm } from "./warmPool.ts";
@@ -22,15 +24,19 @@ function deferred() {
   return { promise, resolve };
 }
 
-function start(harness: HarnessId, mode: "late" | "never", taskTimeout = 60_000, gate?: () => Promise<void>) {
-  const folder = realpathSync(mkdtempSync(join(tmpdir(), "vizzo-settle-")));
+function fixtureThread(folder: string, harness: HarnessId, mode: "late" | "never" | "descendant") {
   vi.stubEnv(envBin[harness], fixture);
   vi.stubEnv("VIZZO_FAKE_NATIVE_HARNESS", harness);
   vi.stubEnv("VIZZO_FAKE_STOP_MODE", mode);
   vi.stubEnv("VIZZO_FAKE_PROJECT", folder);
+  return openHarnessThread({ role: "solver", projectFolder: folder, choice: { provider: harness, model: "" }, replay: () => "" });
+}
+
+function start(harness: HarnessId, mode: Parameters<typeof fixtureThread>[2], taskTimeout = 60_000, gate?: () => Promise<void>) {
+  const folder = realpathSync(mkdtempSync(join(tmpdir(), "vizzo-settle-")));
   const observed = { folder, edits: vi.fn(), stopping: vi.fn(), unconfirmed: vi.fn(), waitForSettlement: vi.fn(), bindNative: vi.fn(gate ?? (async () => {})) };
   const active = deferred();
-  const thread = openHarnessThread({ role: "solver", projectFolder: folder, choice: { provider: harness, model: "" }, replay: () => "" });
+  const thread = fixtureThread(folder, harness, mode);
   const answer = thread.send("work", () => active.resolve(), taskTimeout, undefined, undefined, observed as unknown as WriterExecution);
   answer.catch(() => {});
   return { folder, observed, thread, answer, active: active.promise, close: () => {
@@ -97,6 +103,82 @@ describe.each(harnesses)("%s native stop settlement", (harness) => {
     } finally { request.close(); }
   }, 20_000);
 });
+
+it.each(["claude-code", "omp", "pi", "grok"] as const)("keeps a stopped %s writer active after terminal while its child can still write", async (harness) => {
+  const temp = realpathSync(mkdtempSync(join(tmpdir(), "vizzo-settle-child-")));
+  const folder = join(temp, "project");
+  mkdirSync(folder);
+  const path = join(folder, "created");
+  const release = join(folder, "release-descendant");
+  const worker = new LedgerWorkerClient(join(temp, "ledger.json"));
+  const registry = new WriterRegistry(worker);
+  const thread = fixtureThread(folder, harness, "descendant");
+  try {
+    execFileSync("git", ["init", "-q", "-b", "main", folder]);
+    if (harness === "omp") {
+      writeFileSync(path, "before");
+      execFileSync("git", ["-C", folder, "add", "created"]);
+      execFileSync("git", ["-C", folder, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "initial"]);
+    }
+    const { project } = await registry.project(folder);
+    const execution = registry.queue({ writer: { kind: "thread", id: "thread" }, title: "Test", request: "work", folder, purpose: "request", harness });
+    const edits = vi.spyOn(execution, "edits");
+    const phase = async () => (await registry.snapshot(project!.id)).executions[0]?.phase;
+    const active = deferred();
+    const answer = execution.run(() => thread.send("work", active.resolve, 60_000, undefined, undefined, execution));
+    void answer.catch(() => {});
+    await active.promise;
+    const pid = thread.pid?.();
+    const settled = thread.settled!;
+    thread.abort();
+    await expect(answer).rejects.toMatchObject({ name: "AbortError" });
+    await expect.poll(() => existsSync(join(folder, "terminal")), { timeout: 5000 }).toBe(true);
+    if (harness === "claude-code" || harness === "omp") {
+      await expect.poll(() => edits.mock.calls.length, { timeout: 5000 }).toBe(1);
+    }
+    expect(readFileSync(path, "utf8")).toBe("proved");
+    expect(await phase()).toBe("settling");
+
+    writeFileSync(release, "");
+    await settled;
+    await expect.poll(phase, { timeout: 5000 }).toBe("settled");
+    expect(readFileSync(path, "utf8")).toBe("late");
+    if (harness !== "grok") {
+      expect(pid).toBeTypeOf("number");
+      await expect(thread.send("continue", undefined, 5000)).resolves.toMatchObject({ text: "resumed", session: { mode: "live" } });
+      expect(thread.pid?.()).toBe(pid);
+    }
+  } finally {
+    writeFileSync(release, "");
+    thread.close();
+    await thread.settled;
+    await registry.flush();
+    await worker.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+}, 20_000);
+
+it("escalates a timed-out private group even after a terminal while a child can still write", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const request = start("omp", "descendant", 500);
+  try {
+    await request.active;
+    let confirmed = false;
+    void request.thread.settled!.then(() => { confirmed = true; });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(request.answer).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.waitFor(() => expect(existsSync(join(request.folder, "terminal"))).toBe(true));
+    await vi.waitFor(() => expect(request.observed.edits).toHaveBeenCalledOnce());
+    expect(request.observed.stopping).toHaveBeenCalledWith("timed-out");
+    expect(confirmed).toBe(false);
+    await vi.advanceTimersByTimeAsync(STOP_CONFIRM_MS);
+    await vi.waitFor(() => expect(confirmed).toBe(true), { timeout: 5000 });
+    writeFileSync(join(request.folder, "release-descendant"), "");
+    expect(readFileSync(join(request.folder, "created"), "utf8")).toBe("proved");
+    expect(request.thread.live).toBe(false);
+    expect(request.observed.unconfirmed).not.toHaveBeenCalled();
+  } finally { request.close(); }
+}, 20_000);
 
 it("reports a Codex timeout before native confirmation and still handles the interrupted turn's tool result", async () => {
   const request = start("codex", "late", 300);

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LedgerWorkerClient } from "../changes/ledgerWorkerClient.ts";
 import { WriterRegistry } from "../changes/writers.ts";
-import { NativeHarnessProcess, stopVerifiedNativeProcess, type NativeProcessIdentity } from "./nativeProcess.ts";
+import { NativeHarnessProcess, stopVerifiedNativeProcess, stopVerifiedOrphanNativeProcess, type NativeProcessIdentity } from "./nativeProcess.ts";
 
 let folder: string;
 let project: string;
@@ -33,6 +33,37 @@ function recordedIdentity(): NativeProcessIdentity {
 }
 
 describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("verified native harness process groups", () => {
+  it("refuses orphan-only shutdown while the voice owns the control connection, then stops after a hard kill", async () => {
+    const script = join(folder, "voice.mts");
+    const record = join(folder, "identity.json");
+    writeFileSync(script, `
+      import { writeFileSync } from "node:fs";
+      import { NativeHarnessProcess } from ${JSON.stringify(new URL("./nativeProcess.ts", import.meta.url).href)};
+      const [project, record] = process.argv.slice(2);
+      const native = new NativeHarnessProcess("/bin/sh", ["-c", "echo started > started; sleep 20"], project);
+      await native.prepare();
+      writeFileSync(record, JSON.stringify(native.identity));
+      await native.closed;
+    `);
+    const voice = spawn(process.execPath, ["--import", "tsx", script, project, record], { stdio: "ignore" });
+    const exit = once(voice, "exit");
+    let identity: NativeProcessIdentity | undefined;
+    try {
+      await expect.poll(() => existsSync(record) && existsSync(join(project, "started")), { timeout: 5000 }).toBe(true);
+      identity = JSON.parse(readFileSync(record, "utf8")) as NativeProcessIdentity;
+      expect(await stopVerifiedOrphanNativeProcess(identity)).toBe(false);
+      expect(hasActiveGroup(identity.group)).toBe(true);
+
+      voice.kill("SIGKILL");
+      expect(await exit).toEqual([null, "SIGKILL"]);
+      expect(hasActiveGroup(identity.group)).toBe(true);
+      expect(await stopVerifiedOrphanNativeProcess(identity)).toBe(true);
+    } finally {
+      if (voice.exitCode === null && voice.signalCode === null) { voice.kill("SIGKILL"); await exit; }
+      if (identity) await stopVerifiedNativeProcess(identity, true);
+    }
+  }, 20_000);
+
   it("kills the previous voice process's Bash descendants during genuine startup recovery", async () => {
     execFileSync("git", ["init", "-q", "-b", "main", project]);
     const recoverScript = join(folder, "voice.mts");
@@ -55,7 +86,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("
     const voice = spawn(process.execPath, ["--import", "tsx", recoverScript, project, journal], { stdio: "ignore" });
     const exit = once(voice, "exit");
     let identity: NativeProcessIdentity | undefined;
-    const replacement = new LedgerWorkerClient(journal);
+    let replacement: LedgerWorkerClient | undefined;
     try {
       await expect.poll(() => existsSync(join(project, "started")), { timeout: 5_000 }).toBe(true);
       identity = recordedIdentity();
@@ -64,6 +95,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("
       expect(await exit).toEqual([null, "SIGKILL"]);
       expect(hasActiveGroup(identity.group)).toBe(true);
       expect(existsSync(join(project, "delayed"))).toBe(false);
+      replacement = new LedgerWorkerClient(journal);
       const { project: repo } = await replacement.discover(project);
       const registry = new WriterRegistry(replacement);
       await registry.restore();
@@ -75,7 +107,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("
     } finally {
       if (voice.exitCode === null && voice.signalCode === null) { voice.kill("SIGKILL"); await exit; }
       if (identity) await stopVerifiedNativeProcess(identity, true);
-      await replacement.close();
+      await replacement?.close();
     }
   }, 20_000);
 
@@ -126,7 +158,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("
       else await client.close().catch(() => {});
     }
   }, 20_000);
-  it("stops the verified OpenCode group but blocks a shell-capable writer without native confirmation on restart", async () => {
+  it("blocks a shell-capable OpenCode writer on restart even after a verified group exit", async () => {
     execFileSync("git", ["init", "-q", "-b", "main", project]);
     const native = new NativeHarnessProcess("/bin/sh", ["-c", "sleep 20"], project);
     const client = new LedgerWorkerClient(journal);
@@ -140,10 +172,11 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("
       });
       await execution.bindNative(native.identity, true);
       await client.close();
+      expect(await native.stop(true)).toBe(true);
+      await native.closed;
       replacement = new LedgerWorkerClient(journal);
       const recovered = new WriterRegistry(replacement);
       await recovered.restore();
-      await native.closed;
       expect((await recovered.snapshot(repo!.id)).executions[0]).toMatchObject({
         phase: "unconfirmed", outcome: "interrupted",
         reason: "OpenCode may have left a detached shell running without confirming it stopped",

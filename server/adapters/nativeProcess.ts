@@ -21,7 +21,7 @@ const FORCE_AFTER_MS = 1_000;
 const LOST_PARENT_MS = 8_000;
 const supported = process.platform === "darwin" || process.platform === "linux";
 
-function signature(token: string, action: "prove" | "stop", nonce: string): Buffer {
+function signature(token: string, action: "prove" | "stop" | "stop-orphan", nonce: string): Buffer {
   return createHmac("sha256", token).update(`${action}:${nonce}`).digest();
 }
 
@@ -29,18 +29,25 @@ function sameSignature(expected: Buffer, actual: unknown): boolean {
   return typeof actual === "string" && TOKEN.test(actual) && timingSafeEqual(expected, Buffer.from(actual, "hex"));
 }
 
-function inspectGroup(group: number): Promise<boolean> {
+function inspectGroup(group: number, keptPid?: number): Promise<boolean> {
   // A zombie cannot write. This also works in development containers whose PID 1 waits to reap a child.
   return new Promise((resolve) => {
-    execFile("/bin/ps", ["-axo", "pgid=,stat="], {
+    execFile("/bin/ps", ["-axo", "pid=,pgid=,stat="], {
       timeout: PROVE_MS, maxBuffer: 512_000, env: { LC_ALL: "C", PATH: "/usr/bin:/bin" },
     }, (error, stdout) => {
       if (error || !stdout.trim()) { resolve(false); return; }
+      let sawSupervisor = false;
+      let sawKept = false;
       for (const line of stdout.trimEnd().split("\n")) {
-        const row = /^\s*(\d+)\s+(\S+)\s*$/.exec(line);
-        if (!row || (Number(row[1]) === group && !row[2]!.startsWith("Z"))) { resolve(false); return; }
+        const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line);
+        if (!row) { resolve(false); return; }
+        if (Number(row[2]) !== group || row[3]!.startsWith("Z")) continue;
+        const pid = Number(row[1]);
+        if (keptPid !== undefined && pid === group) sawSupervisor = true;
+        else if (pid === keptPid) sawKept = true;
+        else { resolve(false); return; }
       }
-      resolve(true);
+      resolve(keptPid === undefined || (sawSupervisor && sawKept));
     });
   });
 }
@@ -64,7 +71,7 @@ async function waitForGroup(group: number): Promise<boolean> {
   return false;
 }
 
-function authorize(identity: NativeProcessIdentity, force?: boolean): Promise<boolean> {
+function authorize(identity: NativeProcessIdentity, stop?: { force: boolean; orphanOnly: boolean }): Promise<boolean> {
   return new Promise((resolve) => {
     const nonce = randomBytes(32).toString("hex");
     const peer = connect(identity.socket);
@@ -93,9 +100,10 @@ function authorize(identity: NativeProcessIdentity, force?: boolean): Promise<bo
             finish(false);
             return;
           }
-          if (force === undefined) { finish(true); return; }
+          if (!stop) { finish(true); return; }
           authenticated = true;
-          peer.write(JSON.stringify({ stop: signature(identity.token, "stop", nonce).toString("hex"), force }) + "\n");
+          const action = stop.orphanOnly ? "stop-orphan" : "stop";
+          peer.write(JSON.stringify({ stop: signature(identity.token, action, nonce).toString("hex"), ...stop }) + "\n");
         } else finish(message?.stopping === true);
       }
       if (buffer.length > 4096) finish(false);
@@ -116,12 +124,21 @@ function privateEndpoint(identity: NativeProcessIdentity): boolean {
   } catch { return false; }
 }
 
-/** An unreachable or unauthenticated live group is unresolved and is never signaled. */
-export async function stopVerifiedNativeProcess(identity: NativeProcessIdentity, force = false): Promise<boolean> {
+async function stopVerifiedGroup(identity: NativeProcessIdentity, force: boolean, orphanOnly: boolean): Promise<boolean> {
   if (!supported || !validIdentity(identity)) return false;
   if (await isGroupGone(identity.group)) return true;
-  if (!privateEndpoint(identity) || !await authorize(identity, force)) return isGroupGone(identity.group);
+  if (!privateEndpoint(identity) || !await authorize(identity, { force, orphanOnly })) return isGroupGone(identity.group);
   return waitForGroup(identity.group);
+}
+
+/** An unreachable or unauthenticated live group is unresolved and is never signaled. */
+export function stopVerifiedNativeProcess(identity: NativeProcessIdentity, force = false): Promise<boolean> {
+  return stopVerifiedGroup(identity, force, false);
+}
+
+/** Recovery can only signal after the supervisor loses its owning voice control connection. */
+export function stopVerifiedOrphanNativeProcess(identity: NativeProcessIdentity): Promise<boolean> {
+  return stopVerifiedGroup(identity, true, true);
 }
 
 // The supervisor runs under the same Node/Electron executable with no project code or modules loaded.
@@ -136,6 +153,7 @@ process.on("SIGTERM", () => {});
 const send = (data) => { if (control.writable) control.write(JSON.stringify(data) + "\n"); };
 let payload;
 let terminal = false;
+let ownerDisconnected = false;
 let child;
 let pending = "";
 const terminate = (force) => {
@@ -183,9 +201,11 @@ const setup = (configuration) => {
           peer.write(JSON.stringify({ group: process.pid, proof: mac("prove", nonce).toString("hex") }) + "\n");
         } else {
           const proof = message?.stop;
+          const orphanOnly = message?.orphanOnly === true;
           if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof) ||
-              !timingSafeEqual(mac("stop", nonce), Buffer.from(proof, "hex"))) { peer.destroy(); return; }
-          peer.end('{"stopping":true}\n', () => terminate(message.force === true));
+              !timingSafeEqual(mac(orphanOnly ? "stop-orphan" : "stop", nonce), Buffer.from(proof, "hex"))) { peer.destroy(); return; }
+          if (orphanOnly && !ownerDisconnected) { peer.end('{"stopping":false}\n'); return; }
+          peer.end('{"stopping":true}\n', () => terminate(orphanOnly || message.force === true));
           return;
         }
       }
@@ -194,7 +214,10 @@ const setup = (configuration) => {
   server.on("error", () => { send({ type: "error", code: "SUPERVISOR_SOCKET" }); terminate(false); });
   server.listen(payload.socket, () => { send({ type: "ready" }); if (!payload.paused) launch(); });
 };
-control.on("end", () => setTimeout(() => terminate(true), ${LOST_PARENT_MS}).unref());
+control.on("close", () => {
+  ownerDisconnected = true;
+  setTimeout(() => terminate(true), ${LOST_PARENT_MS}).unref();
+});
 control.on("data", (chunk) => {
   pending += chunk.toString();
   let end;
@@ -254,7 +277,10 @@ export class NativeHarnessProcess {
         buffer = buffer.slice(end + 1);
         if (message.type === "ready") accept();
         else if (message.type === "native") this.native = message.pid;
-        else if (message.type === "exit") this.exitCode = typeof message.code === "number" ? message.code : null;
+        else if (message.type === "exit") {
+          this.native = undefined;
+          this.exitCode = typeof message.code === "number" ? message.code : null;
+        }
         else if (message.type === "error") refuse(new Error(`Could not start harness process (${message.code ?? "unknown error"})`));
       }
     });
@@ -287,6 +313,19 @@ export class NativeHarnessProcess {
   async verify(): Promise<boolean> {
     await this.ready.catch(() => {});
     return privateEndpoint(this.identity) && authorize(this.identity);
+  }
+
+  /** After an interrupted turn's terminal, wait for its tools or the entire group to exit. */
+  async waitForStoppedTurn(keep: boolean): Promise<void> {
+    while (keep && this.proc.exitCode === null && this.proc.signalCode === null) {
+      const pid = this.native;
+      if (pid !== undefined) {
+        const clear = await this.verify().then((verified) => verified && inspectGroup(this.identity.group, pid)).catch(() => false);
+        if (clear && this.native === pid) return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100).unref());
+    }
+    await this.closed;
   }
 
   start(): void { this.control.write('{"start":true}\n'); }
