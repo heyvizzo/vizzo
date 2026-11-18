@@ -469,3 +469,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - A full before-and-after report can reconnect from a historical version past an explained edit only when an
   independent disk observation matches its after-version at an unresolved gap. The intervening rollback stays
   Other. A partial patch cannot establish that rollback, and a report cannot replace an explained endpoint.
+- The temporary copy preserves the real index's timestamp for Git's racy-clean detection. When Git writes the
+  copy, it can read an unselected worktree path with an ambiguous timestamp and run that path's clean filter.
+  This keeps a same-size edit visible after index installation. Selected commit bytes still come from the freeze.
