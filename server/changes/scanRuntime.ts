@@ -14,6 +14,7 @@ import { evidencePath, sameHead, type LedgerProject } from "./project.ts";
 
 const POLL_MS = 2_000;
 const REVIEW_AGAIN = "Changed meanwhile: review again";
+const NO_WORKTREE = "The project folder is not in a Git worktree";
 const UNSAFE_PATH = "Path cannot be observed in this project";
 const MISMATCH = "The ledger and Git read different versions of this entry";
 
@@ -39,6 +40,7 @@ export interface ScanRuntimePorts {
 export type CurrentChanges =
   | { readonly kind: "none" }
   | { readonly kind: "loading"; readonly directory: string }
+  | { readonly kind: "non-repository"; readonly directory: string; readonly reason: string }
   | { readonly kind: "unavailable"; readonly directory: string; readonly reason: string }
   | { readonly kind: "ready"; readonly project: Readonly<LedgerProject>; readonly view: ChangesView };
 
@@ -64,7 +66,7 @@ interface ActiveProject {
   requested: boolean;
   task?: Promise<void>;
   published?: Published;
-  unavailable?: string;
+  unavailable?: Extract<CurrentChanges, { kind: "non-repository" | "unavailable" }>;
   /** A scope or HEAD change revokes public reviews, even if a later scan returns to it. */
   binding?: { readonly key: string };
 }
@@ -147,10 +149,7 @@ export class ScanRuntime {
     if (!active) return { kind: "none" };
     const published = active.published;
     if (published) return { kind: "ready", project: published.project, view: published.graph.view };
-    if (active.unavailable !== undefined) {
-      return { kind: "unavailable", directory: active.directory, reason: active.unavailable };
-    }
-    return { kind: "loading", directory: active.directory };
+    return active.unavailable ?? { kind: "loading", directory: active.directory };
   }
 
   setProject(directory: string | null): Promise<void> {
@@ -275,7 +274,11 @@ export class ScanRuntime {
         if (!found.project) {
           active.binding = undefined;
           active.published = undefined;
-          active.unavailable = found.reason;
+          // Discovery only certifies a non-repository after its Git version probe succeeds.
+          active.unavailable = {
+            kind: found.reason === NO_WORKTREE ? "non-repository" : "unavailable",
+            directory: active.directory, reason: found.reason,
+          };
           return;
         }
         const project = Object.freeze({ ...found.project });
@@ -306,7 +309,7 @@ export class ScanRuntime {
         active.published = undefined;
         active.binding = undefined;
         if ((isHeadChange(error) || error instanceof ScanProjectChangedError) && attempt === 0) continue;
-        active.unavailable = reason(error);
+        active.unavailable = { kind: "unavailable", directory: active.directory, reason: reason(error) };
         return;
       }
     }

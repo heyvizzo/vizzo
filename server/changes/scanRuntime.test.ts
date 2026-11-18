@@ -9,7 +9,7 @@ import { runCommitTransaction, type CommitContext, type CommitRequest } from "./
 import { MAX_FILE_BYTES, type EditChange } from "./evidence.ts";
 import type { LedgerView } from "./ledger.ts";
 import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
-import type { LedgerProject } from "./project.ts";
+import type { LedgerProject, ProjectDiscovery } from "./project.ts";
 import { ScanRuntime, type ScanResponse, type ScanRuntimePorts } from "./scanRuntime.ts";
 
 function git(root: string, ...args: string[]): string {
@@ -62,6 +62,7 @@ async function fixture(format: string) {
   const writers: Awaited<ReturnType<ScanRuntimePorts["writers"]["snapshot"]>>["executions"][number][] = [];
   const observations: string[][] = [];
   const hooks: {
+    discover?: (directory: string) => Promise<ProjectDiscovery>;
     beforeObserve?: () => Promise<void>;
     afterObserve?: (view: LedgerView) => LedgerView;
     beforeWriters?: () => Promise<void>;
@@ -70,7 +71,7 @@ async function fixture(format: string) {
   const updated = vi.fn();
   const runtime = new ScanRuntime({
     ledger: {
-      discover: (directory) => ledger.discover(directory),
+      discover: (directory) => hooks.discover?.(directory) ?? ledger.discover(directory),
       trackedPaths: async () => [...tracked],
       observe: async (project, paths) => {
         observations.push([...paths]);
@@ -255,6 +256,44 @@ describe.each(["files", "reftable"])("source-control scan runtime (%s refs)", (f
     expect(updated).toHaveBeenCalledTimes(2);
   });
 
+  it("invalidates diffs on text and ownership changes with the same file counts and writer title", async () => {
+    const { root, put, commit, project, edit, runtime, writers } = await fixture(format);
+    await put("f", BASE);
+    commit();
+    const pinned = await project();
+    await put("f", LAST);
+    await edit(pinned, "A", [{ path: join(root, "f"), from: BASE, to: LAST }]);
+    await runtime.setProject(root);
+    const original = ready(runtime).view;
+    const originalId = original.components[0]!.id;
+
+    const changed = LAST.replace("owned", "updated");
+    await put("f", changed);
+    await edit(pinned, "A", [{ path: join(root, "f"), from: LAST, to: changed }]);
+    await runtime.refresh();
+    const edited = ready(runtime).view;
+    const editedId = edited.components[0]!.id;
+    expect(edited.generation).toBeGreaterThan(original.generation);
+    expect(edited.changedFiles).toBe(original.changedFiles);
+    expect(edited.components[0]!.files).toEqual(original.components[0]!.files);
+    expect(edited.groups[0]!.title).toBe(original.groups[0]!.title);
+    expect(runtime.diff(pinned.id, original.generation, originalId, "f")).toMatchObject({ status: 409 });
+    expect(result(runtime.diff(pinned.id, edited.generation, editedId, "f")).hunks[0]?.after).toBe("updated fifth\n");
+
+    const newOwner = { kind: "job", id: "handoff" } as const;
+    writers[0] = { ...writers[0]!, writer: newOwner };
+    await runtime.refresh();
+    const handedOff = ready(runtime).view;
+    expect(handedOff.generation).toBeGreaterThan(edited.generation);
+    expect(handedOff.changedFiles).toBe(original.changedFiles);
+    expect(handedOff.components[0]!.files).toEqual(original.components[0]!.files);
+    expect(handedOff.groups[0]!.title).toBe(original.groups[0]!.title);
+    expect(runtime.diff(pinned.id, edited.generation, editedId, "f")).toMatchObject({ status: 409 });
+    expect(result(runtime.diff(pinned.id, handedOff.generation, handedOff.components[0]!.id, "f")).hunks[0]).toMatchObject({
+      after: "updated fifth\n", writers: [newOwner],
+    });
+  });
+
   it("freezes just the reviewed hunk through runCommitTransaction when a different same-file hunk appears", async () => {
     const { root, put, commit, project, edit, runtime, hooks } = await fixture(format);
     await put("f", BASE);
@@ -420,9 +459,9 @@ describe.each(["files", "reftable"])("source-control scan runtime (%s refs)", (f
   });
 
   it("reports a non-repository directory and shows detached changes as blocked", async () => {
-    const { folder, root, put, commit, runtime } = await fixture(format);
+    const { folder, root, put, commit, runtime, hooks } = await fixture(format);
     await runtime.setProject(folder);
-    expect(runtime.status()).toMatchObject({ kind: "unavailable", reason: "The project folder is not in a Git worktree" });
+    expect(runtime.status()).toMatchObject({ kind: "non-repository", reason: "The project folder is not in a Git worktree" });
     await put("f", BASE);
     const base = commit();
     git(root, "switch", "--detach", base);
@@ -431,5 +470,9 @@ describe.each(["files", "reftable"])("source-control scan runtime (%s refs)", (f
     expect(ready(runtime).view).toMatchObject({
       base, branch: null, changedFiles: 1, components: [{ other: true, selectable: false, reason: "HEAD is detached" }],
     });
+
+    hooks.discover = async () => ({ reason: "Source control requires Git 2.41 or later" });
+    await runtime.refresh();
+    expect(runtime.status()).toMatchObject({ kind: "unavailable", reason: "Source control requires Git 2.41 or later" });
   });
 });
