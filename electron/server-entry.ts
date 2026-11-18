@@ -12,8 +12,8 @@ import { startSavedSpeech } from "../server/speechEngines.ts";
 import { setBrowserUrl } from "../server/browserPage.ts";
 import { applyEnv } from "./settings.ts";
 import "../server/adapters/claude.ts"; // registers the roles' prompts
-import { threadStore } from "../server/threads/store.ts";
 import { threadsFile } from "../server/threads/persist.ts";
+import { flushThreadLifecycle, monitorThreadCompletion, restoreThreadLifecycle } from "../server/threads/lifecycle.ts";
 import { onActivity, runningTasks } from "../server/activity.ts";
 import { changesService } from "../server/changes/changesService.ts";
 import { changesStatus, subscribeChangesStatus } from "../server/changes/http.ts";
@@ -28,8 +28,8 @@ function useProject(dir: string | null) {
 }
 
 // The thread list comes back from the last run, and every change is saved (server/threads/persist.ts).
-threadStore().persistTo(threadsFile());
-await changesService().restore().catch((error) => console.warn("[changes] could not recover source-control state", error));
+await restoreThreadLifecycle(threadsFile()).catch((error) => console.warn("[threads] could not recover saved threads", error));
+monitorThreadCompletion();
 const running = await startServer(Number(process.env.PORT ?? 0), { host: "127.0.0.1" });
 process.parentPort.postMessage({ type: "ready", port: running.port });
 let changesRequest = 0;
@@ -52,8 +52,7 @@ process.parentPort.on("message", (e: { data: {
 } }) => {
   // The app is about to stop this process: what changed in the last moments goes to disk first.
   if (e.data.type === "flush") {
-    threadStore().flush();
-    void changesService().flush().catch((error) => console.warn("[changes] could not flush source-control state", error))
+    void flushThreadLifecycle().catch((error) => console.warn("[changes] could not flush source-control state", error))
       .finally(() => process.parentPort.postMessage({ type: "flushed" }));
   }
   if (e.data.type === "instructions") {

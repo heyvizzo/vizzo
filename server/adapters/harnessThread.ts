@@ -74,8 +74,10 @@ class Thread implements HarnessThread {
 
   session(): SessionRef | undefined { return this.agent?.session?.() ?? this.ref; }
 
-  private notifySession(): void {
-    const key = JSON.stringify([this.pinned?.harness, this.pinned?.project, this.session()]);
+  private notifySession(execution?: WriterExecution): void {
+    const session = this.session();
+    execution?.observeNativeSession(session?.id);
+    const key = JSON.stringify([this.pinned?.harness, this.pinned?.project, session]);
     if (key === this.sessionKey) return;
     this.sessionKey = key;
     this.opts.onSession?.();
@@ -172,6 +174,11 @@ class Thread implements HarnessThread {
   ): Promise<void> {
     if (this.closed) { reject(closedError()); return; }
     if (execution?.stopRequested) { reject(abortError()); return; }
+    const requiredSession = execution?.requiredSessionId;
+    if (requiredSession && this.session()?.id !== requiredSession) {
+      reject(new Error("The native session for this unfinished request is no longer available."));
+      return;
+    }
     this.busy = true;
     let settled!: () => void;
     this.activeSettled = new Promise<void>((resolve) => { settled = resolve; });
@@ -194,24 +201,25 @@ class Thread implements HarnessThread {
           at = this.attach(user, annotations ?? [], fallback !== undefined);
         } catch (e) {
           // The saved session is known to be gone before anything was sent: a new one, told the history.
-          if (!(e instanceof SessionUnavailableError) || attempt > 0) throw e;
+          if (requiredSession || !(e instanceof SessionUnavailableError) || attempt > 0) throw e;
           fallback = e.message;
           continue;
         }
         agent = at.agent;
         const { mode, message, images } = at;
-        this.notifySession();
+        this.notifySession(execution);
         const known = agent.session?.() ?? (mode === "resumed" ? this.ref : undefined);
+        if (requiredSession && known?.id !== requiredSession) throw new Error("The harness reopened a different native session.");
         onDispatch?.({ mode, message, ...(known ? { sessionId: known.id } : {}), ...(fallback ? { fallback } : {}) });
         const a = agent;
         const nativeTurn = turn = new HarnessTurn(execution);
         const inner = Promise.resolve().then(() => {
           if (aborted) throw abortError();
           const request = a.request(message, (d) => {
-            this.notifySession();
+            this.notifySession(execution);
             if (!aborted) onText?.(d);
           }, timeoutMs, images, nativeTurn);
-          this.notifySession(); // Some harnesses allocate their id synchronously when the request starts.
+          this.notifySession(execution); // Some harnesses allocate their id synchronously when the request starts.
           return request;
         });
         legacySettled = inner.then(() => true, () => true);
@@ -226,7 +234,7 @@ class Thread implements HarnessThread {
           break;
         } catch (e) {
           // The resume (or fork) didn't take and nothing reached a session: once more on a new one, told the history.
-          if (e instanceof SessionUnavailableError && !aborted && attempt === 0) {
+          if (!requiredSession && e instanceof SessionUnavailableError && !aborted && attempt === 0) {
             await nativeTurn.settled;
             fallback = e.message;
             continue;
@@ -254,7 +262,7 @@ class Thread implements HarnessThread {
       this.lastUsed = ++useSeq;
       this.activeSettled = undefined;
       settled();
-      this.notifySession();
+      this.notifySession(execution);
       enforceCap(MAX_LIVE_THREAD_SESSIONS);
     }
   }

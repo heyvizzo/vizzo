@@ -341,8 +341,11 @@ function init(): void {
         threads.setFullAnswers(cmd.fullAnswers);
         break;
       case "threads":
-        threads.setThreads(cmd.threads);
+        threads.setThreads(cmd.threads, cmd.deleting, cmd.continuing, cmd.connected);
         comments.refresh(); // what's queued on its element
+        break;
+      case "thread.delete.preview":
+        threads.showDeletePreview(cmd);
         break;
       case "bubble":
         threads.bubble(cmd.say, cmd.ended, cmd.confirm);

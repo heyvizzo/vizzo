@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deleteConfirmText, markerPoint, orbPoint, panelPosition, textMatches } from "./threadOverlay.ts";
+import { deleteConfirmation, markerPoint, orbPoint, panelPosition, textMatches } from "./threadOverlay.ts";
 
 describe("textMatches", () => {
   it("matches the anchor's text, capped text by prefix, or its label", () => {
@@ -11,10 +11,24 @@ describe("textMatches", () => {
   });
 });
 
-describe("deleteConfirmText", () => {
-  it("says when the thread is still running", () => {
-    expect(deleteConfirmText("running")).toBe("It's still working — stop it and delete?");
-    expect(deleteConfirmText("idle")).toMatch(/^Delete this thread\?/);
+describe("deleteConfirmation", () => {
+  it.each([
+    ["none", "keep", [{ label: "Delete", mode: "keep" }]],
+    ["complete", "commit", [{ label: "Commit and delete", mode: "commit" }, { label: "Delete, keep uncommitted", mode: "keep" }]],
+    ["incomplete", "keep", [{ label: "Delete, keep uncommitted", mode: "keep" }]],
+    ["working", "keep", [{ label: "Stop and delete", mode: "keep" }]],
+  ] as const)("chooses the actions and focused default for %s", (state, defaultMode, actions) => {
+    expect(deleteConfirmation({ threadId: "t", state, defaultMode }).actions).toEqual(actions);
+  });
+
+  it("shows the ledger's reasons for a tied or incomplete thread", () => {
+    expect(deleteConfirmation({ threadId: "t", state: "complete", defaultMode: "commit", reason: "Also has other changes." }).text).toBe("Also has other changes.");
+    expect(deleteConfirmation({ threadId: "t", state: "incomplete", defaultMode: "keep", reason: "The last task was stopped." }).text).toBe("The last task was stopped.");
+    expect(deleteConfirmation({ threadId: "t", state: "working", defaultMode: "keep" }).text).toMatch(/stopped part-way/);
+  });
+
+  it("can confirm queued feedback without a preview", () => {
+    expect(deleteConfirmation("queued")).toEqual({ text: "Delete this feedback? It won't be sent.", actions: [{ label: "Delete", mode: "keep" }] });
   });
 });
 

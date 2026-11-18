@@ -6,7 +6,7 @@ import { parseClientMsg, type ClientMsg, type CostItem, type CursorSample, type 
 import { centralSession } from "./centralSession.ts";
 import { harnessSessionInfo } from "./adapters/sessionInfo.ts";
 import { deriveMetrics, type MarkName } from "../shared/marks.ts";
-import { llmOf, type RunConfig } from "../shared/config.ts";
+import { DEFAULT_CONFIG, llmOf, TTS_LABELS, validTaskTimeout, type RunConfig } from "../shared/config.ts";
 import { serverToClient } from "../shared/clock.ts";
 import { serverNow, type Mark } from "./clock.ts";
 import type { Orchestrator, TurnHandlers, TurnResult } from "./orchestrators/types.ts";
@@ -18,8 +18,11 @@ import { ConnectionState } from "./connection.ts";
 import { beginTask, type TaskOutcome } from "./activity.ts";
 import { getConversation, retainConversationDrawings } from "./conversation.ts";
 import { cancelJobs, stopJob } from "./orchestrators/jobs.ts";
-import { cancelRun } from "./threads/runner.ts";
-import type { ConnectionChannel } from "./orchestrators/types.ts";
+import { cancelRun, submitRun } from "./threads/runner.ts";
+import type { ConnectionChannel, OrchestratorDeps } from "./orchestrators/types.ts";
+import { realDeps } from "./orchestrators/deps.ts";
+import type { ChangesService } from "./changes/changesService.ts";
+import { deleteThreads, previewThreadDeletes, savedNativeSession, threadDeleteTarget } from "./threads/lifecycle.ts";
 import { isMarkedSegment } from "../shared/marks.ts";
 import { Floor } from "./threads/floor.ts";
 import { threadStore, type ThreadSubscriber } from "./threads/store.ts";
@@ -60,6 +63,9 @@ interface Turn {
 export interface SessionOpts {
   orchestrators?: Partial<Record<RunConfig["approach"], Orchestrator>>;
   persist?: boolean;
+  /** Supplied only to a local Vizzo session. */
+  changes?: Pick<ChangesService, "previewThreadDeletes" | "deleteThreads">;
+  threadDeps?: Pick<OrchestratorDeps, "openThread" | "solveInThread" | "openTts" | "voiceId">;
 }
 
 export class Session {
@@ -82,7 +88,7 @@ export class Session {
     { send: (m) => this.send(m), sendAudio: (pcm) => this.sendAudio(pcm) },
     { graceMs: IDLE_GRACE_MS, focused: () => threadStore().focused(), busy: () => this.noticeAbort !== null, onIdle: () => this.wakeIdle() },
   );
-  private threadSub: ThreadSubscriber = { send: (m) => this.send(m), floor: this.floor };
+  private threadSub: ThreadSubscriber = { send: (m) => this.send(m), floor: this.floor, prepareReset: () => this.prepareReset() };
   private unsubscribe: () => void;
 
   /** Connection-level output for background jobs (orchestrators/jobs.ts). */
@@ -127,7 +133,7 @@ export class Session {
    * `orchestrators` overrides the routing table and `persist: false` skips appending runs to results/
    * (both used by `smoke:e2e --fake`).
    */
-  constructor(private ws: WebSocket, opts: SessionOpts = {}) {
+  constructor(private ws: WebSocket, private opts: SessionOpts = {}) {
     this.orchestrators = opts.orchestrators ?? ORCHESTRATORS;
     this.persist = opts.persist ?? true;
     ws.on("message", (data, isBinary) => (isBinary ? this.onBinary(data) : this.onText(data.toString())));
@@ -181,6 +187,9 @@ export class Session {
         this.echo = msg.on;
         return;
       case "turn.start":
+        if (threadStore().turnsBlocked || (msg.threadId && threadStore().blocksRun(msg.threadId))) {
+          return this.send({ type: "error", source: "session", turnId: msg.turnId, message: "Thread changes are still being saved." });
+        }
         this.stopNotice(); // the user talks over a background notice: stop it
         this.floor.turnStarted(); // …or over a thread's line
         threadStore().touch(this.threadSub); // this connection speaks thread results from now on
@@ -241,14 +250,13 @@ export class Session {
         this.floor.stop();
         return;
       case "conversation.reset":
-        this.turn?.handlers?.cancel();
-        this.clearTurn();
-        this.stopNotice();
-        cancelJobs(this.connection);
-        threadStore().reset(); // every thread (runs stopped) and the central conversation
-        return;
       case "thread.delete":
-        threadStore().remove(msg.threadId);
+      case "threads.delete":
+      case "thread.delete.preview":
+      case "thread.continue":
+        void this.threadAction(msg).catch((error) => {
+          this.send({ type: "error", requestId: msg.requestId, source: "session", message: error instanceof Error ? error.message : String(error) });
+        });
         return;
       case "thread.focus":
         threadStore().focus(msg.threadId);
@@ -263,6 +271,68 @@ export class Session {
         return;
       }
     }
+  }
+
+  private prepareReset(): void {
+    this.turn?.endTask?.("stopped");
+    this.turn?.handlers?.cancel();
+    this.clearTurn();
+    this.stopNotice();
+    this.floor.stop();
+    cancelJobs(this.connection);
+  }
+
+  private async threadAction(msg: Extract<ClientMsg, { type: "conversation.reset" | "thread.delete" | "threads.delete" | "thread.delete.preview" | "thread.continue" }>): Promise<void> {
+    const store = threadStore();
+    const { changes } = this.opts;
+    switch (msg.type) {
+      case "thread.delete.preview": {
+        const threads = await previewThreadDeletes(store, msg.threadIds, changes);
+        this.send({ type: "thread.delete.preview", requestId: msg.requestId, threads });
+        return;
+      }
+      case "thread.continue":
+        return this.continueThread(msg);
+      case "thread.delete":
+      case "threads.delete":
+        await deleteThreads(store, msg.type === "thread.delete" ? [msg] : msg.threads, false, changes);
+        this.send({ type: "thread.delete.done", requestId: msg.requestId });
+        return;
+      case "conversation.reset":
+        await deleteThreads(store, msg.threads ?? [], true, changes);
+        store.broadcast({ type: "conversation.reset.done", requestId: msg.requestId });
+    }
+  }
+
+  private async continueThread(msg: Extract<ClientMsg, { type: "thread.continue" }>): Promise<void> {
+    const store = threadStore();
+    const { threadId } = msg;
+    const record = store.get(threadId);
+    if (!record || store.blocksRun(threadId)) throw new Error("This thread is no longer available to continue.");
+    const target = threadDeleteTarget(record);
+    const interaction = record.info.lastInteractionAt;
+    const [receipt] = target.folder && store.sourceControlAvailable && this.opts.changes ? await this.opts.changes.previewThreadDeletes([target]) : [];
+    if (store.get(threadId) !== record || store.blocksRun(threadId) || store.turnsBlocked || record.info.lastInteractionAt !== interaction ||
+        record.run?.working || target.working || receipt?.state === "working") throw new Error("This thread is busy. Try again once it stops.");
+    if (receipt && receipt.owned === undefined) throw new Error(receipt.reason ?? "Could not review the unfinished changes.");
+    const executionId = receipt?.continuesExecutionId;
+    if (!executionId && !record.info.interrupted) throw new Error("There is no unfinished request to continue.");
+    const nativeSessionId = savedNativeSession(record);
+    if (executionId && (!nativeSessionId || (receipt?.continuationSessionId && receipt.continuationSessionId !== nativeSessionId))) {
+      throw new Error("The native session for this unfinished request is no longer available.");
+    }
+    const request = receipt?.continuationRequest || record.activeRequest?.request || target.requests.at(-1) || record.info.title;
+    const question = `Continue where you left off and finish the request.\n\nEarlier request: ${request}`;
+    const turnId = msg.turnId ?? null;
+    const entry = store.addMessage(threadId, { turnId, role: "user", kind: "followup", text: question });
+    store.bump(threadId);
+    store.touch(this.threadSub);
+    const config = continuationConfig(msg.config);
+    await submitRun(threadId, {
+      kind: "followup", intent: "task", question, turnId, config, messageId: entry?.id,
+      language: config.language === "auto" ? undefined : config.language,
+      ...(executionId && nativeSessionId ? { continuation: { executionId, nativeSessionId, request } } : {}),
+    }, this.opts.threadDeps ?? realDeps, store);
   }
 
   private startTurn(turnId: string, sent: RunConfig, tPress: number, fixtureId?: string, pageUrl?: string, typedText?: string, pinnedThread?: string, annotation?: DrawingAnnotation, chat = false): void {
@@ -360,6 +430,19 @@ export class Session {
     this.clearTurn();
     if (this.persist) appendRun(run).catch((e) => console.error("[results] append failed", e));
   }
+}
+
+/** A continuation uses the saved harness and the sidebar's current speech and tracing preferences. */
+function continuationConfig(sent?: RunConfig): RunConfig {
+  const config = { ...DEFAULT_CONFIG };
+  if (sent?.ttsModel && Object.hasOwn(TTS_LABELS, sent.ttsModel)) config.ttsModel = sent.ttsModel;
+  if (typeof sent?.ttsVoice === "string") config.ttsVoice = sent.ttsVoice;
+  if (typeof sent?.ttsStyle?.direction === "string" && Number.isFinite(sent.ttsStyle.speed) && Number.isFinite(sent.ttsStyle.volume)) config.ttsStyle = sent.ttsStyle;
+  if (typeof sent?.language === "string") config.language = sent.language;
+  if (validTaskTimeout(sent?.taskTimeoutMinutes)) config.taskTimeoutMinutes = sent.taskTimeoutMinutes;
+  config.captureTrace = sent?.captureTrace === true;
+  config.silent = sent?.silent === true;
+  return config;
 }
 
 /** A thread's cost includes the turns routed to it (the router, voice, speech), not only its runs outside a turn. */

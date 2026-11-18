@@ -13,6 +13,22 @@ import type { HarnessSessionInfo } from "./harnessSession.ts";
  */
 export type ThreadState = "running" | "pending" | "idle" | "failed" | "queued";
 
+export type ThreadDeleteMode = "commit" | "keep";
+
+export interface ThreadDeleteChoice {
+  threadId: string;
+  mode: ThreadDeleteMode;
+}
+
+export interface ThreadDeletePreview {
+  threadId: string;
+  state: "none" | "complete" | "incomplete" | "working";
+  reason?: string;
+  defaultMode: ThreadDeleteMode;
+  owned?: boolean;
+  willCommit?: boolean;
+}
+
 /** The element a thread is about, as seen when the thread was created (re-resolved on the page by the overlay). */
 export interface ThreadAnchor {
   /** Drawing anchors use the drawing center as their initial point. */
@@ -92,6 +108,11 @@ export interface ThreadInfo {
    * (a follow-up that continues the harness's saved session); cleared when its next run starts.
    */
   interrupted?: boolean;
+  /** At least one surviving owned change comes from an unfinished execution. */
+  incomplete?: boolean;
+  incompleteReason?: string;
+  /** An unfinished request can be continued in this thread's native session. */
+  canContinue?: boolean;
   messages: ThreadMessage[];
   /** Epoch ms. */
   createdAt: number;

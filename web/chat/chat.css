@@ -64,6 +64,7 @@ main:not(.hide-ram) .chat-head:has(#session-mem:not([hidden])) { display: flex; 
 .reset-confirm-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .reset-confirm-actions button { padding: 3px 10px; font-size: 12px; }
 .reset-confirm-actions .danger { border-color: var(--err); background: var(--err); color: var(--panel); }
+.thread-delete-confirm { position: relative; top: auto; margin: 6px 0; }
 .messages:not(:has(> .turn:not(.queued), > .job, > .job-row, > .note)) > .conv-reset { display: none; }
 .empty { margin: auto; text-align: center; color: var(--muted); max-width: 320px; line-height: 1.5; }
 div.empty { text-align: left; }
@@ -266,7 +267,6 @@ table.ctable .cusd.saved { color: var(--ok); }
 .thread-all { display: flex; justify-content: flex-end; margin-top: 6px; }
 .thread-bulk { flex: none; padding: 1px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .thread-bulk:hover { border-color: var(--line); color: var(--err); }
-.thread-bulk.armed { border-color: var(--err); background: var(--err); color: var(--panel); }
 .thread-bulk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .thread-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; font-size: 12.5px; }
 .thread-row { display: flex; align-items: center; gap: 2px; }

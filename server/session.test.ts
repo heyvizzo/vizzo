@@ -10,6 +10,7 @@ import { getConversation } from "./conversation.ts";
 import { resetThreadStore } from "./threads/store.ts";
 import type { HarnessThread } from "./adapters/types.ts";
 import { releaseSessionForResume } from "./sessionResume.ts";
+import { writerRegistry } from "./changes/writers.ts";
 
 class FakeWs extends EventEmitter {
   readonly OPEN = 1;
@@ -59,7 +60,7 @@ describe("Session + element threads", () => {
     ws.emit("close");
   });
 
-  it("snapshot on connect; focus marks the result told; delete removes it everywhere; reset clears all", () => {
+  it("snapshot on connect; focus marks the result told; delete removes it everywhere; reset clears all", async () => {
     const store = resetThreadStore();
     const t = store.create(anchor, "the red button", "task");
     store.update(t.threadId, (x) => { x.state = "pending"; x.unread = true; x.awaitingReply = true; });
@@ -73,16 +74,21 @@ describe("Session + element threads", () => {
     expect(store.info(t.threadId)).toMatchObject({ state: "idle", unread: false, awaitingReply: false });
     expect(msgs(other).at(-1)).toMatchObject({ type: "thread", thread: { threadId: t.threadId, unread: false } });
 
-    ws.client({ type: "thread.delete", threadId: t.threadId });
-    expect(store.list()).toEqual([]);
+    ws.client({ type: "thread.delete", threadId: t.threadId, mode: "keep" });
+    await vi.waitFor(() => expect(store.list()).toEqual([]));
     expect(msgs(other).at(-1)).toEqual({ type: "thread.removed", threadId: t.threadId });
+
+    other.client({ type: "threads.delete", requestId: "stale", threads: [{ threadId: t.threadId, mode: "commit" }] });
+    await vi.waitFor(() => expect(msgs(other).at(-1)).toEqual({ type: "thread.delete.done", requestId: "stale" }));
+    expect(msgs(other).filter(({ type }) => type === "thread.removed")).toHaveLength(1);
 
     store.create(anchor, "the red button", "task");
     getConversation().push({ turnId: "x", approach: "pipeline", user: "u", assistant: "a", detail: "" });
-    ws.client({ type: "conversation.reset" });
+    ws.client({ type: "conversation.reset", requestId: "reset" });
+    await vi.waitFor(() => expect(msgs(other).at(-1)).toEqual({ type: "conversation.reset.done", requestId: "reset" }));
     expect(store.list()).toEqual([]);
     expect(getConversation()).toEqual([]);
-    expect(msgs(other).at(-1)).toEqual({ type: "threads.snapshot", threads: [] });
+    expect(msgs(other)).toContainEqual({ type: "threads.snapshot", threads: [] });
 
     ws.emit("close");
     const n = ws.sent.length;
@@ -104,5 +110,40 @@ describe("Session + element threads", () => {
     expect(info.costUsd).toBeCloseTo(run.costUsd);
     expect(info.costItems).toEqual(run.costItems!.map((i) => ({ ...i, turnId: "t1" })));
     ws.emit("close");
+  });
+
+  it("passes the recorded request and native session to an explicit Resume", async () => {
+    const store = resetThreadStore();
+    const info = store.create(anchor, "the red button", "task");
+    const record = store.get(info.threadId)!;
+    record.projectFolder = "/old/project";
+    record.activeRequest = { executionId: "interrupted-execution", request: "Paint it green" };
+    store.update(info.threadId, (t) => { t.interrupted = true; t.incomplete = true; });
+    // Inject a native handle without opening a real project ledger in this WebSocket test.
+    record.handle = {
+      id: "handle", projectFolder: null, close() {}, abort() {}, live: true,
+      session: () => ({ id: "saved-native-session" }),
+    } as HarnessThread;
+    const previewThreadDeletes = vi.fn(async () => [{
+      threadId: info.threadId, state: "incomplete" as const, defaultMode: "keep" as const, owned: true,
+      continuesExecutionId: "interrupted-execution", continuationRequest: "Paint it green",
+      continuationSessionId: "saved-native-session",
+    }]);
+    const deps = createFakeDeps(FAST_TIMING, DEFAULT_SCENARIO);
+    const solveInThread = vi.fn(async () => ({ text: "Painted it green", usage: {}, filesTouched: [] }));
+    const queue = vi.spyOn(writerRegistry(), "queue");
+    const ws = new FakeWs();
+    try {
+      new Session(ws as unknown as WebSocket, { persist: false, threadDeps: { ...deps, solveInThread }, changes: { previewThreadDeletes, deleteThreads: vi.fn() } });
+      ws.client({ type: "thread.continue", threadId: info.threadId, config: { ...DEFAULT_CONFIG, silent: true } });
+      await vi.waitFor(() => expect(store.info(info.threadId)?.messages.some(({ kind }) => kind === "result")).toBe(true));
+      expect(previewThreadDeletes).toHaveBeenCalledWith([expect.objectContaining({ folder: "/old/project", interruptedExecutionId: "interrupted-execution" })]);
+      expect(queue).toHaveBeenCalledWith(expect.objectContaining({ continuesExecutionId: "interrupted-execution", request: "Paint it green" }), "saved-native-session");
+      expect(solveInThread).toHaveBeenCalledWith(expect.objectContaining({ kind: "followup", question: expect.stringContaining("Paint it green"), thread: record.handle }));
+      expect(store.info(info.threadId)?.interrupted).toBeUndefined();
+    } finally {
+      queue.mockRestore();
+      ws.emit("close");
+    }
   });
 });

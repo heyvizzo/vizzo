@@ -24,6 +24,8 @@ export const INTERRUPTED_TEXT = "Vizzo was closed before this finished. What it 
 export interface ThreadRunState {
   /** Stop the current run and drop the queue; close the harness session. */
   stop(): void;
+  stopForDeletion?(): Promise<void>;
+  readonly working?: boolean;
 }
 
 export interface ThreadRecord {
@@ -33,12 +35,14 @@ export interface ThreadRecord {
   projectFolder?: string | null;
   /** Restored from disk: what its harness session is reopened with (until a handle is opened). */
   resume?: ThreadResume;
+  activeRequest?: SavedThread["activeRequest"];
 }
 
 /** A connected Session. */
 export interface ThreadSubscriber {
   send(msg: ServerMsg): void;
   floor: Floor;
+  prepareReset?(): void;
 }
 
 export class ThreadStore {
@@ -50,6 +54,11 @@ export class ThreadStore {
   readonly runLog: RunWindow[] = [];
   private file: string | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private deleting: Set<string> | null = null;
+  private handedOff = new Set<string>();
+  private resetting = false;
+  private closing = false;
+  private ledgerAvailable = true;
 
   get conversation(): ChatTurn[] { return getConversation(); }
 
@@ -80,6 +89,31 @@ export class ThreadStore {
   get(threadId: string): ThreadRecord | undefined { return this.records.get(threadId); }
   info(threadId: string): ThreadInfo | undefined { return this.records.get(threadId)?.info; }
   focused(): string | null { return focusedThreadId([...this.records.values()].map((r) => r.info)); }
+
+  get turnsBlocked(): boolean { return this.resetting || this.closing; }
+  get sourceControlAvailable(): boolean { return this.ledgerAvailable; }
+  disableSourceControl(): void { this.ledgerAvailable = false; }
+  blocksRun(threadId: string): boolean { return this.closing || this.deleting?.has(threadId) === true || this.handedOff.has(threadId); }
+
+  beginDeletion(threadIds: readonly string[], reset: boolean): () => void {
+    if (this.closing) throw new Error("Vizzo is closing.");
+    if (this.deleting) throw new Error("Another thread deletion is still in progress.");
+    this.deleting = new Set(threadIds);
+    this.resetting = reset;
+    return () => { this.deleting = null; this.resetting = false; };
+  }
+
+  beginShutdown(): void { this.closing = true; }
+
+  prepareReset(): void {
+    for (const sub of [...this.subs]) sub.prepareReset?.();
+  }
+
+  clearConversation(): void {
+    for (const f of this.floors()) f.clear();
+    resetConversation();
+    this.broadcast({ type: "threads.snapshot", threads: this.list() });
+  }
 
   create(anchor: ThreadAnchor, title: string, intent: Intent): ThreadInfo {
     const now = this.now();
@@ -147,14 +181,29 @@ export class ThreadStore {
     return true;
   }
 
+  /** Called after the source-control ledger has accepted the threads and their changes. */
+  removeDurably(threadIds: readonly string[]): void {
+    if (!threadIds.length) return;
+    const removing = new Set(threadIds);
+    for (const id of threadIds) this.handedOff.add(id);
+    if (this.file) writeThreads(this.file, [...this.records.values()].filter(({ info }) => !removing.has(info.threadId)).map(savedOf), true);
+    for (const id of threadIds) {
+      this.remove(id);
+      this.handedOff.delete(id);
+    }
+  }
+
+  /** Stop writes without closing the native session before the ledger handoff. */
+  async stopForDeletion(threadId: string): Promise<void> {
+    await this.records.get(threadId)?.run?.stopForDeletion?.();
+  }
+
   /** "New conversation": every thread (runs stopped) and the central conversation. */
   reset(): void {
     const all = [...this.records.values()];
     this.records.clear();
     for (const r of all) stopRecord(r);
-    for (const f of this.floors()) f.clear();
-    resetConversation();
-    this.broadcast({ type: "threads.snapshot", threads: [] });
+    this.clearConversation();
     this.scheduleSave();
   }
 
@@ -162,16 +211,24 @@ export class ThreadStore {
    * Save the threads to `file` from now on, after restoring the ones saved there. A thread that was working when the
    * app closed comes back interrupted (its run is gone; its harness kept the session up to that point).
    */
-  persistTo(file: string): void {
+  persistTo(file: string, pendingRemovals: readonly string[] = []): void {
+    const pending = new Set(pendingRemovals);
+    const savedThreads = loadThreads(file, pending.size > 0).filter(({ info }) => !pending.has(info.threadId));
+    // Finish the threads.json side of a previous handoff before any saved native session can be reopened.
+    if (pending.size) writeThreads(file, savedThreads, true);
     this.file = file;
-    for (const saved of loadThreads(file)) {
+    for (const saved of savedThreads) {
       if (this.records.has(saved.info.threadId)) continue;
       const info = restoredInfo(saved, this.now());
-      this.records.set(info.threadId, { info, handle: null, run: null, projectFolder: saved.projectFolder, ...(saved.resume ? { resume: saved.resume } : {}) });
+      const projectFolder = saved.projectFolder !== undefined ? saved.projectFolder : saved.resume?.spec.project ?? null;
+      this.records.set(info.threadId, {
+        info, handle: null, run: null, projectFolder, resume: saved.resume,
+        ...(info.interrupted && saved.activeRequest ? { activeRequest: saved.activeRequest } : {}),
+      });
     }
     if (this.records.size) console.log(`[threads] restored ${this.records.size} thread${this.records.size === 1 ? "" : "s"} from ${file}`);
     this.broadcast({ type: "threads.snapshot", threads: this.list() });
-    this.flush();
+    if (!pending.size) this.flush();
   }
 
   /** Write any pending change now (at exit). */
@@ -201,7 +258,7 @@ function savedOf(r: ThreadRecord): SavedThread {
   const resume: ThreadResume | undefined = h?.spec && h.choice
     ? { choice: h.choice, spec: h.spec, ...(h.session?.() ? { ref: h.session!()! } : {}) }
     : r.resume;
-  return { info: r.info, projectFolder: r.projectFolder, ...(resume ? { resume } : {}) };
+  return { info: r.info, projectFolder: r.projectFolder, resume, activeRequest: r.activeRequest };
 }
 
 /** A saved thread as it comes back: nothing is running any more. */

@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import type { ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { Session } from "./session.ts";
+import { Session, type SessionOpts } from "./session.ts";
 import { warmStatus } from "./adapters/warmPool.ts";
 import type { Orchestrator } from "./orchestrators/types.ts";
 import type { RunConfig } from "../shared/config.ts";
@@ -10,6 +10,7 @@ import { changesService } from "./changes/changesService.ts";
 import { changeRoutes, isLocalChangesRequest, subscribeChangesStatus, type ChangesHttpOptions } from "./changes/http.ts";
 import { projectFile, watchProject } from "./project.ts";
 import { watchMemory } from "./memory.ts";
+import { threadStore } from "./threads/store.ts";
 
 export interface StartServerOpts {
   /** Override the approach → orchestrator table (smoke:e2e --fake). */
@@ -21,6 +22,7 @@ export interface StartServerOpts {
   host?: string;
   /** Source-control service and native provider overrides used by the HTTP integration tests. */
   changes?: ChangesHttpOptions;
+  threadDeps?: SessionOpts["threadDeps"];
 }
 
 export interface RunningServer { port: number; close(): Promise<void> }
@@ -48,6 +50,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       try {
         if (url.pathname === "/api/sessions/continue") {
           const { continueConversationSession } = await import("./centralSession.ts");
+          if (threadStore().turnsBlocked) throw new Error("Thread changes are still being saved.");
           continueConversationSession(sessionId, typeof context === "string" ? context.slice(0, 32_000) : undefined);
         } else {
           const { releaseSessionForResume } = await import("./sessionResume.ts");
@@ -233,7 +236,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
     const watcher = new URL(req.url ?? "/", "http://localhost").searchParams.get("view") === "changes";
     const local = isLocalChangesRequest(req);
     if (watcher && !local) { ws.close(1008, "Source control requires the local Vizzo window"); return; }
-    if (!watcher) new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist });
+    if (!watcher) new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist, threadDeps: opts.threadDeps, changes: local ? changes : undefined });
     if (local) changesClients.add(ws);
     ws.on("close", () => { changesClients.delete(ws); log("[ws] closed"); });
   });
