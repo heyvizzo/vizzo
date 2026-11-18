@@ -4,6 +4,7 @@
 // harness's own saved session id. The next request on a restored thread resumes that session natively.
 // File: $VIZZO_THREADS_FILE, default ~/.config/vizzo/threads.json (the packaged app: Application Support).
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LlmChoice } from "../../shared/config.ts";
@@ -54,9 +55,9 @@ export function loadThreads(file: string, strict = false): SavedThread[] {
 export function writeThreads(file: string, threads: SavedThread[], durable = false): void {
   const dir = dirname(file);
   mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${randomUUID()}.tmp`;
   try {
-    const fd = openSync(tmp, "w", 0o600);
+    const fd = openSync(tmp, "wx", 0o600);
     try {
       writeFileSync(fd, JSON.stringify({ version: VERSION, threads }));
       if (durable) fsyncSync(fd);

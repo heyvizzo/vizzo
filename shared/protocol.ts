@@ -383,6 +383,7 @@ export type ServerMsg =
   | { type: "thread"; thread: ThreadInfo }
   | { type: "thread.removed"; threadId: string }
   | { type: "thread.delete.preview"; requestId: string; threads: ThreadDeletePreview[] }
+  | { type: "thread.delete.done"; requestId?: string }
   | { type: "conversation.reset.done"; requestId?: string }
   /** Element threads: frames a line spoken outside a turn (a result, reminder or central line); audio between start and end belongs to it. */
   | { type: "thread.say"; say: ThreadSay; state: "start" | "end" }

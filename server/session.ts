@@ -294,9 +294,10 @@ export class Session {
       case "thread.continue":
         return this.continueThread(msg);
       case "thread.delete":
-        return deleteThreads(store, [msg], false, changes);
       case "threads.delete":
-        return deleteThreads(store, msg.threads, false, changes);
+        await deleteThreads(store, msg.type === "thread.delete" ? [msg] : msg.threads, false, changes);
+        this.send({ type: "thread.delete.done", requestId: msg.requestId });
+        return;
       case "conversation.reset":
         await deleteThreads(store, msg.threads ?? [], true, changes);
         store.broadcast({ type: "conversation.reset.done", requestId: msg.requestId });
@@ -310,17 +311,18 @@ export class Session {
     if (!record || store.blocksRun(threadId)) throw new Error("This thread is no longer available to continue.");
     const target = threadDeleteTarget(record);
     const interaction = record.info.lastInteractionAt;
-    const [receipt] = target.folder && this.opts.changes ? await this.opts.changes.previewThreadDeletes([target]) : [];
+    const [receipt] = target.folder && store.sourceControlAvailable && this.opts.changes ? await this.opts.changes.previewThreadDeletes([target]) : [];
     if (store.get(threadId) !== record || store.blocksRun(threadId) || store.turnsBlocked || record.info.lastInteractionAt !== interaction ||
         record.run?.working || target.working || receipt?.state === "working") throw new Error("This thread is busy. Try again once it stops.");
+    if (receipt && receipt.owned === undefined) throw new Error(receipt.reason ?? "Could not review the unfinished changes.");
     const executionId = receipt?.continuesExecutionId;
     if (!executionId && !record.info.interrupted) throw new Error("There is no unfinished request to continue.");
     const nativeSessionId = savedNativeSession(record);
     if (executionId && (!nativeSessionId || (receipt?.continuationSessionId && receipt.continuationSessionId !== nativeSessionId))) {
       throw new Error("The native session for this unfinished request is no longer available.");
     }
-    const request = receipt?.continuationRequest ?? record.activeRequest?.request ?? target.requests.at(-1);
-    const question = `Continue where you left off and finish the request.${request ? `\n\nEarlier request: ${request}` : ""}`;
+    const request = receipt?.continuationRequest || record.activeRequest?.request || target.requests.at(-1) || record.info.title;
+    const question = `Continue where you left off and finish the request.\n\nEarlier request: ${request}`;
     const turnId = msg.turnId ?? null;
     const entry = store.addMessage(threadId, { turnId, role: "user", kind: "followup", text: question });
     store.bump(threadId);
@@ -329,7 +331,7 @@ export class Session {
     await submitRun(threadId, {
       kind: "followup", intent: "task", question, turnId, config, messageId: entry?.id,
       language: config.language === "auto" ? undefined : config.language,
-      ...(request && executionId && nativeSessionId ? { continuation: { executionId, nativeSessionId, request } } : {}),
+      ...(executionId && nativeSessionId ? { continuation: { executionId, nativeSessionId, request } } : {}),
     }, this.opts.threadDeps ?? realDeps, store);
   }
 

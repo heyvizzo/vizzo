@@ -35,6 +35,7 @@ function legacyPreflight(targets: readonly ThreadDeleteTarget[]): DeleteReceipt[
 export async function previewThreadDeletes(
   store: ThreadStore, threadIds: readonly string[], changes?: DeleteService,
 ): Promise<ThreadDeletePreview[]> {
+  if (!store.sourceControlAvailable) changes = undefined;
   const targets = threadIds.flatMap((id) => {
     const record = store.get(id);
     return record ? [threadDeleteTarget(record)] : [];
@@ -47,6 +48,7 @@ export async function previewThreadDeletes(
 }
 
 export async function deleteThreads(store: ThreadStore, choices: readonly ThreadDeleteChoice[], reset: boolean, changes?: DeleteService): Promise<void> {
+  if (!store.sourceControlAvailable) changes = undefined;
   const modes = new Map(choices.map(({ threadId, mode }) => [threadId, mode]));
   const ids = reset ? store.list().map(({ threadId }) => threadId) : [...modes.keys()];
   const targets = ids.flatMap((threadId) => {
@@ -84,6 +86,7 @@ export function savedNativeSession(record: ThreadRecord): string | undefined {
 }
 
 function applyCompletion(store: ThreadStore, receipt: DeleteReceipt): void {
+  if (receipt.owned === undefined) return; // An unavailable scan cannot clear a saved incomplete status.
   const record = store.get(receipt.threadId);
   if (!record) return;
   const incomplete = !!receipt.incompleteReason;
@@ -103,6 +106,7 @@ export function refreshThreadCompletion(store: ThreadStore, threadId: string): P
 }
 
 async function refreshThreadCompletions(store: ThreadStore, ids: readonly string[], service: DeleteService): Promise<void> {
+  if (!store.sourceControlAvailable) return;
   const byFolder = new Map<string, ThreadDeleteTarget[]>();
   for (const id of ids) {
     const record = store.get(id);
@@ -133,8 +137,17 @@ export function monitorThreadCompletion(service = changesService(), store = thre
 }
 
 export async function restoreThreadLifecycle(file: string, service: RecoveryService = changesService(), store = threadStore()): Promise<void> {
-  await service.restore();
-  const pending = await service.pendingThreadDeletes();
+  let pending: string[];
+  try {
+    await service.restore();
+    pending = await service.pendingThreadDeletes();
+  } catch (error) {
+    console.warn("[changes] source control was unavailable at startup", error);
+    store.disableSourceControl();
+    store.persistTo(file);
+    return;
+  }
+  // Once the ledger reports a pending removal, a failed write must never fall back to restoring that thread.
   store.persistTo(file, pending);
   if (pending.length) await service.completeThreadDeletes(pending);
 }

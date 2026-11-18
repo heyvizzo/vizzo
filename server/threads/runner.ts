@@ -224,12 +224,15 @@ class ThreadRunner implements ThreadRunState {
       q.reject(error);
     }).finally(() => {
       if (this.rec.activeRequest?.executionId === execution.id) delete this.rec.activeRequest;
+      const outcome = cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done";
+      const nativeSettled = this.rec.handle?.settled;
       this.current = null;
       this.next();
-      void execution.settled.then(async () => {
+      if (nativeSettled) void nativeSettled.then(() => end(outcome), () => end("failed"));
+      else end(outcome);
+      void execution.settled.then(() => {
         this.settling.delete(execution);
-        if (execution.folder) await refreshThreadCompletion(this.store, this.threadId);
-        end(cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done");
+        if (execution.folder) void refreshThreadCompletion(this.store, this.threadId);
       });
     });
   }

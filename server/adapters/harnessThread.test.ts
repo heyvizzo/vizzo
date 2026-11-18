@@ -14,6 +14,7 @@ import { configureWarm, registerRoleSpecs, setAgentFactory, setWarmLogger, stopW
 import { centralSession, continueConversationSession, finishJobSession, openJobSession, solveCentral } from "../centralSession.ts";
 import { resetConversation } from "../conversation.ts";
 import { harnessSessionInfo } from "./sessionInfo.ts";
+import { WriterRegistry } from "../changes/writers.ts";
 
 const SMART: LlmChoice = { provider: "claude-code", model: "claude-opus-5-5", level: "high" };
 const until = async (f: () => boolean, ms = 5000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) throw new Error("timeout"); await new Promise((r) => setTimeout(r, 10)); } };
@@ -86,6 +87,21 @@ afterEach(() => { for (const t of sessionsLeft.splice(0)) t.close(); });
 const open = (replay = () => "") => { const t = openHarnessThread({ role: "solver", choice: SMART, replay }); sessionsLeft.push(t); return t; };
 
 describe("harness threads", () => {
+  it("does not replay a tracked continuation into a fresh native session when the original is gone", async () => {
+    const spec: AgentSpec = { role: "solver", harness: "claude-code", model: SMART.model, system: "S", persist: true };
+    const session = openHarnessThread({ role: "solver", choice: SMART, replay: () => "HISTORY", restore: { spec, ref: { id: "gone" } } });
+    sessionsLeft.push(session);
+    const execution = new WriterRegistry().queue({
+      writer: { kind: "thread", id: "t" }, title: "The button", request: "Change it", folder: null,
+      purpose: "followup", continuesExecutionId: "unfinished",
+    }, "gone");
+    gone.add("gone");
+    await expect(execution.run(() => session.send("Continue the request", undefined, 1000, undefined, undefined, execution))).rejects.toBeInstanceOf(SessionUnavailableError);
+    expect(made).toHaveLength(1);
+    expect(made[0]!.start).toEqual({ kind: "resume", ref: { id: "gone" } });
+    expect(made[0]!.messages).toEqual([]);
+  });
+
   it("resumes a completed main-conversation job on its saved native session after releasing its process", async () => {
     const handle = openJobSession(openHarnessThread, SMART, []);
     expect(harnessSessionInfo(handle)).toBeNull();

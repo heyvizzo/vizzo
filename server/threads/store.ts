@@ -58,6 +58,7 @@ export class ThreadStore {
   private handedOff = new Set<string>();
   private resetting = false;
   private closing = false;
+  private ledgerAvailable = true;
 
   get conversation(): ChatTurn[] { return getConversation(); }
 
@@ -90,6 +91,8 @@ export class ThreadStore {
   focused(): string | null { return focusedThreadId([...this.records.values()].map((r) => r.info)); }
 
   get turnsBlocked(): boolean { return this.resetting || this.closing; }
+  get sourceControlAvailable(): boolean { return this.ledgerAvailable; }
+  disableSourceControl(): void { this.ledgerAvailable = false; }
   blocksRun(threadId: string): boolean { return this.closing || this.deleting?.has(threadId) === true || this.handedOff.has(threadId); }
 
   beginDeletion(threadIds: readonly string[], reset: boolean): () => void {
@@ -180,6 +183,7 @@ export class ThreadStore {
 
   /** Called after the source-control ledger has accepted the threads and their changes. */
   removeDurably(threadIds: readonly string[]): void {
+    if (!threadIds.length) return;
     const removing = new Set(threadIds);
     for (const id of threadIds) this.handedOff.add(id);
     if (this.file) writeThreads(this.file, [...this.records.values()].filter(({ info }) => !removing.has(info.threadId)).map(savedOf), true);
