@@ -2,7 +2,7 @@
 // module has no side effects and can be bundled into the Electron app.
 import { pathToFileURL } from "node:url";
 import { startServer, type StartServerOpts } from "./index.ts";
-import { setProjectDir } from "./project.ts";
+import { projectDir, setProjectDir } from "./project.ts";
 import { loadDesktopEnv } from "../electron/settings.ts";
 
 // FAKE_VENDORS=1: every vendor is faked (tones, canned text) so the UI can be tried without keys. Runs aren't saved.
@@ -41,6 +41,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
         .finally(() => process.exit(0));
     });
     await changesService().restore().catch((error) => console.warn("[changes] could not recover source-control state", error));
+    void changesService().scanner.setProject(projectDir());
   }
   try {
     await startServer(port, opts);

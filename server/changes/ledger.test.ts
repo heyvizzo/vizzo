@@ -62,6 +62,24 @@ beforeEach(() => {
 
 afterEach(() => rmSync(folder, { recursive: true, force: true }));
 
+describe("Git-backed project evidence", () => {
+  it("distinguishes an existing non-repository from an unavailable directory", () => {
+    expect(discoverLedgerProject(folder)).toEqual({ reason: "The project folder is not in a Git worktree" });
+    expect(discoverLedgerProject(join(folder, "missing")).reason).toContain("ENOENT");
+  });
+
+  it("uses the true tree blob even when Git has a replacement ref", () => {
+    put("f", "original\n");
+    put("replacement", "replacement\n");
+    commit();
+    git("replace", git("rev-parse", "HEAD:f"), git("rev-parse", "HEAD:replacement"));
+    expect(git("show", "HEAD:f")).toBe("replacement");
+    expect(readBaseEntry(project, "f", readLedgerHead(project))).toEqual({
+      kind: "file", mode: "100644", bytes: Buffer.from("original\n"),
+    });
+  });
+});
+
 describe("chain of custody", () => {
   it("attaches exact interleaved edits even when completions arrive out of order", () => {
     const base = "one\na\nb\nc\nthree\n";
