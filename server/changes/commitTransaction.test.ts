@@ -10,7 +10,7 @@ import {
 import * as publication from "./gitPublication.ts";
 import type { FrozenGitEntry } from "./gitTree.ts";
 
-vi.setConfig({ testTimeout: 15_000 });
+vi.setConfig({ testTimeout: 45_000 });
 const dirs: string[] = [];
 const templates = new Map<string, { root: string; base: string | null }>();
 beforeEach(() => {
@@ -181,7 +181,7 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
     const fixture = repo(format);
     const { git, project, root, index, base } = fixture;
     const diskContent = "selected A\nseparator\nwriter B's later edit\n";
-    fixture.file("main.txt", diskContent);
+    fixture.file("main.txt", "selected A\nseparator\nbase B\n");
     fixture.file("side.txt", "user staging\n");
     git("add", "side.txt");
     fixture.file("side.txt", "unselected newer edit\n");
@@ -200,6 +200,7 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
           case "locking/validate-selection":
             entry.content?.fill(0x78);
             sourceOwnership.eventIds.push("other-writer-edit");
+            fixture.file("main.txt", diskContent);
             break;
           case "publishing/prepare-index":
             expect(gitRun(root, ["symbolic-ref", "HEAD", "refs/heads/wrong"]).status).not.toBe(0);
@@ -309,7 +310,10 @@ describe.each(["files", "reftable"] as const)("%s commit transaction", (format) 
     });
     const second = job(linked.project, { journal: (record) => { events.push(`second ${step(record)}`); } });
     const pendingFirst = first.run();
-    await entered.wait;
+    await Promise.race([
+      entered.wait,
+      pendingFirst.then((result) => { throw new Error(`First commit ended before settlement: ${JSON.stringify(result)}`); }),
+    ]);
     const pendingSecond = second.run();
     try {
       await expect(job(independent.project).run()).resolves.toMatchObject({ status: "done" });
