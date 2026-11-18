@@ -66,9 +66,15 @@ type FinishedRecovery =
     lock: IndexLockIdentity & { path: string; journaledPid?: number }; message: string;
   };
 
-export type CommitRecoveryResult = FinishedRecovery | { status: "skipped"; phase: SkipPhase };
+export type CommitRecoveryResult = FinishedRecovery
+  | { status: "skipped"; phase: SkipPhase }
+  | { status: "skipped"; reason: "missing-job" };
+
+export type CommitRecoveryJobKey = Pick<RecoveryJob, "project" | "request">;
 
 export interface CommitRecoveryPorts<Job extends CommitRecoveryJournal> {
+  /** Load the current durable job inside the repository queue, including terminal records. */
+  reload(key: CommitRecoveryJobKey): Promise<Job | null>;
   /** Durably attach this checkpoint to the original journal record before the next Git mutation. */
   checkpoint(job: Job, checkpoint: CommitRecoveryCheckpoint): Promise<void>;
   /** Durably record the outcome. Preserve the checkpoint when blocked and clear it on other outcomes.
@@ -117,7 +123,7 @@ async function readIndex(root: string, path: string): Promise<IndexSnapshot> {
   const info = await fileInfo(path);
   if (info === null) return new Map();
   if (!info.isFile()) throw new Error("The Git index must be a regular file");
-  const output = (await readGit(root, ["ls-files", "--full-name", "--stage", "--debug", "-z", "--", ":/"], path)).toString("latin1");
+  const output = (await readGit(root, ["ls-files", "--full-name", "--stage", "--debug", "-z"], path)).toString("latin1");
   const snapshot: IndexSnapshot = new Map();
   for (let offset = 0; offset < output.length;) {
     const tab = output.indexOf("\t", offset);
@@ -322,6 +328,7 @@ async function recover<Job extends CommitRecoveryJournal>(job: Job, repository: 
   }
 
   const checkpoint = (state: CommitRecoveryCheckpoint) => ports.checkpoint(job, state);
+  let canReleaseOnError = !abandoned;
   try {
     if (candidate && index && (mayHaveSentCommit || evidence === "published")) {
       const owner = { ...index.identity, pid: process.pid };
@@ -332,9 +339,10 @@ async function recover<Job extends CommitRecoveryJournal>(job: Job, repository: 
       try {
         head = await captureGitHead(root);
         ref = await prepareGitRefVerify(root, head);
+        canReleaseOnError = true;
       } catch (error) {
         const outcome = publicationBusy(evidence, error);
-        return finish(abandoned ? outcome : await releaseIndex(index, outcome, evidence, reusable, checkpoint));
+        return finish(abandoned ? outcome : await releaseIndex(index, outcome, reusable, owner, checkpoint));
       }
       let outcome: FinishedRecovery;
       try {
@@ -346,7 +354,7 @@ async function recover<Job extends CommitRecoveryJournal>(job: Job, repository: 
         } else {
           outcome = unconfirmed(candidate, evidence);
         }
-        outcome = await releaseIndex(index, outcome, evidence, reusable, checkpoint);
+        outcome = await releaseIndex(index, outcome, reusable, owner, checkpoint);
       } finally { await ref.close(); }
       return finish(outcome);
     }
@@ -357,7 +365,19 @@ async function recover<Job extends CommitRecoveryJournal>(job: Job, repository: 
         code: "interrupted", reason: "Vizzo stopped before attempting to publish this commit.",
       },
     };
-    return finish(index ? await releaseIndex(index, outcome, evidence, reusable, checkpoint) : outcome);
+    if (!index) return finish(outcome);
+    // An early-phase orphan cannot have sent commit. Keep its dead-owner identity in the
+    // cleanup checkpoint so a retry can reopen it if the checkpoint write fails.
+    const owner = abandoned && oldOwner ? oldOwner : { ...index.identity, pid: process.pid };
+    return finish(await releaseIndex(index, outcome, reusable, owner, checkpoint));
+  } catch (error) {
+    if (canReleaseOnError && index) {
+      try { await index.release(); }
+      catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Commit recovery could not release its Git index lock");
+      }
+    }
+    throw error;
   } finally { await index?.close(); }
 }
 
@@ -377,33 +397,37 @@ function unconfirmed(job: CommitRepairJournal, evidence: "not-published" | "inde
 }
 
 async function releaseIndex(
-  index: IndexLock, outcome: FinishedRecovery, evidence: FinishedRecovery["evidence"], reusable: boolean,
+  index: IndexLock, outcome: FinishedRecovery, reusable: boolean, owner: JournaledIndexLock,
   checkpoint: (state: CommitRecoveryCheckpoint) => Promise<void>,
 ): Promise<FinishedRecovery> {
   // A successful install has already released the lock. Attempt release for an already-current index
   // as well, so an orphan is cleaned if the index had been independently installed.
   if (outcome.status === "done" && outcome.index !== "already-current") return outcome;
-  const owner = { ...index.identity, pid: process.pid };
   await checkpoint({ step: "cleanup", owner, reusable });
-  if (!(await index.release())) return (await blockedIndex(index.indexPath, owner, evidence)) ?? outcome;
+  if (!(await index.release())) return (await blockedIndex(index.indexPath, owner, outcome.evidence)) ?? outcome;
   return outcome;
 }
 
 /** Invoke for each journaled job before enabling writers. Startup and Fix are serialized per repository in this server. */
-export async function recoverCommit<Job extends CommitRecoveryJournal>(job: Job, ports: CommitRecoveryPorts<Job>): Promise<CommitRecoveryResult> {
-  if (job.phase === "done" || job.phase === "refused" || job.phase === "not-published") {
-    return { status: "skipped", phase: job.phase };
-  }
+export async function recoverCommit<Job extends CommitRecoveryJournal>(key: CommitRecoveryJobKey, ports: CommitRecoveryPorts<Job>): Promise<CommitRecoveryResult> {
   let repository: string;
   try {
-    if (!isAbsolute(job.project.commonDir)) throw new Error("The Git common directory path must be absolute");
-    repository = await realpath(job.project.commonDir);
-  } catch (error) {
-    const result = repositoryChanged(reasonText(error));
-    await ports.finish(job, result);
-    return result;
-  }
-  const pending = (pendingByRepository.get(repository) ?? Promise.resolve()).then(() => recover(job, repository, ports));
+    if (!isAbsolute(key.project.commonDir)) throw new Error("The Git common directory path must be absolute");
+    repository = await realpath(key.project.commonDir);
+  } catch (error) { return repositoryChanged(reasonText(error)); }
+
+  const pending = (pendingByRepository.get(repository) ?? Promise.resolve()).then(async (): Promise<CommitRecoveryResult> => {
+    const latest = await ports.reload(key);
+    if (!latest) return { status: "skipped", reason: "missing-job" };
+    if (latest.request.jobId !== key.request.jobId || latest.project.root !== key.project.root ||
+        latest.project.commonDir !== key.project.commonDir) {
+      return repositoryChanged("The journal no longer matches this Git worktree and job");
+    }
+    if (latest.phase === "done" || latest.phase === "refused" || latest.phase === "not-published") {
+      return { status: "skipped", phase: latest.phase };
+    }
+    return recover(latest, repository, ports);
+  });
   const barrier = pending.then(() => {}, () => {});
   pendingByRepository.set(repository, barrier);
   try { return await pending; }
@@ -413,6 +437,6 @@ export async function recoverCommit<Job extends CommitRecoveryJournal>(job: Job,
 }
 
 /** Reclassify publication and run the same guarded repair against the current index and HEAD. */
-export function fixCommitIndex<Job extends CommitRepairJournal>(job: Job, ports: CommitRecoveryPorts<Job>): Promise<CommitRecoveryResult> {
+export function fixCommitIndex<Job extends CommitRecoveryJournal>(job: CommitRepairJournal, ports: CommitRecoveryPorts<Job>): Promise<CommitRecoveryResult> {
   return recoverCommit(job, ports);
 }

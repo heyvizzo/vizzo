@@ -34,7 +34,10 @@ function deadPid(): number {
   return child.pid;
 }
 
-async function fixture(format: "files" | "reftable", objectFormat: "sha1" | "sha256" = "sha1", unborn = false) {
+async function fixture(format: "files" | "reftable", options: {
+  objectFormat?: "sha1" | "sha256"; unborn?: boolean; deleted?: boolean;
+} = {}) {
+  const { objectFormat = "sha1", unborn = false, deleted = false } = options;
   const root = realpathSync(mkdtempSync(join(tmpdir(), "vizzo-recovery-")));
   directories.push(root);
   const git = (args: string[], index?: string) => {
@@ -62,7 +65,9 @@ async function fixture(format: "files" | "reftable", objectFormat: "sha1" | "sha
   try {
     const { commit, entries } = await buildCommitTree({
       root, indexPath, base: head.oid, message: "Selected work",
-      entries: [{ path: "selected.txt", mode: "100644", kind: "whole", content: Buffer.from("selected commit\n") }],
+      entries: [deleted
+        ? { path: "selected.txt", mode: "0", kind: "whole", content: null }
+        : { path: "selected.txt", mode: "100644", kind: "whole", content: Buffer.from("selected commit\n") }],
     });
     const prepared = await prepareIndexBytes({ root, indexPath, entries });
     const candidate = { ...job, head, commit, entries, lock: lock.identity };
@@ -82,6 +87,8 @@ async function fixture(format: "files" | "reftable", objectFormat: "sha1" | "sha
 
 function journalPorts<Job extends CommitRecoveryJournal>() {
   return {
+    // Most cases pass the current journal directly. Shared-store tests override this lookup.
+    reload: vi.fn<CommitRecoveryPorts<Job>["reload"]>().mockImplementation(async (job) => job as Job),
     checkpoint: vi.fn<CommitRecoveryPorts<Job>["checkpoint"]>().mockResolvedValue(undefined),
     finish: vi.fn<CommitRecoveryPorts<Job>["finish"]>().mockResolvedValue(undefined),
   };
@@ -133,7 +140,7 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     const ports = journalPorts<typeof journal>();
     const before = readFileSync(repo.indexPath);
     ports.checkpoint.mockImplementation(async (_job, state) => {
-      expect(state).toMatchObject({ step: "cleanup", owner: { ...abandoned.lock, pid: process.pid } });
+      expect(state).toMatchObject({ step: "cleanup", owner: { ...abandoned.lock, pid: abandoned.pid } });
       expect(existsSync(repo.lockPath)).toBe(true);
     });
     ports.finish.mockImplementation(async () => expect(existsSync(repo.lockPath)).toBe(false));
@@ -202,7 +209,7 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
   });
 
   it("repairs a published SHA-256 unborn job when no real index exists", async () => {
-    const repo = await fixture(format, "sha256", true);
+    const repo = await fixture(format, { objectFormat: "sha256", unborn: true });
     const journal = { ...repo.candidate, phase: "index-ready" as const, step: "repair" as const };
     repo.publish();
     expect(existsSync(repo.indexPath)).toBe(false);
@@ -223,6 +230,77 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     const repairJournal = { ...journal, step: "repair" as const };
     expect(await fixCommitIndex(repairJournal, journalPorts())).toMatchObject({ status: "done", index: "already-current" });
     expect(readFileSync(repo.indexPath)).toEqual(installed);
+  });
+
+  it("repairs a published deletion with literal pathspecs enabled", async () => {
+    const repo = await fixture(format, { deleted: true });
+    const journal = { ...repo.candidate, phase: "index-ready" as const, step: "repair" as const };
+    repo.publish();
+    expect(repo.git(["show", ":selected.txt"])).toBe("base");
+    vi.stubEnv("GIT_LITERAL_PATHSPECS", "1");
+    try {
+      expect(await recoverCommit(journal, journalPorts())).toMatchObject({ status: "done", index: "rebuilt" });
+      expect(runGit(repo.root, ["show", ":selected.txt"]).status).not.toBe(0);
+      expect(repo.git(["ls-files", "-v", "assume.txt", "skip.txt"])).toBe("h assume.txt\nS skip.txt");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each(["fresh", "reopened", "replaced"] as const)("handles a failed install checkpoint with a %s index lock", async (kind) => {
+    const repo = await fixture(format);
+    const candidate = kind === "fresh" ? repo.candidate : await repo.orphan(repo.prepared);
+    const journal = { ...candidate, phase: "index-ready" as const, step: "install" as const };
+    let latest: typeof journal & { recovery?: CommitRecoveryCheckpoint } = journal;
+    const before = readFileSync(repo.indexPath);
+    repo.publish();
+    const ports = journalPorts<typeof latest>();
+    ports.reload.mockImplementation(async () => latest);
+    let failCheckpoint = true;
+    ports.checkpoint.mockImplementation(async (_job, state) => {
+      if (state.step === "install-index" && failCheckpoint) {
+        failCheckpoint = false;
+        expect(latest.recovery).toMatchObject({ step: kind === "fresh" ? "write-index" : "inspect-index", owner: { pid: process.pid } });
+        if (kind === "replaced") {
+          renameSync(repo.lockPath, repo.lockPath + ".original");
+          writeFileSync(repo.lockPath, "foreign lock");
+        }
+        throw new Error("Storage could not write the install checkpoint");
+      }
+      latest = { ...latest, recovery: state };
+    });
+    await expect(fixCommitIndex(journal, ports)).rejects.toThrow("Storage could not write the install checkpoint");
+    expect(readFileSync(repo.indexPath)).toEqual(before);
+    if (kind === "replaced") {
+      expect(readFileSync(repo.lockPath, "utf8")).toBe("foreign lock");
+      expect(await fixCommitIndex(journal, ports)).toMatchObject({ status: "blocked", reason: "index-locked" });
+    } else {
+      expect(existsSync(repo.lockPath)).toBe(false);
+      expect(await fixCommitIndex(journal, ports)).toMatchObject({ status: "done", index: "rebuilt" });
+      expect(repo.git(["show", ":selected.txt"])).toBe("selected commit");
+    }
+  });
+
+  it("reloads the durable job after another queued Fix completes", async () => {
+    const repo = await fixture(format);
+    const journal = { ...repo.candidate, phase: "index-ready" as const, step: "repair" as const };
+    let latest: CommitRecoveryJournal = journal;
+    const ports = journalPorts<CommitRecoveryJournal>();
+    ports.reload.mockImplementation(async () => latest);
+    ports.finish.mockImplementation(async (_job, result) => {
+      expect(result.status).toBe("done");
+      latest = { ...journal, phase: "done" };
+      repo.git(["reset", "--soft", repo.head.oid!]);
+    });
+    repo.publish();
+    const first = fixCommitIndex(journal, ports);
+    const second = fixCommitIndex(journal, ports);
+    expect(await Promise.all([first, second])).toEqual(expect.arrayContaining([
+      { status: "done", evidence: "published", commit: repo.commit, index: "rebuilt" },
+      { status: "skipped", phase: "done" },
+    ]));
+    expect(ports.reload).toHaveBeenCalledTimes(2);
+    expect(ports.finish).toHaveBeenCalledTimes(1);
+    expect(repo.git(["rev-parse", "HEAD"])).toBe(repo.head.oid);
+    expect(repo.git(["show", ":selected.txt"])).toBe("selected commit");
   });
 
   it("reopens a replacement recovery lock recorded before a second crash", async () => {
