@@ -457,3 +457,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Normal Git reads can refresh the modification time of a split index's shared cache even with optional locks
   disabled. Vizzo allows that Git housekeeping. For commits, the prepared replacement may use a self-contained
   index so recovery can validate and install it with the same entries and flags after a crash.
+- Preparing the replacement index disables Git fsmonitor and resets its validity cache. Git otherwise invoked a
+  configured fsmonitor hook while updating a copied index. User-facing index flags such as assume-unchanged and
+  skip-worktree are preserved.
