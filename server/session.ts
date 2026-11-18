@@ -318,7 +318,7 @@ export class Session {
     const executionId = receipt?.continuesExecutionId;
     if (!executionId && !record.info.interrupted) throw new Error("There is no unfinished request to continue.");
     const nativeSessionId = savedNativeSession(record);
-    if (executionId && (!nativeSessionId || (receipt?.continuationSessionId && receipt.continuationSessionId !== nativeSessionId))) {
+    if (executionId && (!nativeSessionId || receipt?.continuationSessionId !== nativeSessionId)) {
       throw new Error("The native session for this unfinished request is no longer available.");
     }
     const request = receipt?.continuationRequest || record.activeRequest?.request || target.requests.at(-1) || record.info.title;

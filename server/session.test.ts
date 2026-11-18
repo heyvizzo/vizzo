@@ -5,7 +5,7 @@ import { DEFAULT_CONFIG } from "../shared/config.ts";
 import type { RunRecord, ServerMsg } from "../shared/protocol.ts";
 import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING } from "./orchestrators/fakes.ts";
 import { createPipelineOrchestrator } from "./orchestrators/pipeline.ts";
-import { Session } from "./session.ts";
+import { Session, type SessionOpts } from "./session.ts";
 import { getConversation } from "./conversation.ts";
 import { resetThreadStore } from "./threads/store.ts";
 import type { HarnessThread } from "./adapters/types.ts";
@@ -124,7 +124,7 @@ describe("Session + element threads", () => {
       id: "handle", projectFolder: null, close() {}, abort() {}, live: true,
       session: () => ({ id: "saved-native-session" }),
     } as HarnessThread;
-    const previewThreadDeletes = vi.fn(async () => [{
+    const previewThreadDeletes = vi.fn<NonNullable<SessionOpts["changes"]>["previewThreadDeletes"]>(async () => [{
       threadId: info.threadId, state: "incomplete" as const, defaultMode: "keep" as const, owned: true,
       continuesExecutionId: "interrupted-execution", continuationRequest: "Paint it green",
       continuationSessionId: "saved-native-session",
@@ -135,6 +135,15 @@ describe("Session + element threads", () => {
     const ws = new FakeWs();
     try {
       new Session(ws as unknown as WebSocket, { persist: false, threadDeps: { ...deps, solveInThread }, changes: { previewThreadDeletes, deleteThreads: vi.fn() } });
+      previewThreadDeletes.mockResolvedValueOnce([{
+        threadId: info.threadId, state: "incomplete", defaultMode: "keep", owned: true,
+        continuesExecutionId: "interrupted-execution", continuationRequest: "Paint it green",
+      }]);
+      ws.client({ type: "thread.continue", threadId: info.threadId, requestId: "unproved" });
+      await vi.waitFor(() => expect(msgs(ws)).toContainEqual({
+        type: "error", requestId: "unproved", source: "session", message: "The native session for this unfinished request is no longer available.",
+      }));
+      expect(queue).not.toHaveBeenCalled();
       ws.client({ type: "thread.continue", threadId: info.threadId, config: { ...DEFAULT_CONFIG, silent: true } });
       await vi.waitFor(() => expect(store.info(info.threadId)?.messages.some(({ kind }) => kind === "result")).toBe(true));
       expect(previewThreadDeletes).toHaveBeenCalledWith([expect.objectContaining({ folder: "/old/project", interruptedExecutionId: "interrupted-execution" })]);
