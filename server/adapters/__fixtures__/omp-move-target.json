@@ -1,0 +1,16 @@
+{
+  "version": "18.2.1",
+  "description": "Real OhMyPi RPC edit events. Before the run, other-bytes.txt existed with different content from normal.txt, and broken-link.txt was a dangling symlink. Both moves onto these paths succeeded. Absolute project paths were sanitized.",
+  "events": [
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_1", "toolName": "edit", "args": {"input": "[normal.txt#A0E4]\nMV other-bytes.txt"}, "intent": "Fixture edit"},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_1", "toolName": "edit", "result": {"content": [{"type": "text", "text": "[other-bytes.txt#A0E4]\nMoved to other-bytes.txt"}], "details": {"diff": "", "op": "update", "move": "/fixture/project/other-bytes.txt", "sourcePath": "/fixture/project/normal.txt", "path": "/fixture/project/other-bytes.txt", "oldText": "header\nold\nfooter\n", "newText": "header\nold\nfooter\n"}}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_2", "toolName": "edit", "args": {"input": "[normal.txt#A0E4]\nMV same-bytes.txt"}, "intent": "Fixture edit"},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_2", "toolName": "edit", "result": {"content": [{"type": "text", "text": "File not found: normal.txt. Use the write tool to create new files."}], "details": {}, "isError": true}, "isError": true},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_3", "toolName": "edit", "args": {"input": "[normal.txt#A0E4]\nPUT 2.=2:\n+new\nMV same-bytes-with-edit.txt"}, "intent": "Fixture edit"},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_3", "toolName": "edit", "result": {"content": [{"type": "text", "text": "File not found: normal.txt. Use the write tool to create new files."}], "details": {}, "isError": true}, "isError": true},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_5", "toolName": "edit", "args": {"input": "[Case.txt#728D]\nMV case.txt"}, "intent": "Fixture edit"},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_5", "toolName": "edit", "result": {"content": [{"type": "text", "text": "MV destination is the same as Case.txt."}], "details": {}, "isError": true}, "isError": true},
+    {"type": "tool_execution_start", "toolCallId": "call_fixture_7", "toolName": "edit", "args": {"input": "[move-over-link.txt#05F6]\nMV broken-link.txt"}, "intent": "Fixture edit"},
+    {"type": "tool_execution_end", "toolCallId": "call_fixture_7", "toolName": "edit", "result": {"content": [{"type": "text", "text": "[broken-link.txt#05F6]\nMoved to broken-link.txt"}], "details": {"diff": "", "op": "update", "move": "/fixture/project/broken-link.txt", "sourcePath": "/fixture/project/move-over-link.txt", "path": "/fixture/project/broken-link.txt", "oldText": "source data\n", "newText": "source data\n"}}, "isError": false}
+  ]
+}
