@@ -832,10 +832,13 @@ class RpcAgent implements WarmAgent {
         }
       };
     });
-    const cleanup = () => {
+    const cleanup = async () => {
+      if (turn.stopping) {
+        if (!this.kept) this.proc.stdin.end();
+        await this.native.waitForStoppedTurn(this.kept);
+      } else if (!this.kept) this.kill();
       this.listener = null;
       this.exitWaiters = [];
-      if (!this.kept) this.kill();
     };
     turn.holdUntil(done.then(cleanup, cleanup), () => this.native.stop(true));
     this.proc.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: user, ...(annotations?.length ? { images: rpcImages(annotations) } : {}) }) + "\n");
