@@ -537,3 +537,19 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Interactive Commit and Fix check the served scope immediately before sending the ref commit or submitting
   the index rename. The independent review reproduced a project switch during the asynchronous Git lock checks
   immediately after the earlier scope check. Startup recovery and background jobs use their pinned project.
+- A delete commit still queued at startup is treated as a prepublication refusal. It had no frozen Git selection
+  to resume. Its closed group survives, and startup completes any pending thread removal separately.
+- Thread removal fsyncs the temporary threads file before rename and fsyncs its directory before clearing the
+  ledger's pending-removal marker. Replies acknowledge durable removal, including idempotent requests where
+  another client already removed the thread.
+- Stop and delete sends Stop and can finish the durable keep while the harness is still settling. The closed
+  writer stays working and unselectable until the native barrier resolves, so late edit evidence is preserved.
+  A stopped or interrupted task needs a matching saved native session for a continuation to clear incomplete work.
+- If startup cannot read or own the ledger, a fallback process keeps the shared threads file read-only and
+  defers folder-pinned saved threads. Folderless threads can still run in memory. A competing voice process
+  otherwise restored a thread with a durable pending deletion, even after its folder lost its Git metadata.
+- The bulk preview carries explicit thread IDs and per-thread modes. Reset checks that set before and after
+  preflight, and the renderer asks for confirmation again when new local work turns a Commit choice into Keep.
+  An earlier Keep remains the most that can be authorized by that confirmation.
+- A known pinned project can keep and close a thread while its Git scan is blocked by recovery. The ledger
+  retains the closed group and the reason, with any commit held for a later explicit review.
