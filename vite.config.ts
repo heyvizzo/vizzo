@@ -22,6 +22,7 @@ export default defineConfig({
       input: {
         chat: resolve(import.meta.dirname, "web/chat.html"),
         settings: resolve(import.meta.dirname, "web/settings.html"),
+        changes: resolve(import.meta.dirname, "web/changes.html"),
       },
     },
   },
