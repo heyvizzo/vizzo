@@ -10,13 +10,14 @@ async function fakeVendorOpts(): Promise<StartServerOpts> {
   const { createFakeDeps, REALISTIC_TIMING } = await import("./orchestrators/fakes.ts");
   const { createPipelineOrchestrator } = await import("./orchestrators/pipeline.ts");
   const { createCursorOnlyOrchestrator } = await import("./orchestrators/cursorOnly.ts");
-  const deps = () => createFakeDeps(REALISTIC_TIMING);
+  const deps = createFakeDeps(REALISTIC_TIMING);
   console.log("[server] FAKE_VENDORS=1: using fake adapters, runs are not persisted");
   return {
     persist: false,
+    threadDeps: deps,
     orchestrators: {
-      pipeline: createPipelineOrchestrator(deps()),
-      "cursor-only": createCursorOnlyOrchestrator(deps().openScribe),
+      pipeline: createPipelineOrchestrator(deps),
+      "cursor-only": createCursorOnlyOrchestrator(deps.openScribe),
     },
   };
 }
@@ -30,17 +31,15 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const opts = process.env.FAKE_VENDORS === "1" ? await fakeVendorOpts() : {};
   // Threads are kept between runs, like in the app (fake vendors: not saved).
   if (opts.persist !== false) {
-    const { threadStore } = await import("./threads/store.ts");
     const { threadsFile } = await import("./threads/persist.ts");
     const { changesService } = await import("./changes/changesService.ts");
-    const store = threadStore();
-    store.persistTo(threadsFile());
+    const { restoreThreadLifecycle, flushThreadLifecycle, monitorThreadCompletion } = await import("./threads/lifecycle.ts");
     for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => {
-      store.flush();
-      void changesService().flush().catch((error) => console.warn("[changes] could not flush source-control state", error))
+      void flushThreadLifecycle().catch((error) => console.warn("[changes] could not flush source-control state", error))
         .finally(() => process.exit(0));
     });
-    await changesService().restore().catch((error) => console.warn("[changes] could not recover source-control state", error));
+    await restoreThreadLifecycle(threadsFile()).catch((error) => console.warn("[threads] could not recover saved threads", error));
+    monitorThreadCompletion();
     void changesService().scanner.setProject(projectDir());
   }
   try {

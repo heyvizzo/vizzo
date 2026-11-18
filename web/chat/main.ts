@@ -2428,7 +2428,7 @@ const INTENT_STATUS: Record<RouteIntent, string> = {
   answer: "Answering…",
 };
 
-sock.on((msg: ServerMsg | { type: "thread.delete.done"; requestId?: string }) => {
+sock.on((msg: ServerMsg) => {
   if (msg.type === "thread.delete.preview") return deletePreviews.get(msg.requestId)?.(msg.threads);
   if (msg.type === "thread.delete.done") {
     if (!pendingDelete || pendingDelete.reset || pendingDelete.requestId !== msg.requestId) return;
@@ -2836,9 +2836,8 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep:
     const previews = await previewDelete(ids);
     if (batchConfirm !== dialog) return;
     const choices = previews.map((preview): ThreadDeleteChoice => {
-      const { threadId, state, defaultMode } = preview;
-      const hasJob = !("willCommit" in preview) || preview.willCommit !== false;
-      return { threadId, mode: !keep.has(threadId) && state === "complete" && defaultMode === "commit" && hasJob ? "commit" : "keep" };
+      const { threadId, state, defaultMode, willCommit } = preview;
+      return { threadId, mode: !keep.has(threadId) && state === "complete" && defaultMode === "commit" && willCommit !== false ? "commit" : "keep" };
     });
     const committed = choices.filter((c) => c.mode === "commit").length;
     description.replaceChildren(...deleteBatchLines(previews, committed, reset, page !== undefined, tasks).map((l) => el("p", "", l)));

@@ -110,6 +110,7 @@ describe("source-control writer registry", () => {
     writeFileSync(join(root, "new"), "written after stop");
     execution.edits("s", "tool", [{ path: join(root, "new"), from: null, to: "written after stop" }]);
     barrier.resolve();
+    await execution.settled;
     await expect.poll(async () => (await registry.snapshot(p.id)).executions[0]?.phase).toBe("settled");
     expect((await client.observe(p, ["new"])).files[0]?.hunks[0]?.ownership.owners).toEqual([execution.id]);
   });

@@ -7,6 +7,8 @@ import { createFakeDeps, DEFAULT_SCENARIO, FAST_TIMING, type FakeScenario } from
 import { Floor } from "./floor.ts";
 import { cancelRun, correctRun, replayText, submitRun, type RunSpec } from "./runner.ts";
 import { resetThreadStore, type ThreadStore } from "./store.ts";
+import { deleteThreads } from "./lifecycle.ts";
+import { runningTasks } from "../activity.ts";
 
 export const anchor = (selector: string): ThreadAnchor => ({
   pageUrl: "http://localhost/demo.html", selector, domPath: `body > ${selector}`, dataSource: null, label: null, text: null, role: null, tag: "button",
@@ -41,6 +43,30 @@ const subscribe = () => {
 const says = () => sent.filter((m): m is Extract<ServerMsg, { type: "thread.say" }> => m.type === "thread.say" && m.state === "start").map((m) => m.say);
 
 describe("thread runner", () => {
+  it("closes a kept thread while its stopped native request is still settling", async () => {
+    const d = deps({ threadRunMs: 60_000 });
+    let confirmStop!: () => void;
+    const settled = new Promise<void>((resolve) => { confirmStop = resolve; });
+    const title = "a thread awaiting confirmation";
+    const thread = store.create(anchor("#red"), title, "task");
+    const run = submitRun(thread.threadId, spec("edit the button"), {
+      ...d,
+      openThread: (opts) => Object.assign(d.openThread!(opts), { settled }),
+      solveInThread: (opts) => {
+        opts.execution?.waitForSettlement(settled);
+        return d.solveInThread!(opts);
+      },
+    });
+    try {
+      await until(() => d.log.threadSends.length === 1);
+      await deleteThreads(store, [{ threadId: thread.threadId, mode: "keep" }], false);
+      expect(await run).toBeNull();
+      expect(store.get(thread.threadId)).toBeUndefined();
+      expect(runningTasks()).toContain("A thread awaiting confirmation");
+    } finally { confirmStop(); }
+    await until(() => !runningTasks().includes("A thread awaiting confirmation"));
+  });
+
   it("queues a follow-up behind the current run, in one harness session", async () => {
     const d = deps();
     const t = store.create(anchor("#red"), "the red button", "task");

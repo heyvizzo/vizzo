@@ -35,7 +35,10 @@ function fixtureThread(folder: string, harness: HarnessId, mode: "late" | "never
 
 function start(harness: HarnessId, mode: Parameters<typeof fixtureThread>[2], taskTimeout = 60_000, gate?: () => Promise<void>) {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "vizzo-settle-")));
-  const observed = { folder, edits: vi.fn(), stopping: vi.fn(), unconfirmed: vi.fn(), waitForSettlement: vi.fn(), bindNative: vi.fn(gate ?? (async () => {})) };
+  const observed = {
+    folder, edits: vi.fn(), observeNativeSession: vi.fn(), stopping: vi.fn(), unconfirmed: vi.fn(),
+    waitForSettlement: vi.fn(), bindNative: vi.fn(gate ?? (async () => {})),
+  };
   const active = deferred();
   const thread = fixtureThread(folder, harness, mode);
   const answer = thread.send("work", () => active.resolve(), taskTimeout, undefined, undefined, observed as unknown as WriterExecution);

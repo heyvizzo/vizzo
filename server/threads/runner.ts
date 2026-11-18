@@ -28,6 +28,7 @@ import { onBrowserUrl, onPage } from "../browserPage.ts";
 import { threadStore, type ThreadRecord, type ThreadRunState, type ThreadStore } from "./store.ts";
 import { fitLines } from "../conversation.ts";
 import { harnessSessionInfo } from "../adapters/sessionInfo.ts";
+import { refreshThreadCompletion } from "./lifecycle.ts";
 
 const SUMMARY_MAX = 160;
 const noMark: Mark = () => {};
@@ -90,6 +91,7 @@ export interface RunSpec {
   turnId: string | null;
   config: RunConfig;
   intent: Intent;
+  continuation?: { executionId: string; nativeSessionId: string; request: string };
   pointing?: PointingTarget[];
   pageContext?: string;
   language?: string;
@@ -113,6 +115,7 @@ class ThreadRunner implements ThreadRunState {
   private queue: Queued[] = [];
   private current: { q: Queued; abortedBy: "correction" | "stop" | "user" | null; failed?: boolean } | null = null;
   private stopped = false;
+  private readonly settling = new Set<WriterExecution>();
   /** The current run's own message: the replay stops before it (it's sent as the request itself). */
   private replayCut: string | null = null;
 
@@ -120,6 +123,7 @@ class ThreadRunner implements ThreadRunState {
 
   get busy(): boolean { return this.current !== null; }
   get pending(): number { return this.queue.length; }
+  get working(): boolean { return this.busy || this.pending > 0 || this.settling.size > 0; }
 
   enqueue(spec: RunSpec, front = false): Promise<RunResult | null> {
     return new Promise((resolve, reject) => {
@@ -129,9 +133,10 @@ class ThreadRunner implements ThreadRunState {
         : this.rec.projectFolder !== undefined ? this.rec.projectFolder : projectDir();
       this.rec.projectFolder = folder;
       const execution = writerRegistry().queue({
-        writer: { kind: "thread", id: this.threadId }, title: this.rec.info.title, request: spec.original ?? spec.question,
+        writer: { kind: "thread", id: this.threadId }, title: this.rec.info.title, request: spec.continuation?.request ?? spec.original ?? spec.question,
         folder, purpose: spec.kind, harness: (handle?.choice ?? this.rec.resume?.choice ?? spec.config.llm.smart).provider,
-      });
+        continuesExecutionId: spec.continuation?.executionId,
+      }, spec.continuation?.nativeSessionId);
       const q = { spec, execution, resolve, reject };
       if (front) this.queue.unshift(q); else this.queue.push(q);
       if (spec.kind !== "reconcile") this.store.update(this.threadId, (t) => { t.state = "running"; t.intent = spec.intent; delete t.interrupted; });
@@ -176,13 +181,28 @@ class ThreadRunner implements ThreadRunState {
   stop(): void {
     this.stopped = true;
     for (const q of this.queue.splice(0)) { q.execution.cancelQueued(); q.resolve(null); }
-    if (this.current) {
+    const h = this.rec.handle; // the record may already be gone from the store (delete)
+    if (this.current && !this.current.abortedBy) {
       this.current.abortedBy = "stop";
       this.current.q.execution.stopping();
+      try { h?.abort(); } catch { /* ignore */ }
     }
-    const h = this.rec.handle; // the record may already be gone from the store (delete)
-    try { h?.abort(); } catch { /* ignore */ }
     try { h?.close(); } catch { /* ignore */ }
+  }
+
+  stopForDeletion(): void {
+    const dropped = this.queue.splice(0);
+    for (const q of dropped) { q.execution.cancelQueued(); q.resolve(null); }
+    const cur = this.current;
+    if (cur && !cur.abortedBy) {
+      cur.abortedBy = "user";
+      cur.q.execution.stopping();
+      try { this.rec.handle?.abort(); } catch { /* the writer remains settling until the harness confirms */ }
+    }
+    if (cur || dropped.length) {
+      this.store.update(this.threadId, (t) => { t.state = "idle"; t.awaitingReply = false; });
+    }
+    // The ledger retains the stopped writer and its late edit evidence even after the thread is closed.
   }
 
   private next(): void {
@@ -191,12 +211,29 @@ class ThreadRunner implements ThreadRunState {
     if (!q) return;
     const cur: NonNullable<ThreadRunner["current"]> = { q, abortedBy: null };
     this.current = cur;
+    const { spec, execution } = q;
+    if (spec.kind !== "reconcile") this.rec.activeRequest = { executionId: execution.id, request: spec.continuation?.request ?? spec.original ?? spec.question };
+    this.settling.add(execution);
     // Tracked so the app asks before quitting while it works (server/activity.ts).
     const end = beginTask(displayTitle(this.store.info(this.threadId)?.title ?? "a thread"));
-    void this.exec(q).finally(() => {
-      end(cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done");
+    void this.exec(q).catch((error) => {
+      // Opening a restored handle can fail before dispatch starts.
+      execution.cancelQueued();
+      cur.failed = true;
+      this.failed(spec, spec.kind, error);
+      q.reject(error);
+    }).finally(() => {
+      if (this.rec.activeRequest?.executionId === execution.id) delete this.rec.activeRequest;
+      const outcome = cur.abortedBy || this.stopped ? "stopped" : cur.failed ? "failed" : "done";
+      const nativeSettled = this.rec.handle?.settled;
       this.current = null;
       this.next();
+      if (nativeSettled) void nativeSettled.then(() => end(outcome), () => end("failed"));
+      else end(outcome);
+      void execution.settled.then(() => {
+        this.settling.delete(execution);
+        if (execution.folder) void refreshThreadCompletion(this.store, this.threadId);
+      });
     });
   }
 
@@ -389,6 +426,7 @@ export function replayAnnotations(t: ThreadInfo | undefined, cut: string | null 
 }
 
 function runnerOf(store: ThreadStore, threadId: string, deps: ThreadDeps): ThreadRunner | null {
+  if (store.blocksRun(threadId)) return null;
   const rec = store.get(threadId);
   if (!rec) return null;
   if (!(rec.run instanceof ThreadRunner)) rec.run = new ThreadRunner(store, threadId, rec, deps);

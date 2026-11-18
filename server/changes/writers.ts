@@ -21,6 +21,7 @@ export interface WriterDispatch {
   folder: string | null;
   harness?: LlmProvider;
   purpose: "request" | "followup" | "correction" | "reconcile" | "direct";
+  continuesExecutionId?: string;
 }
 
 export interface WriterExecutionRecord extends WriterDispatch {
@@ -32,6 +33,7 @@ export interface WriterExecutionRecord extends WriterDispatch {
   nativeDispatched?: boolean;
   requiresNativeConfirmation?: boolean;
   nativeProcess?: NativeProcessIdentity;
+  nativeSessionId?: string;
 }
 
 export interface ProjectWriterSnapshot {
@@ -94,8 +96,8 @@ export class WriterRegistry {
     return write;
   }
 
-  queue(spec: WriterDispatch): WriterExecution {
-    return new WriterExecution(this, spec);
+  queue(spec: WriterDispatch, requiredSessionId?: string): WriterExecution {
+    return new WriterExecution(this, spec, requiredSessionId);
   }
 
   save(project: LedgerProject, execution: WriterExecutionRecord): Promise<void> {
@@ -151,10 +153,11 @@ export class WriterExecution {
   private settlement: Promise<void> = Promise.resolve();
   private stopOutcome?: ExecutionOutcome;
   private readonly cancelled = deferred();
+  private readonly settledSignal = deferred();
   private started = false;
   private finishing = false;
 
-  constructor(registry: WriterRegistry, spec: WriterDispatch) {
+  constructor(registry: WriterRegistry, spec: WriterDispatch, readonly requiredSessionId?: string) {
     this.registry = registry;
     this.record = { ...spec, writer: { ...spec.writer }, executionId: randomUUID(), phase: "queued", nativeDispatched: false };
     if (spec.folder) this.discovery = registry.track(registry.project(spec.folder));
@@ -165,6 +168,7 @@ export class WriterExecution {
   get folder(): string | null { return this.record.folder; }
   get stopRequested(): boolean { return this.stopOutcome !== undefined; }
   get writer(): WriterId { return { ...this.record.writer }; }
+  get settled(): Promise<void> { return this.settledSignal.ready; }
 
   private schedule(write: (project: LedgerProject) => Promise<unknown>): void {
     if (!this.discovery) return;
@@ -193,7 +197,14 @@ export class WriterExecution {
   /** Called synchronously by the harness stream before it reports settlement. */
   edits(sessionId: string, toolCallId: string, changes: EditChange[]): void {
     if (this.record.phase === "settled") return;
+    this.observeNativeSession(sessionId);
     this.schedule((project) => this.registry.evidence(project, this.id, sessionId, toolCallId, changes));
+  }
+
+  observeNativeSession(sessionId: string | undefined): void {
+    if (!sessionId || this.record.phase === "settled" || this.record.nativeSessionId === sessionId) return;
+    this.record.nativeSessionId = sessionId;
+    this.save();
   }
 
   async bindNative(identity: NativeProcessIdentity, requiresNativeConfirmation = false): Promise<void> {
@@ -285,6 +296,8 @@ export class WriterExecution {
       delete this.record.reason;
       this.record.outcome = this.stopOutcome ?? outcome;
       this.save();
+      await this.serial.catch(() => {});
+      this.settledSignal.release();
     }, () => this.unconfirmed());
   }
 }
