@@ -6,7 +6,8 @@ import type { HarnessTurn } from "./harnesses.ts";
 // of time (warmPool.ts keeps them warm); a request sends the message, streams the partial-message events
 // back until the `result` event, and the process exits. One request per process = a fresh context, except for
 // element-thread agents (`keep`): the process stays open and the next request is the next user message.
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { NativeHarnessProcess } from "./nativeProcess.ts";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,6 +54,8 @@ export const EMPTY_CWD = join(tmpdir(), "vizzo-agents");
 
 export class CliAgent {
   readonly proc: ChildProcessWithoutNullStreams;
+  private readonly native: NativeHarnessProcess;
+  private readonly paused: boolean;
   readonly spawnedAt = performance.now();
   private buf = "";
   private listeners = new Set<(ev: Record<string, unknown>) => void>();
@@ -66,14 +69,16 @@ export class CliAgent {
   private controlSeq = 0;
 
   /** `role`: a label for errors ("router", "grok solver"…). */
-  constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD, env: NodeJS.ProcessEnv = process.env) {
+  constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD, env: NodeJS.ProcessEnv = process.env, paused = false) {
     mkdirSync(cwd, { recursive: true });
-    this.proc = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env });
+    this.paused = paused;
+    this.native = new NativeHarnessProcess(bin, args, cwd, env, paused);
+    this.proc = this.native.proc;
     this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (d: string) => this.onData(d));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
-    this.exit = new Promise((resolve) => this.proc.on("close", (code) => { this.exited = true; resolve(code); }));
+    this.exit = this.native.closed.then((code) => { this.exited = true; return code; });
     this.proc.on("error", (e) => { this.exited = true; this.stderr += String(e); });
   }
 
@@ -97,12 +102,13 @@ export class CliAgent {
    * event. The process exits afterwards, unless `keep`: then it waits for the next message. A kept agent that runs
    * out of time is interrupted (it stays, with its conversation); it is only killed if it doesn't stop.
    */
-  request(user: string | (ImageBlockParam | TextBlockParam)[] | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
-    handlers.turn?.checkBeforeSend();
+  async request(user: string | (ImageBlockParam | TextBlockParam)[] | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
+    if (handlers.turn) await handlers.turn.prepare(this.native);
+    else await this.native.prepare();
     return new Promise<CliResult>((resolve, reject) => {
       let settle!: () => void;
       const settled = new Promise<void>((resolve) => { settle = resolve; });
-      const force = () => { if (!this.exited) this.proc.kill("SIGKILL"); };
+      const force = () => this.native.stop(true);
       handlers.turn?.holdUntil(settled, force);
       let text = "";
       let stopReason: string | null = null;
@@ -113,7 +119,7 @@ export class CliAgent {
         this.listeners.delete(listener);
         if (end) {
           try { this.proc.stdin.end(); } catch { /* already closed */ }
-          setTimeout(() => { if (!this.exited) this.proc.kill("SIGTERM"); }, keep ? 0 : 2000).unref();
+          setTimeout(() => this.kill(), keep ? 0 : 2000).unref();
         }
         fn();
         settle();
@@ -126,7 +132,7 @@ export class CliAgent {
       const timer = setTimeout(() => {
         overtime = true;
         handlers.turn?.stop("timed-out");
-        if (user === null) this.kill(); else this.interrupt();
+        if (user === null) this.interruptProcess(); else this.interrupt();
         reject(timedOut());
         if (!handlers.turn) grace = setTimeout(force, INTERRUPT_GRACE_MS).unref();
       }, timeoutMs);
@@ -163,6 +169,7 @@ export class CliAgent {
         // `exitedEarly`: the process went before a result (a session that couldn't be resumed ends this way).
         if (this.listeners.has(listener)) done(() => reject(Object.assign(new Error(`${this.bin} (${this.role}) exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`), { exitedEarly: true })));
       });
+      if (this.paused) this.native.start();
       if (user === null) this.proc.stdin.end();
       else this.proc.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: user } }) + "\n");
     });
@@ -179,9 +186,11 @@ export class CliAgent {
     } catch { /* stdin closed: the process is going */ }
   }
 
-  kill(): void {
-    if (!this.exited) this.proc.kill("SIGTERM");
-  }
+  get pid(): number | undefined { return this.native.nativePid; }
+
+  interruptProcess(): void { if (!this.exited) this.native.interrupt(); }
+
+  kill(): void { if (!this.exited) void this.native.stop(); }
 }
 
 /**
@@ -189,5 +198,5 @@ export class CliAgent {
  * this one request.
  */
 export function runStreamJson(label: string, bin: string, args: string[], cwd: string | undefined, handlers: CliHandlers, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<CliResult> {
-  return new CliAgent(label, bin, args, cwd, env).request(null, handlers, timeoutMs, false);
+  return new CliAgent(label, bin, args, cwd, env, true).request(null, handlers, timeoutMs, false);
 }

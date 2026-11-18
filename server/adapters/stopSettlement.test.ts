@@ -22,13 +22,13 @@ function deferred() {
   return { promise, resolve };
 }
 
-function start(harness: HarnessId, mode: "late" | "never", taskTimeout = 60_000) {
+function start(harness: HarnessId, mode: "late" | "never", taskTimeout = 60_000, gate?: () => Promise<void>) {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "vizzo-settle-")));
   vi.stubEnv(envBin[harness], fixture);
   vi.stubEnv("VIZZO_FAKE_NATIVE_HARNESS", harness);
   vi.stubEnv("VIZZO_FAKE_STOP_MODE", mode);
   vi.stubEnv("VIZZO_FAKE_PROJECT", folder);
-  const observed = { folder, edits: vi.fn(), stopping: vi.fn(), unconfirmed: vi.fn(), waitForSettlement: vi.fn() };
+  const observed = { folder, edits: vi.fn(), stopping: vi.fn(), unconfirmed: vi.fn(), waitForSettlement: vi.fn(), bindNative: vi.fn(gate ?? (async () => {})) };
   const active = deferred();
   const thread = openHarnessThread({ role: "solver", projectFolder: folder, choice: { provider: harness, model: "" }, replay: () => "" });
   const answer = thread.send("work", () => active.resolve(), taskTimeout, undefined, undefined, observed as unknown as WriterExecution);
@@ -67,7 +67,7 @@ describe.each(harnesses)("%s native stop settlement", (harness) => {
     } finally { request.close(); }
   }, 20_000);
 
-  it("kills an exclusive process only after the grace period or leaves an unconfirmed shared writer blocked until restart", async () => {
+  it("escalates exclusive processes after the grace period and keeps unproved shared stops blocked", async () => {
     const request = start(harness, "never");
     try {
       await request.active;
@@ -80,11 +80,17 @@ describe.each(harnesses)("%s native stop settlement", (harness) => {
       expect(confirmed).toBe(false);
       expect(request.observed.unconfirmed).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
+      vi.useRealTimers();
       if (harness === "codex" || harness === "opencode") {
         expect(request.observed.unconfirmed).toHaveBeenCalledOnce();
         expect(confirmed).toBe(false);
         await restartSharedHarness(harness);
         expect(request.observed.stopping).toHaveBeenCalledWith("interrupted");
+        if (harness === "opencode") {
+          expect(request.observed.unconfirmed).toHaveBeenCalledWith("OpenCode may have left a detached shell running without confirming it stopped");
+          expect(confirmed).toBe(false);
+          return;
+        }
       }
       await settled;
       expect(confirmed).toBe(true);
@@ -101,5 +107,39 @@ it("reports a Codex timeout before native confirmation and still handles the int
     expect(request.observed.stopping).toHaveBeenCalledWith("timed-out");
     await settled;
     expect(request.observed.edits).toHaveBeenCalledOnce();
+  } finally { request.close(); }
+}, 20_000);
+
+it("journals the private OpenCode identity before the prompt POST can run", async () => {
+  const disarm = deferred();
+  const binding = deferred();
+  const request = start("opencode", "late", 60_000, async () => {
+    binding.resolve();
+    await disarm.promise;
+  });
+  try {
+    let posted = false;
+    void request.active.then(() => { posted = true; });
+    await binding.promise;
+    expect(posted).toBe(false);
+    expect(request.observed.bindNative).toHaveBeenCalledOnce();
+    disarm.resolve();
+    await request.active;
+    request.thread.abort();
+    await expect(request.answer).rejects.toMatchObject({ name: "AbortError" });
+    await request.thread.settled;
+  } finally { disarm.resolve(); request.close(); }
+}, 20_000);
+
+it("asks the owned OpenCode server to stop its tool before forced teardown and uses native idle", async () => {
+  const request = start("opencode", "late");
+  try {
+    await request.active;
+    const settled = request.thread.settled!;
+    await restartSharedHarness("opencode");
+    await settled;
+    expect(request.observed.stopping).toHaveBeenCalledWith("interrupted");
+    expect(request.observed.unconfirmed).not.toHaveBeenCalled();
+    expect(request.observed.edits).toHaveBeenCalledExactlyOnceWith("native-session", "part-native", expect.any(Array));
   } finally { request.close(); }
 }, 20_000);

@@ -18,8 +18,9 @@ import { anthropicContent, codexInput, rpcImages, opencodeParts, assertDrawingVi
 // itself: its own prompt with ours appended, and its own tools. The tier's toggles (shared/config.ts
 // HARNESS_TOGGLES; all on for the solver unless switched off) decide what else loads: shell, web, subagents, MCP
 // servers, skills, hooks, plugins, instruction files; each harness below maps them to its flags, config or environment.
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { NativeHarnessProcess } from "./nativeProcess.ts";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
@@ -103,7 +104,7 @@ export class HarnessTurn {
   private readonly execution?: WriterExecution;
   readonly reportsEdits: boolean;
   private timeout?: ReturnType<typeof setTimeout>;
-  private forceStop?: () => void;
+  private forceStop?: () => boolean | void | Promise<boolean | void>;
   private barrier?: Promise<void>;
   private confirmed = false;
   private reason?: ExecutionOutcome;
@@ -116,7 +117,7 @@ export class HarnessTurn {
   get stopping(): boolean { return this.reason !== undefined || !!this.execution?.stopRequested; }
   get settled(): Promise<void> | undefined { return this.barrier; }
 
-  holdUntil(terminal: Promise<unknown>, forceStop?: () => void): void {
+  holdUntil(terminal: Promise<unknown>, forceStop?: () => boolean | void | Promise<boolean | void>): void {
     this.forceStop = forceStop;
     const confirm = () => {
       this.confirmed = true;
@@ -136,12 +137,26 @@ export class HarnessTurn {
 
   expectConfirmation(): void { this.arm(true); }
 
+  uncertain(reason: string): void {
+    clearTimeout(this.timeout);
+    this.execution?.unconfirmed(reason);
+  }
+
   private arm(expected = false): void {
     if (this.confirmed || (!this.stopping && !expected) || !this.barrier || this.timeout) return;
     this.timeout = setTimeout(() => {
-      if (this.forceStop) this.forceStop();
-      else this.execution?.unconfirmed();
+      if (this.forceStop) {
+        void Promise.resolve().then(this.forceStop).then((stopped) => {
+          if (stopped === false && !this.confirmed) this.execution?.unconfirmed("Vizzo could not verify that the harness process group stopped");
+        }, () => this.execution?.unconfirmed("Vizzo could not verify that the harness process group stopped"));
+      } else this.execution?.unconfirmed();
     }, STOP_CONFIRM_MS).unref();
+  }
+
+  async prepare(native: NativeHarnessProcess, requiresNativeConfirmation = false): Promise<void> {
+    this.checkBeforeSend();
+    await native.prepare(this.execution ? (identity) => this.execution!.bindNative(identity, requiresNativeConfirmation) : undefined);
+    this.checkBeforeSend();
   }
 
   checkBeforeSend(): void {
@@ -462,7 +477,7 @@ class ClaudeAgent implements WarmAgent {
       raw: { ...r.raw, cliCostUsd: r.cliCostUsd, cliDurationMs: r.durationMs }, filesTouched: files.list,
     };
   }
-  pid(): number | undefined { return this.cli.exited ? undefined : this.cli.proc.pid; }
+  pid(): number | undefined { return this.cli.exited ? undefined : this.cli.pid; }
   /** Stops the turn; the process and its conversation stay (CliAgent.interrupt). */
   abort(): void { this.cli.interrupt(); }
   kill(): void { this.cli.kill(); }
@@ -603,7 +618,7 @@ class GrokAgent implements WarmAgent {
     const mode = !this.start ? null : this.started ? "resume" as const : this.start.kind === "fork" ? "fork" as const : "new" as const;
     const cli = new CliAgent(
       `grok ${this.spec.role}`, binOrThrow("grok"), grokArgs(this.spec, user, mode && this.sessionId ? { id: this.sessionId, mode } : undefined),
-      cwdOf(this.spec), prepareGrokHome(this.spec, grokEnv(this.spec)),
+      cwdOf(this.spec), prepareGrokHome(this.spec, grokEnv(this.spec)), true,
     );
     this.cli = cli;
     let res;
@@ -634,7 +649,7 @@ class GrokAgent implements WarmAgent {
     };
   }
   /** Stops the request's process; the saved session stays and the next request resumes it. */
-  abort(): void { this.cli?.kill(); }
+  abort(): void { this.cli?.interruptProcess(); }
   kill(): void { this.killed = true; this.cli?.kill(); }
 }
 
@@ -695,6 +710,7 @@ interface RpcState { model?: { input?: string[] }; sessionId?: string; sessionFi
 const RPC_DIALOGS = new Set(["select", "confirm", "input", "editor"]);
 
 class RpcAgent implements WarmAgent {
+  private native: NativeHarnessProcess;
   private proc: ChildProcessWithoutNullStreams;
   private exited = false;
   private used = false;
@@ -718,7 +734,8 @@ class RpcAgent implements WarmAgent {
     if (start && start.kind !== "new" && start.ref.file && !existsSync(start.ref.file)) {
       throw new SessionUnavailableError(`couldn't ${start.kind} session ${start.ref.id}: ${start.ref.file} is gone`);
     }
-    this.proc = spawn(binOrThrow(spec.harness), rpcArgs(spec, start), { cwd: cwdOf(spec), stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    this.native = new NativeHarnessProcess(binOrThrow(spec.harness), rpcArgs(spec, start), cwdOf(spec));
+    this.proc = this.native.proc;
     this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     jsonLines(this.proc, (ev) => {
       if (ev.type === "response" && ev.id === "boot") {
@@ -735,7 +752,7 @@ class RpcAgent implements WarmAgent {
       this.listener?.(ev);
     });
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
-    this.proc.on("close", (code) => { this.exited = true; this.resolveBoot(null); for (const w of this.exitWaiters) w(code); });
+    void this.native.closed.then((code) => { this.exited = true; this.resolveBoot(null); for (const w of this.exitWaiters) w(code); });
     this.proc.on("error", (e) => { this.exited = true; this.resolveBoot(null); this.stderr += String(e); });
     // Answered once the agent has loaded its models and tools: that's "booted".
     this.proc.stdin.write(JSON.stringify({ id: "boot", type: "get_state" }) + "\n");
@@ -745,7 +762,7 @@ class RpcAgent implements WarmAgent {
   ready(): boolean { return this.booted; }
   keep(): boolean { if (this.used || !this.saved) return false; this.kept = true; return true; }
   abort(): void { if (!this.exited) this.proc.stdin.write(JSON.stringify({ id: "abort", type: "abort" }) + "\n"); }
-  pid(): number | undefined { return this.exited ? undefined : this.proc.pid; }
+  pid(): number | undefined { return this.exited ? undefined : this.native.nativePid; }
   /** From the boot state; the file is written with the first message. */
   session(): SessionRef | undefined {
     const id = this.state?.sessionId;
@@ -772,7 +789,7 @@ class RpcAgent implements WarmAgent {
         assertDrawingVision(state?.model?.input?.includes("image"), this.spec.harness, this.spec.model);
       } catch (err) { this.kill(); throw err; }
     }
-    turn.checkBeforeSend();
+    await turn.prepare(this.native);
     const files = new FilesTouched(this.spec.project);
     const edits = turn.reportsEdits && this.spec.harness === "omp" ? createRpcEditEventParser("omp") : undefined;
     const label = `${this.spec.harness} (${this.spec.role})`;
@@ -820,7 +837,7 @@ class RpcAgent implements WarmAgent {
       this.exitWaiters = [];
       if (!this.kept) this.kill();
     };
-    turn.holdUntil(done.then(cleanup, cleanup), () => { if (!this.exited) this.proc.kill("SIGKILL"); });
+    turn.holdUntil(done.then(cleanup, cleanup), () => this.native.stop(true));
     this.proc.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: user, ...(annotations?.length ? { images: rpcImages(annotations) } : {}) }) + "\n");
     await withTimeout(done, timeoutMs, label, () => { turn.stop("timed-out"); this.abort(); });
     if (failure) throw new Error(`${label} failed: ${failure}`);
@@ -834,7 +851,7 @@ class RpcAgent implements WarmAgent {
     };
   }
 
-  kill(): void { if (!this.exited) this.proc.kill("SIGTERM"); }
+  kill(): void { if (!this.exited) void this.native.stop(); }
 }
 
 // ── Codex (shared app-server, one thread per request) ────────────────────────
@@ -844,18 +861,25 @@ type Notify = (method: string, params: Record<string, unknown>) => void;
 /** One `codex app-server` (JSON-RPC over stdio) shared by every Codex agent. */
 class CodexServer {
   private static current: CodexServer | null = null;
+  private static retiring = new Set<CodexServer>();
   static get(): CodexServer {
     if (!CodexServer.current || CodexServer.current.exited) CodexServer.current = new CodexServer();
     return CodexServer.current;
   }
-  static stop(force = false): Promise<void> {
-    const server = CodexServer.current;
+  static async stop(force = false): Promise<void> {
+    if (CodexServer.current) CodexServer.retiring.add(CodexServer.current);
     CodexServer.current = null;
-    if (!server) return Promise.resolve();
-    server.proc.kill(force ? "SIGKILL" : "SIGTERM");
-    return server.closed;
+    await Promise.all([...CodexServer.retiring].map(async (server) => {
+      if (!await server.native.stop(force)) {
+        if (force) throw new Error("Vizzo could not verify that the Codex process group stopped");
+        return;
+      }
+      await server.closed;
+      CodexServer.retiring.delete(server);
+    }));
   }
 
+  readonly native: NativeHarnessProcess;
   private proc: ChildProcessWithoutNullStreams;
   private id = 0;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -871,11 +895,12 @@ class CodexServer {
   private constructor() {
     mkdirSync(EMPTY_CWD, { recursive: true });
     // What a thread loads is set per thread (codexConfig): the server starts with the user's config.
-    this.proc = spawn(binOrThrow("codex"), ["app-server"], { cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    this.native = new NativeHarnessProcess(binOrThrow("codex"), ["app-server"], EMPTY_CWD);
+    this.proc = this.native.proc;
     this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     jsonLines(this.proc, (m) => this.onMessage(m));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
-    this.closed = new Promise((resolve) => this.proc.on("close", (code) => {
+    this.closed = this.native.closed.then((code) => {
       this.exited = true;
       const err = new Error(`codex app-server exited (${code}): ${this.stderr.trim().slice(-300)}`);
       for (const p of this.pending.values()) p.reject(err);
@@ -883,8 +908,7 @@ class CodexServer {
       for (const waiters of this.closedWaiters.values()) for (const done of waiters) done();
       this.closedWaiters.clear();
       for (const n of this.threads.values()) n("server/exited", { message: err.message });
-      resolve();
-    }));
+    });
     this.proc.on("error", (e) => { this.exited = true; this.stderr += String(e); });
     this.ready = this.call("initialize", { clientInfo: { name: "vizzo", title: null, version: "1" }, capabilities: null })
       .then(() => { this.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "initialized" }) + "\n"); });
@@ -1028,7 +1052,7 @@ class CodexAgent implements WarmAgent {
       if (start && start.kind !== "new" && !this.server.exited) throw new SessionUnavailableError(`couldn't ${start.kind} session ${start.ref.id}: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     });
-    turn.checkBeforeSend();
+    await turn.prepare(this.server.native);
     const files = new FilesTouched(this.spec.project);
     let text = "";
     let usage: Record<string, unknown> = {};
@@ -1172,6 +1196,7 @@ class OpencodeResponseError extends Error {
 
 class OpencodeServer {
   private static servers = new Map<string, OpencodeServer>();
+  private static retiring = new Set<OpencodeServer>();
   static get(setup: OpencodeSetup): OpencodeServer {
     const key = JSON.stringify(setup);
     let s = OpencodeServer.servers.get(key);
@@ -1179,16 +1204,28 @@ class OpencodeServer {
     return s;
   }
   static async stop(force = false): Promise<void> {
-    const servers = [...OpencodeServer.servers.values()];
+    for (const current of OpencodeServer.servers.values()) OpencodeServer.retiring.add(current);
     OpencodeServer.servers.clear();
-    await Promise.all(servers.map((server) => {
+    await Promise.all([...OpencodeServer.retiring].map(async (server) => {
+      // OpenCode may have started a shell in a separate group. Ask it to stop its own tools
+      // before tearing down the authenticated server, and accept only its native idle event.
+      if (server.sessions.size && await server.native?.verify()) {
+        await withTimeout(Promise.all([...server.sessions.values()].map((session) => session.beforeRestart())),
+          3_000, "Waiting for OpenCode tools to stop", () => {}).catch(() => {});
+      }
       server.stopping = true;
-      server.proc?.kill(force ? "SIGKILL" : "SIGTERM");
-      return server.closed;
+      if (server.native && !await server.native.stop(force)) {
+        if (force) throw new Error("Vizzo could not verify that the OpenCode process group stopped");
+        return;
+      }
+      await server.closed;
+      OpencodeServer.retiring.delete(server);
     }));
   }
 
-  private proc: ChildProcessWithoutNullStreams | null = null;
+  private native: NativeHarnessProcess | null = null;
+  private readonly password = randomBytes(24).toString("hex");
+  private readonly authorization = `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`;
   private stderr = "";
   private stopping = false;
   exited = false;
@@ -1196,7 +1233,8 @@ class OpencodeServer {
   private finishExit!: () => void;
   private readonly closed = new Promise<void>((resolve) => { this.finishExit = resolve; });
   private streams = new Map<string, AbortController>();
-  private sessions = new Map<string, { directory: string; receive: SessionListener }>();
+  private readers = new Set<Promise<void>>();
+  private sessions = new Map<string, { directory: string; receive: SessionListener; beforeRestart: () => Promise<void> }>();
 
   private constructor(setup: OpencodeSetup) {
     mkdirSync(EMPTY_CWD, { recursive: true });
@@ -1207,20 +1245,24 @@ class OpencodeServer {
         reject(new Error("OpenCode server was stopped before starting"));
         return;
       }
-      const proc = spawn(binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port), ...(setup.pure ? ["--pure"] : [])], {
-        cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG },
-      });
-      this.proc = proc;
+      const native = this.native = new NativeHarnessProcess(
+        binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port), ...(setup.pure ? ["--pure"] : [])],
+        EMPTY_CWD, { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG,
+          OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: this.password },
+      );
+      const { proc } = native;
       const onOut = (d: Buffer) => {
         const m = /listening on (http:\/\/\S+)/.exec(d.toString());
         if (m) resolve(m[1]!.replace(/\/$/, ""));
       };
       proc.stdout.on("data", onOut);
       proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); onOut(d); });
-      proc.on("close", (code) => {
+      void native.closed.then(async (code) => {
         this.exited = true;
         const message = `opencode serve exited (${code}): ${this.stderr.trim().slice(-300)}`;
         reject(new Error(message));
+        // The process group is gone. Drain accepted SSE frames before interrupting the writers.
+        await Promise.all([...this.readers]);
         for (const { receive } of this.sessions.values()) receive("server/exited", { message });
         this.sessions.clear();
         for (const controller of this.streams.values()) controller.abort();
@@ -1229,8 +1271,13 @@ class OpencodeServer {
       proc.on("error", (e) => { this.exited = true; reject(e); });
     }));
     this.url.catch(() => {
-      if (!this.proc) { this.exited = true; this.finishExit(); }
+      if (!this.native) { this.exited = true; this.finishExit(); }
     });
+  }
+
+  async prepare(turn: HarnessTurn, requiresNativeConfirmation: boolean): Promise<void> {
+    await this.url;
+    await turn.prepare(this.native!, requiresNativeConfirmation);
   }
 
   /** Subscribe to the event stream of `dir` (opencode scopes sessions and events by directory), once. */
@@ -1240,14 +1287,14 @@ class OpencodeServer {
     this.streams.set(dir, ctl);
     let body: AsyncIterable<Uint8Array>;
     try {
-      const res = await fetch(`${await this.url}/event?directory=${encodeURIComponent(dir)}`, { signal: ctl.signal });
+      const res = await fetch(`${await this.url}/event?directory=${encodeURIComponent(dir)}`, { signal: ctl.signal, headers: { authorization: this.authorization } });
       if (!res.ok || !res.body) throw new Error(`opencode /event ${res.status}`);
       body = res.body as unknown as AsyncIterable<Uint8Array>;
     } catch (error) {
       this.streams.delete(dir);
       throw error;
     }
-    void (async () => {
+    const reader = (async () => {
       const decoder = new TextDecoder();
       let buf = "";
       try {
@@ -1273,6 +1320,8 @@ class OpencodeServer {
       this.streams.delete(dir);
       this.reconnect(dir);
     })();
+    this.readers.add(reader);
+    void reader.then(() => this.readers.delete(reader));
   }
 
   private reconnect(directory: string): void {
@@ -1283,14 +1332,14 @@ class OpencodeServer {
     }, 250).unref();
   }
 
-  listen(sessionId: string, fn: SessionListener | null, directory = ""): void {
-    if (fn) this.sessions.set(sessionId, { directory, receive: fn });
+  listen(sessionId: string, fn: SessionListener | null, directory = "", beforeRestart = async () => {}): void {
+    if (fn) this.sessions.set(sessionId, { directory, receive: fn, beforeRestart });
     else this.sessions.delete(sessionId);
   }
 
   async api(path: string, dir: string, init: { method: string; body?: unknown }): Promise<unknown> {
     const res = await fetch(`${await this.url}${path}?directory=${encodeURIComponent(dir)}`, {
-      method: init.method, headers: { "content-type": "application/json" }, ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+      method: init.method, headers: { "content-type": "application/json", authorization: this.authorization }, ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });
     if (!res.ok) throw new OpencodeResponseError(`opencode ${init.method} ${path} ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`, res.status);
     const text = await res.text();
@@ -1378,7 +1427,8 @@ class OpencodeAgent implements WarmAgent {
       }
     }
     await this.server.watch(this.dir);
-    turn.checkBeforeSend();
+    const needsNativeIdle = on(this.spec, "shell");
+    await this.server.prepare(turn, needsNativeIdle);
     const messageId = opencodeMessageId();
     const ownMessages = new Set<string>();
     let sawRequest = false;
@@ -1404,7 +1454,8 @@ class OpencodeAgent implements WarmAgent {
     this.server.listen(sid, (type, props) => {
       if (type === "server/exited") {
         turn.stop("interrupted");
-        settle();
+        if (!needsNativeIdle || sawIdle) settle();
+        else turn.uncertain("OpenCode may have left a detached shell running without confirming it stopped");
         rejectOnExit(new Error(String(props.message)));
       } else if (type === "session.idle" && sawRequest) {
         sawIdle = true;
@@ -1437,7 +1488,12 @@ class OpencodeAgent implements WarmAgent {
         if (known === "text") emit(props.delta);
         else if (!known) held.set(id, [...(held.get(id) ?? []), props.delta]);
       }
-    }, this.dir);
+    }, this.dir, async () => {
+      turn.stop("interrupted");
+      if (sawIdle) settle();
+      else this.abort();
+      await terminal;
+    });
     turn.holdUntil(terminal.then(() => {
       this.server.listen(sid, null);
       if (!this.kept) void this.server.api(`/session/${sid}`, this.dir, { method: "DELETE" }).catch(() => {});

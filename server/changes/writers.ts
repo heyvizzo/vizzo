@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { LlmProvider } from "../../shared/config.ts";
+import type { NativeProcessIdentity } from "../adapters/nativeProcess.ts";
 import type { EditChange } from "./evidence.ts";
 import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
@@ -25,11 +26,16 @@ export interface WriterExecutionRecord extends WriterDispatch {
   executionId: string;
   phase: ExecutionPhase;
   outcome?: ExecutionOutcome;
+  reason?: string;
+  /** False is the durable pre-dispatch gate. Missing means an older journal did not keep this evidence. */
+  nativeDispatched?: boolean;
+  requiresNativeConfirmation?: boolean;
+  nativeProcess?: NativeProcessIdentity;
 }
 
 export interface ProjectWriterSnapshot {
   projectId: string;
-  executions: (WriterExecutionRecord & { projectId: string; pending: boolean })[];
+  executions: (Omit<WriterExecutionRecord, "nativeProcess"> & { projectId: string; pending: boolean })[];
 }
 
 type WriterLedger = Pick<LedgerWorkerClient, "discover" | "saveWriter" | "restoreWriters" | "writerSnapshot" | "ingest" | "pending">;
@@ -144,7 +150,7 @@ export class WriterExecution {
 
   constructor(registry: WriterRegistry, spec: WriterDispatch) {
     this.registry = registry;
-    this.record = { ...spec, writer: { ...spec.writer }, executionId: randomUUID(), phase: "queued" };
+    this.record = { ...spec, writer: { ...spec.writer }, executionId: randomUUID(), phase: "queued", nativeDispatched: false };
     if (spec.folder) this.discovery = registry.track(registry.project(spec.folder));
     this.save();
   }
@@ -184,6 +190,14 @@ export class WriterExecution {
     this.schedule((project) => this.registry.evidence(project, this.id, sessionId, toolCallId, changes));
   }
 
+  async bindNative(identity: NativeProcessIdentity, requiresNativeConfirmation = false): Promise<void> {
+    this.record.nativeProcess = identity;
+    this.record.nativeDispatched = true;
+    this.record.requiresNativeConfirmation = requiresNativeConfirmation;
+    this.save();
+    await this.serial;
+  }
+
   waitForSettlement(barrier: Promise<void>): void {
     this.settlement = Promise.all([this.settlement, barrier]).then(() => {});
   }
@@ -195,13 +209,17 @@ export class WriterExecution {
     if (this.record.phase === "queued" || this.record.phase === "running") {
       this.record.phase = "settling";
       this.save();
+    } else if (outcome === "interrupted" && this.record.outcome !== outcome) {
+      this.record.outcome = outcome;
+      this.save();
     }
     this.cancelled.release();
   }
 
-  unconfirmed(): void {
+  unconfirmed(reason = "The harness has not confirmed it stopped"): void {
     if (this.record.phase === "settled") return;
     this.record.phase = "unconfirmed";
+    this.record.reason = reason;
     this.save();
   }
 
@@ -257,6 +275,8 @@ export class WriterExecution {
     void this.settlement.then(async () => {
       await this.serial.catch(() => {});
       this.record.phase = "settled";
+      delete this.record.nativeProcess;
+      delete this.record.reason;
       this.record.outcome = this.stopOutcome ?? outcome;
       this.save();
     }, () => this.unconfirmed());
