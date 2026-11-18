@@ -463,3 +463,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - The 5 MB budget and gitlink exclusion apply to Vizzo's content readers and ledger. Git's porcelain status
   may itself read a larger tracked file or inspect a submodule to determine whether the entry is dirty. Vizzo
   keeps no content from those reads and reports unsupported entries as Other.
+- Identity checks use `git check-attr --all` and treat any reported `filter`, `ident`, or `working-tree-encoding`
+  as whole-entry conversion, including an explicitly unset attribute. Named queries display `unspecified` for
+  both absence and a literal value of that name. An explicit `unset` also collides with a literal driver name.
