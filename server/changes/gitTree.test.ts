@@ -316,6 +316,21 @@ describe.each(["files", "reftable"] as const)("Git tree and index with %s refs",
     }
   });
 
+  it.each([undefined, "", "old without a newline"])("checks partial content after conversion with base %j", async (before) => {
+    const repo = repository(format);
+    repo.file(".gitattributes", "*.txt text eol=crlf\n");
+    if (before !== undefined) repo.file("text.txt", before);
+    const base = repo.commitBase();
+    repo.lock();
+
+    const frozen = "selected with a newline\n";
+    await expect(buildCommitTree({ ...repo, base, entries: [entries("text.txt", frozen, "partial")], message: "Review again" }))
+      .rejects.toThrow("Changed meanwhile: review again");
+    const whole = await buildCommitTree({ ...repo, base, entries: [entries("text.txt", frozen)], message: "Commit whole content" });
+    expect(repo.blob(whole.commit, "text.txt").toString()).toBe(frozen);
+    expect(repo.line("rev-parse", "HEAD")).toBe(base);
+  });
+
   it("stores an LFS-compatible pointer, preserves raw binary and symlink bytes, and ignores a recreated deletion", async () => {
     const repo = repository(format);
     configuredFilter(repo, "lfs", passInput + `
