@@ -357,7 +357,7 @@ describe("change components", () => {
     const own = graph.view.groups[0]!.own;
     const frozen = select(graph, own, [a], { kind: "delete", writerId: a })!;
     expect(frozen.entries).toEqual([
-      { path: "empty", kind: "partial", mode: "100644", content: Buffer.alloc(0) },
+      { path: "empty", kind: "whole", mode: "100644", content: Buffer.alloc(0) },
       { path: "example", kind: "partial", mode: "100644", content: Buffer.from("new A\nseparator\nbase B") },
       { path: "existing", kind: "whole", mode: "0", content: null },
     ]);
@@ -503,6 +503,43 @@ describe.each(["files", "reftable"] as const)("component Git fixtures (%s refs)"
 });
 
 describe("whole Git entries", () => {
+  it("converts selected new and empty-base content under tree attributes while keeping chmod independent", async () => {
+    const fixture = await repo("files");
+    await fixture.put(".gitattributes", "*.txt text eol=crlf\n");
+    await fixture.put("empty.txt", "");
+    const head = fixture.commit();
+    const paths = ["empty.txt", "new.txt"];
+    const content = file("first\nlast", "100755");
+    for (const path of paths) {
+      await fixture.put(path, content.bytes);
+      await chmod(fixture.path(path), 0o755);
+    }
+    const addition = hunk({ oldStart: 0, oldCount: 0, newStart: 0, newCount: 2 }, ["a"]);
+    const graph = await fixture.build(head, [
+      evidence("empty.txt", file(""), content, [addition, metadata("mode", [null])]),
+      evidence("new.txt", null, content, [addition, metadata("presence", ["a"]), metadata("mode", [null])]),
+    ]);
+    const own = graph.view.groups[0]!.own;
+    const modes = graph.view.components.filter(({ files }) => files[0]?.entry === "mode");
+    expect(own).toHaveLength(2);
+    expect(modes.map(({ other }) => other)).toEqual([true, true]);
+    const frozen = select(graph, own, [a])!;
+    expect(frozen.entries).toEqual(paths.map((path) => ({ path, mode: "100644", kind: "whole", content: content.bytes })));
+
+    const built = await buildCommitTree({
+      root: fixture.root, indexPath: fixture.indexPath, base: head.oid, entries: frozen.entries, message: "Selected content",
+    });
+    for (const path of paths) {
+      expect(fixture.git("show", built.commit + ":" + path)).toBe("first\nlast");
+      expect(fixture.git("--attr-source=" + built.tree, "cat-file", "--filters", built.commit + ":" + path)).toBe("first\r\nlast");
+      expect(await readFile(fixture.path(path))).toEqual(content.bytes);
+    }
+    const modeOnly = modes.find(({ files }) => files[0]?.path === "empty.txt")!.id;
+    expect(select(graph, [modeOnly], [], { kind: "explicit", otherComponentIds: [modeOnly] })?.entries).toEqual([
+      { path: "empty.txt", mode: "100755", kind: "partial", content: Buffer.alloc(0) },
+    ]);
+  });
+
   it("makes CRLF edits one component and blocks all of it when one owner is still working", async () => {
     const fixture = await repo("files");
     const base = file("base A\r\nseparator\r\nbase B\r\n");

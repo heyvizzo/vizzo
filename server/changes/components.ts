@@ -704,6 +704,13 @@ function frozenEntry(entry: JoinedEntry, hunks: readonly JoinedHunk[], whole: bo
   if (!entry.current || (!entry.base && !presence)) return null;
   const mode = hunks.some(({ kind }) => kind === "mode") ? entry.current.mode : entry.base?.mode ?? "100644";
   const base = entry.base?.raw ?? NO_BYTES;
+  if (!base.length && (presence || hunks.some(({ kind }) => kind === "content"))) {
+    // An empty base cannot establish how Git will convert nonempty content.
+    const selected = new Set(hunks);
+    if (entry.hunks.every((hunk) => hunk.kind === "mode" || selected.has(hunk))) {
+      return { path: entry.path, mode, kind: "whole", content: Buffer.from(entry.current.bytes) };
+    }
+  }
   const parts: Buffer[] = [];
   let cursor = 0;
   for (const { oldBytes, newBytes } of hunks) {
