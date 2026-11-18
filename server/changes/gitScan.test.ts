@@ -156,6 +156,22 @@ describe.each(["files", "reftable"])("Git scan (%s refs)", (format) => {
       .toEqual(Buffer.from("one\n"));
   });
 
+  it("preserves trailing Unicode whitespace in the captured branch name", async () => {
+    const root = await fixture(format);
+    const name = "branch\u00a0";
+    const branch = `refs/heads/${name}`;
+    await writeFile(join(root, "entry"), "base\n");
+    const base = commit(root);
+    git(root, ["branch", name]);
+    git(root, ["symbolic-ref", "HEAD", branch]);
+    await writeFile(join(root, "entry"), "changed\n");
+
+    const { entries } = await scanGitChanges({ worktreeRoot: root, projectDir: root }, { branch, oid: base.oid });
+    expect(byPath(entries, "entry")).toMatchObject({
+      base: { working: Buffer.from("base\n") }, current: { bytes: Buffer.from("changed\n") }, otherReason: null,
+    });
+  });
+
   it("reads an unborn base and skips ignored evidence without changing the real index", async () => {
     const root = await fixture(format);
     await writeFile(join(root, ".gitignore"), "*.private\n!keep.private\n");
@@ -308,6 +324,44 @@ describe.each(["files", "reftable"])("Git scan (%s refs)", (format) => {
     });
     expect(byPath(entries, "sub/inside")).toMatchObject({ current: null, otherReason: /Submodule/ });
     await expect(scanGitChanges({ worktreeRoot: root, projectDir: join(root, "tree") }, base)).rejects.toThrow(/outside/);
+  });
+
+  it("treats file and directory replacements as absence at the old tracked paths", async () => {
+    const root = await fixture(format);
+    await writeFile(join(root, "file-to-directory"), "old file\n");
+    await mkdir(join(root, "directory-to-file", "nested"), { recursive: true });
+    await writeFile(join(root, "directory-to-file", "nested", "old"), "old descendant\n");
+    await writeFile(join(root, "embedded"), "replaced file\n");
+    const base = commit(root);
+    await unlink(join(root, "file-to-directory"));
+    await mkdir(join(root, "file-to-directory"));
+    await writeFile(join(root, "file-to-directory", "new"), "new descendant\n");
+    await rm(join(root, "directory-to-file"), { recursive: true });
+    await writeFile(join(root, "directory-to-file"), "new file\n");
+    git(root, ["update-index", "--force-remove", "embedded"]);
+    await unlink(join(root, "embedded"));
+    await mkdir(join(root, "embedded"));
+    init(join(root, "embedded"), format);
+    await writeFile(join(root, "embedded", "entry"), "embedded contents\n");
+    commit(join(root, "embedded"));
+
+    const { entries } = await scanGitChanges({ worktreeRoot: root, projectDir: root }, base);
+    expect(byPath(entries, "file-to-directory")).toMatchObject({
+      base: { working: Buffer.from("old file\n") }, current: null, otherReason: null, status: [{ xy: ".D" }],
+    });
+    expect(byPath(entries, "file-to-directory/new")).toMatchObject({
+      base: null, current: { bytes: Buffer.from("new descendant\n") }, otherReason: null,
+    });
+    expect(byPath(entries, "directory-to-file/nested/old")).toMatchObject({
+      base: { working: Buffer.from("old descendant\n") }, current: null, otherReason: null, status: [{ xy: ".D" }],
+    });
+    expect(byPath(entries, "directory-to-file")).toMatchObject({
+      base: null, current: { bytes: Buffer.from("new file\n") }, otherReason: null,
+    });
+    expect(byPath(entries, "embedded")).toMatchObject({
+      base: { working: null }, current: null, otherReason: "Unsupported working directory entry",
+      status: [{ xy: "D." }, { kind: "untracked", pathBytes: Buffer.from("embedded/") }],
+    });
   });
 
   it("keeps conflicted index stages and unsupported filename bytes without reading file content", async () => {

@@ -258,12 +258,18 @@ function statusMatchesHead(status: ReturnType<typeof parseStatus>, head: GitScan
   return status.oid === head.oid && status.branch.equals(Buffer.from(branch));
 }
 
+function gitRecord(bytes: Buffer): string | null {
+  if (!bytes.length) return null;
+  if (bytes.at(-1) !== 0x0a) throw new Error("Git returned an unterminated record");
+  return utf8.decode(bytes.subarray(0, -1));
+}
+
 async function verifyHead(root: string, head: GitScanHead): Promise<void> {
   const [branch, oid] = await Promise.all([
     git(root, ["symbolic-ref", "--quiet", "--no-recurse", "HEAD"], { accept: [1] }),
     git(root, ["rev-parse", "--quiet", "--verify", "HEAD"], { accept: [1] }),
   ]);
-  if ((branch.toString("utf8").trimEnd() || null) !== head.branch || (oid.toString("ascii").trimEnd() || null) !== head.oid) {
+  if (gitRecord(branch) !== head.branch || gitRecord(oid) !== head.oid) {
     throw new GitScanBaseChangedError();
   }
 }
@@ -416,19 +422,30 @@ interface WorkingPath {
   parent?: FileHandle;
 }
 
-async function checkedPath(dir: string, projectPath: string): Promise<WorkingPath> {
+async function checkedPath(dir: string, projectPath: string, tracked = false): Promise<WorkingPath> {
   const segments = projectPath.split("/");
   if (process.platform === "linux") {
     const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
     let parent = await open("/", flags);
     try {
-      for (const part of [...dir.split("/").filter(Boolean), ...segments.slice(0, -1)]) {
-        const next = await open(`/proc/self/fd/${parent.fd}/${part}`, flags);
+      const scope = dir.split("/").filter(Boolean);
+      const ancestors = [...scope, ...segments.slice(0, -1)];
+      for (const [index, part] of ancestors.entries()) {
+        const path = `/proc/self/fd/${parent.fd}/${part}`;
+        if (index >= scope.length) {
+          const stats = await pathStats(path);
+          if (!stats || stats.isFile()) {
+            await parent.close();
+            return { path: "", stats: null };
+          }
+        }
+        const next = await open(path, flags);
         await parent.close();
         parent = next;
       }
       const path = `/proc/self/fd/${parent.fd}/${segments.at(-1)}`;
-      return { path, stats: await pathStats(path), parent };
+      const stats = await pathStats(path);
+      return { path, stats: tracked && stats?.isDirectory() ? null : stats, parent };
     } catch (error) {
       await parent.close();
       if (errorCode(error) === "ENOENT") return { path: "", stats: null };
@@ -440,14 +457,30 @@ async function checkedPath(dir: string, projectPath: string): Promise<WorkingPat
     path = join(path, part);
     const stats = await pathStats(path);
     if (!stats) return { path: "", stats: null };
+    if (stats.isFile()) return absentWorkingPath(path, stats);
     if (!stats.isDirectory()) throw new Error("Unsafe working path");
   }
   path = join(path, segments.at(-1)!);
   const stats = await pathStats(path);
+  if (tracked && stats?.isDirectory()) return absentWorkingPath(path, stats);
   if (stats && process.platform === "darwin" && !(await matchesDarwinSpelling(path, stats))) {
     return { path, stats: null };
   }
   return { path, stats };
+}
+
+async function absentWorkingPath(path: string, replacement: BigIntStats): Promise<WorkingPath> {
+  // A directory is no file entry, and a regular file cannot have descendants. Confirm the
+  // containing path has no symlinks without opening the replacement or anything inside it.
+  if (process.platform === "darwin") {
+    const parent = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | DARWIN_NOFOLLOW_ANY);
+    try {
+      if (!sameEntry(replacement, await pathStats(path))) throw new Error(CHANGED);
+    } finally {
+      await parent.close();
+    }
+  }
+  return { path, stats: null };
 }
 
 async function matchesDarwinSpelling(path: string, stats: BigIntStats): Promise<boolean> {
@@ -504,11 +537,11 @@ async function stablePath(dir: string, projectPath: string, expected: BigIntStat
 }
 
 async function readWorking(
-  dir: string, projectPath: string,
+  dir: string, projectPath: string, tracked: boolean,
 ): Promise<{ entry: GitScanWorkingEntry | null; reason: string | null }> {
   let checked: WorkingPath | undefined;
   try {
-    checked = await checkedPath(dir, projectPath);
+    checked = await checkedPath(dir, projectPath, tracked);
     const { path, stats } = checked;
     if (!stats) return { entry: null, reason: null };
     if (!stats.isFile() && !stats.isSymbolicLink()) return { entry: null, reason: "Unsupported working entry type" };
@@ -579,9 +612,13 @@ function nonIdentity(entry: GitScanEntry): GitScanEntry["wholeEntryReason"] {
   return null;
 }
 
-async function usablePath(scope: ScopedProject, projectPath: string): Promise<boolean> {
+function hasTrackedEntry(base: TreeEntry | null | undefined, status: GitScanStatus[]): boolean {
+  return !!base || status.some((record) => record.kind === "ordinary" || record.kind === "rename");
+}
+
+async function usablePath(scope: ScopedProject, projectPath: string, tracked: boolean): Promise<boolean> {
   try {
-    const checked = await checkedPath(scope.dir, projectPath);
+    const checked = await checkedPath(scope.dir, projectPath, tracked);
     await checked.parent?.close();
     return !checked.stats || checked.stats.isFile() || checked.stats.isSymbolicLink();
   } catch {
@@ -608,13 +645,14 @@ export async function scanGitChanges(
   const ready: Candidate[] = [];
   for (const [id, candidate] of paths) {
     const tree = baseTree.get(id);
+    const tracked = hasTrackedEntry(tree, candidate.status);
     let otherReason: string | null = null;
     if (insideSubmodule(candidate.pathBytes, submodules)) otherReason = SUBMODULE;
     else if (candidate.status.some((record) => record.kind === "unmerged")) otherReason = "Unmerged Git entry";
     else if (candidate.status.some((record) => record.kind === "ignored")) otherReason = "Ignored by Git";
     else if (!candidate.projectPath || !candidate.path) otherReason = "Unsupported Git pathname";
     else if (candidate.directory) otherReason = "Unsupported working directory entry";
-    else if (!(await usablePath(project, candidate.projectPath))) otherReason = UNREADABLE;
+    else if (!(await usablePath(project, candidate.projectPath, tracked))) otherReason = UNREADABLE;
     else ready.push(candidate);
     entries.push({
       path: candidate.path, projectPath: candidate.projectPath, pathBytes: candidate.pathBytes, status: candidate.status,
@@ -637,7 +675,7 @@ export async function scanGitChanges(
       if (entry.otherReason) continue;
       const id = key(entry.pathBytes);
       entry.attributes = { base: baseAttributes.get(id)!, current: currentAttributes.get(id)! };
-      const current = await readWorking(project.dir, entry.projectPath!);
+      const current = await readWorking(project.dir, entry.projectPath!, hasTrackedEntry(entry.base, entry.status));
       entry.current = current.entry;
       // Oversized or unsafe working entries are already unavailable. Avoid running a filter on their base.
       if (current.reason) {
