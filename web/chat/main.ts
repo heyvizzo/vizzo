@@ -1054,9 +1054,10 @@ function submitDelete(type: "thread.delete" | "threads.delete" | "conversation.r
   if (pendingDelete) return setStatus("A deletion is already in progress.", true);
   if (!sock.isOpen) return setStatus("Server not connected.", true);
   const requestId = crypto.randomUUID();
+  const modes = choices.map((choice): ThreadDeleteChoice => localThreadWorking(choice.threadId) ? { ...choice, mode: "keep" } : choice);
   pendingDelete = { requestId, waiting: new Set(choices.map((c) => c.threadId)), reset: type === "conversation.reset" };
-  if (type === "thread.delete") sock.send({ type, requestId, ...choices[0]! });
-  else sock.send({ type, requestId, threads: choices });
+  if (type === "thread.delete") sock.send({ type, requestId, ...modes[0]! });
+  else sock.send({ type, requestId, threads: modes });
   if (pendingDelete.reset) silenceForReset();
   threadsChanged();
 }
@@ -1626,6 +1627,7 @@ function press(how: "manual" | "vad" = "manual"): void {
         onFrame: (pcm) => { if (turn === t && t.tRelease === undefined && !t.finished) out.sendAudio(pcm); },
         preRollMs: how === "vad" ? VAD_PRE_ROLL_MS : TALK_PRE_ROLL_MS,
       });
+      if (t.finished) { t.capture.stop(); return; }
       const tAudioStart = await t.capture.tAudioStart;
       t.tAudioStart = tAudioStart;
       if (!t.finished) out.send({ type: "turn.audioStart", turnId, tAudioStart });

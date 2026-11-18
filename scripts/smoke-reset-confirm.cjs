@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const userData = mkdtempSync(path.join(tmpdir(), 'vizzo-reset-confirm-'));
 app.setPath('userData', userData);
 process.on('uncaughtException', error => { console.error(error); app.exit(1); });
-let chat, vite, sockets, peer;
+let chat, vite, sockets, peer, heldFeedback = [];
 const errors = [], received = [];
 const base = {
   pageUrl: 'data:text/html', intent: 'task', summary: '', unread: false, awaitingReply: false, createdAt: 0, lastInteractionAt: 0, messages: [],
@@ -30,7 +30,7 @@ ipcMain.handle('page:url', () => base.pageUrl);
 ipcMain.handle('page:state', () => ({ tFrom: null }));
 ipcMain.handle('drawing:get', () => false);
 ipcMain.handle('comment:get', () => false);
-ipcMain.on('page:cmd', () => {});
+ipcMain.on('page:cmd', (_e, cmd) => { if (cmd.type === 'held') heldFeedback = cmd.items; });
 const send = msg => peer.send(JSON.stringify(msg));
 const resets = () => received.filter(m => m.type === 'conversation.reset').length;
 const previews = () => received.filter(m => m.type === 'thread.delete.preview');
@@ -170,10 +170,13 @@ async function main() {
   reply(previews()[4], states);
   await until(confirmReady, 'reset shows commit, keep and work warning');
   assert.match(await confirmText(), /1 background task is running and will be stopped/);
+  chat.webContents.send('page:comment', { type: 'comment.send', threadId: 't1', text: 'A follow-up held locally after the preview',
+    sample: { t: Date.now(), x: 1, y: 1, scrollX: 0, scrollY: 0, elementPath: base.anchor.domPath, dataSource: null, label: 'A' } });
+  await until(() => heldFeedback.some(c => c.threadId === 't1'), 'new follow-up waits behind the active turn');
   await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
   await until(() => resets() === 1, 'reset sent');
   assert.deepEqual(mutations().map(m => m.type), ['threads.delete', 'thread.delete', 'conversation.reset']);
-  assert.deepEqual(mutations()[2].threads, choices);
+  assert.deepEqual(mutations()[2].threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'a newly held follow-up also caps the mode at keep');
   assert.equal(await confirmText(), null);
   assert.equal(await listed(), 4, 'reset keeps threads during durable handoff');
   assert.equal(await evaluate('!!document.querySelector(".turn")'), true, 'conversation remains until reset completes');
