@@ -93,6 +93,10 @@ async function serve(req, res) {
       if (!firstDraft) { firstDraft = () => respond({ message: 'Outdated prefill' }); return; }
       return respond({ message: 'Update project files' });
     case '/api/changes/commit':
+      if (body.components.length === 1 && body.components[0] === 'other-new') {
+        view = { ...view, generation: 4, components: view.components.filter(item => item.id !== 'other-new'), changedFiles: 4 };
+        return respond({ commits: [commit] });
+      }
       view = { ...view, generation: 3, notices: ['HEAD moved: some changes are now marked Other'] };
       return respond({ commits: [commit], reason: 'Changed meanwhile: review again' }, 409);
     case '/api/changes/fix':
@@ -106,7 +110,10 @@ async function serve(req, res) {
   }
 }
 
-const evaluate = source => win.webContents.executeJavaScript(source);
+async function evaluate(source) {
+  try { return await win.webContents.executeJavaScript(source); }
+  catch (error) { throw new Error(`Couldn’t evaluate ${source}`, { cause: error }); }
+}
 async function waitFor(condition, description) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -137,7 +144,8 @@ async function main() {
   win.webContents.debugger.on('message', (_event, method, params) => {
     if (method === 'Runtime.exceptionThrown') errors.push(params.exceptionDetails.exception?.description ?? params.exceptionDetails.text);
   });
-  await win.webContents.debugger.sendCommand('Runtime.enable');
+  // The renderer target becomes ready during navigation.
+  void win.webContents.debugger.sendCommand('Runtime.enable').catch(error => errors.push(String(error)));
   const scope = `#thread=${encodeURIComponent(thread.id)}`;
   await win.loadURL(`http://127.0.0.1:${server.address().port}/changes.html${scope}`);
   await waitForDom('document.querySelector("#groups h2")?.textContent === "Fix the header"', 'Scoped thread appears first');
@@ -161,7 +169,7 @@ async function main() {
   firstDraft();
   await key('input[data-component=tied]', ' ', 'Space', 32);
   assert.deepEqual(await checked('tied'), [true, true], 'Keyboard tick updates both tied rows');
-  await key('.component:has(input[data-component=tied]) summary', 'Enter', 'Enter', 13);
+  await key('.component:has(input[data-component=tied]) summary', ' ', 'Space', 32);
   await waitForDom('document.querySelector(".hunk-head")?.textContent.includes("Finish the footer")', 'Keyboard opens diff and renders owners');
   assert.match(await evaluate('document.querySelector(".hunk").textContent'), /@@ -3,1 \+3,2 @@.*Fix the header, Finish the footer/s);
   assert.equal(lastCall('diff').query.path, 'src/shared # footer.ts');
@@ -176,11 +184,10 @@ async function main() {
   assert.deepEqual(await checked('own'), [true]);
 
   if (process.env.CHANGES_UI_SCREENSHOT) {
-    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-    writeFileSync(`${process.env.CHANGES_UI_SCREENSHOT}.light.png`, (await win.webContents.capturePage()).toPNG());
+    writeFileSync(`${process.env.CHANGES_UI_SCREENSHOT}.light.png`, (await win.webContents.capturePage({ stayHidden: true })).toPNG());
     nativeTheme.themeSource = 'dark';
     await waitForDom('matchMedia("(prefers-color-scheme: dark)").matches', 'Dark theme follows the system theme');
-    writeFileSync(`${process.env.CHANGES_UI_SCREENSHOT}.dark.png`, (await win.webContents.capturePage()).toPNG());
+    writeFileSync(`${process.env.CHANGES_UI_SCREENSHOT}.dark.png`, (await win.webContents.capturePage({ stayHidden: true })).toPNG());
   }
 
   await click('#commit-separately');
@@ -197,7 +204,7 @@ async function main() {
   assert.equal(await evaluate('document.querySelector("#commit").disabled'), true);
 
   await click('button[aria-label^="Fix staging"]');
-  await waitForDom('document.querySelector("#result").textContent.includes("staging area was updated") && !document.querySelector("button[aria-label^=\"Fix staging\"]")', 'Fix updates the pinned job');
+  await waitForDom(`document.querySelector('#result').textContent.includes('staging area was updated') && !document.querySelector('button[aria-label^="Fix staging"]')`, 'Fix updates the pinned job');
   assert.deepEqual(lastCall('fix').body, { project, jobId: 'fix-me' });
   await click('.job button');
   await waitForDom('document.querySelector("#result").textContent.includes("Codex restarted") && !document.querySelector(".job button")', 'Restart refreshes harness status');
@@ -208,13 +215,18 @@ async function main() {
   await waitForDom('document.querySelector("#commit-message").value === "Update project files"', 'A fresh scope gets a new prefill');
   await evaluate('location.hash = ""');
   await waitForDom('!document.querySelector(".other-threads") && !document.querySelector("input:checked")', 'Opening unscoped clears the selection');
+  await click('input[data-component=other-new]');
+  await waitForDom('!document.querySelector("#commit-separately").disabled', 'An explicit Other-only selection can be committed separately');
+  await click('#commit-separately');
+  await waitForDom('document.querySelector("#result").textContent.startsWith("Committed ") && !document.querySelector("input[data-component=other-new]")', 'Other-only commit succeeds');
+  assert.deepEqual(lastCall('commit').body, { project, generation: 3, components: ['other-new'], message: 'Update project files', separately: true });
 
   status = { kind: 'unavailable', reason: 'Git 2.41 or later is required.', project };
   broadcast({ type: 'changes.status', status });
   await waitForDom('document.querySelector("#availability").textContent.includes("Git 2.41") && document.querySelector("#commit-form").hidden', 'Unavailable project shows the reason');
   status = undefined;
-  view = { ...view, generation: 4, branch: null, base: commit, components: view.components.map(item => ({ ...item, selectable: false, reason: 'HEAD is detached' })) };
-  broadcast({ type: 'changes.updated', project, generation: 4 });
+  view = { ...view, generation: 5, branch: null, base: commit, components: view.components.map(item => ({ ...item, selectable: false, reason: 'HEAD is detached' })) };
+  broadcast({ type: 'changes.updated', project, generation: 5 });
   await waitForDom('document.querySelector("#branch-name").textContent === "Detached HEAD" && !document.querySelector("#branch").hidden', 'Detached HEAD is shown');
   assert.match(await evaluate('document.querySelector("#notices").textContent'), /Check out a branch to commit/);
   assert.equal(await evaluate('document.querySelector("#commit").disabled'), true);
@@ -226,9 +238,10 @@ async function finish(code) {
   win?.destroy();
   for (const client of socket.clients) client.terminate();
   socket.close();
-  await new Promise(resolve => server.close(resolve));
+  await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
   rmSync(userData, { recursive: true, force: true });
   app.exit(code);
 }
 
-main().then(() => finish(0), error => { console.error(error); return finish(1); });
+const deadline = setTimeout(() => { console.error('Changes UI smoke timed out.'); void finish(1); }, 25_000);
+main().then(() => finish(0), error => { console.error(error); return finish(1); }).finally(() => clearTimeout(deadline));
