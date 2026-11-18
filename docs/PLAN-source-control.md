@@ -454,3 +454,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   Vizzo refuses the commit if converting the frozen attributes under that tree still produces different bytes.
   A clean filter can change which filter applies to `.gitattributes` itself, and a temporary-repo probe produced
   a cycle with no stable tree. The verification permits stable normalization such as CRLF to LF.
+- Normal Git reads can refresh the modification time of a split index's shared cache even with optional locks
+  disabled. Vizzo allows that Git housekeeping. For commits, the prepared replacement may use a self-contained
+  index so recovery can validate and install it with the same entries and flags after a crash.
