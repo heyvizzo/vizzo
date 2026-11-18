@@ -476,3 +476,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   when a file in an excluded directory was recreated. Repository sparse-checkout settings are preserved.
 - The journal records cleanup intent before aborting or releasing locks. It records terminal `refused` or
   `not-published` only after cleanup because startup skips terminal jobs and must still see a lock left by a crash.
+- A partial patch that exactly matches multiple recorded versions remains Other. Choosing the newest match would
+  let a repeated line at the same offset assign a user's deletion to the wrong writer. Explicit patch positions
+  are retained when assigning owners so a new diff cannot move an edit between identical lines.
