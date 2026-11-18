@@ -430,3 +430,11 @@ Opened from:
 Undo / revert of a writer, push and pull, creating or switching branches, running git hooks, picking single hunks
 by hand (beyond ticking a tied or Other component), worktrees per thread, per-thread commits for Grok (and for any
 harness without exact before/after reports), routing a spoken "commit this" to the window.
+
+## Deviations
+
+- Vizzo refuses commits when the real index is a symlink or an existing non-regular file. In a temporary repository,
+  Git followed an index symlink and wrote to its target while the nominal `index.lock` was held. Installing the
+  nominal lock would replace the symlink itself.
+- Vizzo refuses commits when HEAD selects a branch that is itself a symbolic ref. This keeps the branch captured
+  before the transaction, checked under the prepared lock, and used for publication evidence the same ref.
