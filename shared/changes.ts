@@ -44,6 +44,54 @@ export interface ChangesView {
   readonly changedFiles: number;
 }
 
+/** Bootstrap the Changes window before it has a project and a scan generation. */
+export type ChangesStatus =
+  | { readonly kind: "none" | "loading" }
+  | { readonly kind: "non-repository"; readonly reason: string }
+  | { readonly kind: "unavailable"; readonly reason: string; readonly project?: string }
+  | {
+    readonly kind: "ready";
+    readonly project: string;
+    readonly generation: number;
+    readonly changedFiles: number;
+    readonly ownedThreadIds: readonly string[];
+  };
+
+export interface ChangesSelectionRequest {
+  readonly project: string;
+  readonly generation: number;
+  /** Exact checkboxes selected by the user, including explicit selections of Other. */
+  readonly components: readonly string[];
+}
+
+export interface ChangesCommitRequest extends ChangesSelectionRequest {
+  readonly message: string;
+  readonly separately: boolean;
+}
+
+export type ChangesMessageResult = { readonly message: string };
+export type ChangesCommitResult = { readonly commits: readonly string[] } | ChangesRefusal;
+export type ChangesRefusal = { readonly reason: string; readonly commits?: readonly string[] };
+export type ChangesActionResult = { readonly ok: true } | ChangesRefusal;
+
+export type ChangesRestartHarness = "codex" | "opencode";
+
+export interface ChangesJobs {
+  readonly jobs: readonly { readonly id: string; readonly commit?: string; readonly reason?: string; readonly canFix: boolean }[];
+  readonly restart: readonly ChangesRestartHarness[];
+}
+
+export interface ChangesFixRequest {
+  readonly project: string;
+  readonly jobId: string;
+}
+
+export interface ChangesRestartRequest {
+  readonly project: string;
+  readonly generation?: number;
+  readonly harness: ChangesRestartHarness;
+}
+
 /** Zero-based line offsets, including the insertion position when a count is zero. */
 export interface ChangeRange {
   readonly oldStart: number;
