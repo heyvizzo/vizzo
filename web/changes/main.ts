@@ -1,5 +1,5 @@
 import type { ChangesActionResult, ChangesJobs, ChangesRestartHarness, ChangesStatus } from "../../shared/changes.ts";
-import { LabSocket } from "../ws.ts";
+import type { ServerMsg } from "../../shared/protocol.ts";
 import { changesApi, ChangesError } from "./api.ts";
 import { ChangesList, element } from "./list.ts";
 import { ChangesReview, MessageDraft, scopeFromHash } from "./review.ts";
@@ -242,7 +242,9 @@ function applyView(project: string, view: NonNullable<ChangesReview["view"]>): v
   review.apply(project, view);
   if (changed) renderReview();
   else selectionChanged();
-  if (review.selected.size < previousTicks && !result.textContent) showResult("Some selected changes changed. Review your selection.", [], true);
+  if (review.selected.size < previousTicks && !result.textContent) {
+    showResult("Some changes are no longer selected. Review your selection.", [], true);
+  }
   showAvailability();
 }
 
@@ -328,10 +330,19 @@ setInterval(() => {
   if (!document.hidden && project) void loadJobs(project);
 }, 2000);
 
-const socket = new LabSocket();
-socket.onStatus = state => { if (state === "open") void refresh(); };
-socket.on(event => {
-  if (event.type === "changes.status") void refresh(event.status);
-  if (event.type === "changes.updated" && (event.project !== review.project || event.generation !== review.view?.generation)) void refresh();
-});
+function watchChanges(): void {
+  const url = new URL("/ws?view=changes", location.href);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  // A read-only connection must not become the speaker for thread audio.
+  const socket = new WebSocket(url);
+  socket.onopen = () => { void refresh(); };
+  socket.onclose = () => { setTimeout(watchChanges, 1000); };
+  socket.onmessage = ({ data }: MessageEvent<string>) => {
+    const event = JSON.parse(data) as ServerMsg;
+    if (event.type === "changes.status") void refresh(event.status);
+    if (event.type === "changes.updated" && (event.project !== review.project || event.generation !== review.view?.generation)) void refresh();
+  };
+}
+
+watchChanges();
 openScope();

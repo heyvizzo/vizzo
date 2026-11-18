@@ -40,7 +40,7 @@ const calls = [];
 const socket = new WebSocketServer({ noServer: true });
 const server = createServer((req, res) => { void serve(req, res).catch(error => { errors.push(String(error)); res.destroy(); }); });
 server.on('upgrade', (req, transport, head) => {
-  if (req.url === '/ws') socket.handleUpgrade(req, transport, head, client => socket.emit('connection', client));
+  if (req.url === '/ws?view=changes') socket.handleUpgrade(req, transport, head, client => socket.emit('connection', client));
   else transport.destroy();
 });
 
