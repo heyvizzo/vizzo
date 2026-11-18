@@ -1,12 +1,17 @@
 // Git's index and ref locks are separate. The caller keeps the index lock across
 // ref publication and installs the prepared index only with publication evidence.
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const INDEX_WAIT_MS = 2_000;
+const INDEX_HEADER_SIZE = 12;
+const INDEX_SIGNATURE = Buffer.from("DIRC");
+const OID_BYTES = { sha1: 20, sha256: 32 };
+const activeIndexLocks = new Set<string>();
 const GIT_COMMAND_MS = 5_000;
 const GIT_TEXT = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const GIT_OPTIONS = [
@@ -17,15 +22,15 @@ const GIT_OPTIONS = [
 export type PublicationEvidence = "published" | "not-published" | "indeterminate";
 
 export class GitPublicationError extends Error {
-  constructor(readonly code: "busy" | "index-layout" | "index-lock-lost" | "head-layout" | "detached-head" | "head-moved", message: string, cause?: unknown) {
+  constructor(readonly code: "busy" | "index-layout" | "index-lock-lost" | "index-not-ready" | "head-layout" | "detached-head" | "head-moved", message: string, cause?: unknown) {
     super(message, { cause });
   }
 }
 
 /** Stringified stat values preserve bigint precision in a JSON journal. */
 export interface IndexLockIdentity {
-  device: string;
-  inode: string;
+  readonly device: string;
+  readonly inode: string;
 }
 
 export interface JournaledIndexLock extends IndexLockIdentity {
@@ -39,6 +44,10 @@ function fsError(error: unknown, code: string): boolean {
 function lockPath(indexPath: string): string {
   if (!isAbsolute(indexPath)) throw new Error("The Git index path must be absolute");
   return indexPath + ".lock";
+}
+
+function lockKey(identity: IndexLockIdentity): string {
+  return identity.device + ":" + identity.inode;
 }
 
 function matchesLock(stat: BigIntStats, identity: IndexLockIdentity): boolean {
@@ -61,10 +70,49 @@ async function assertRegularIndex(path: string): Promise<void> {
   }
 }
 
+function hasIndexHeader(bytes: Uint8Array): boolean {
+  if (bytes.length < INDEX_HEADER_SIZE) return false;
+  const header = Buffer.from(bytes.buffer, bytes.byteOffset, INDEX_HEADER_SIZE);
+  const version = header.readUInt32BE(4);
+  return header.subarray(0, INDEX_SIGNATURE.length).equals(INDEX_SIGNATURE) && version >= 2 && version <= 4;
+}
+
+async function validRecoveredIndex(indexPath: string, file: FileHandle): Promise<boolean> {
+  const { size } = await file.stat();
+  if (size < INDEX_HEADER_SIZE + OID_BYTES.sha1) return false;
+  const header = Buffer.alloc(INDEX_HEADER_SIZE);
+  const headerRead = await file.read(header, 0, header.length, 0);
+  if (headerRead.bytesRead !== header.length || !hasIndexHeader(header)) return false;
+
+  const format = await objectFormat(dirname(indexPath), ["--git-dir=."]);
+  const trailer = Buffer.alloc(OID_BYTES[format]);
+  const contentSize = size - trailer.length;
+  if (contentSize < INDEX_HEADER_SIZE) return false;
+  const trailerRead = await file.read(trailer, 0, trailer.length, contentSize);
+  if (trailerRead.bytesRead !== trailer.length) return false;
+
+  // Git's normal index readers can accept a truncated or incorrect checksum.
+  const hash = createHash(format);
+  for await (const chunk of file.createReadStream({ start: 0, end: contentSize - 1, autoClose: false })) {
+    hash.update(chunk);
+  }
+  return hash.digest().equals(trailer);
+}
+
 export class IndexLock {
   #closed = false;
+  #prepared: "empty" | "recovered" | "staged";
+  #pending: Promise<unknown> = Promise.resolve();
 
-  constructor(readonly indexPath: string, readonly identity: IndexLockIdentity, private readonly file: FileHandle) {}
+  constructor(readonly indexPath: string, readonly identity: IndexLockIdentity, private readonly file: FileHandle, recovered = false) {
+    this.#prepared = recovered ? "recovered" : "empty";
+  }
+
+  #serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.#pending.then(operation);
+    this.#pending = pending.catch(() => {});
+    return pending;
+  }
 
   async #ownsPath(): Promise<boolean> {
     if (this.#closed) return false;
@@ -79,42 +127,62 @@ export class IndexLock {
   }
 
   /** Write the prepared index without installing it. */
-  async write(bytes: Uint8Array): Promise<void> {
-    await this.#assertOwned();
-    for (let offset = 0; offset < bytes.length;) {
-      const { bytesWritten } = await this.file.write(bytes, offset, bytes.length - offset, offset);
-      if (!bytesWritten) throw new Error("Could not write the prepared Git index");
-      offset += bytesWritten;
-    }
-    await this.file.truncate(bytes.length);
-    await this.file.sync();
+  write(bytes: Uint8Array): Promise<void> {
+    return this.#serialize(async () => {
+      await this.#assertOwned();
+      this.#prepared = "empty";
+      if (bytes.length < INDEX_HEADER_SIZE + OID_BYTES.sha1 || !hasIndexHeader(bytes)) {
+        throw new GitPublicationError("index-not-ready", "The prepared Git index is incomplete");
+      }
+      for (let offset = 0; offset < bytes.length;) {
+        const { bytesWritten } = await this.file.write(bytes, offset, bytes.length - offset, offset);
+        if (!bytesWritten) throw new Error("Could not write the prepared Git index");
+        offset += bytesWritten;
+      }
+      await this.file.truncate(bytes.length);
+      await this.file.sync();
+      this.#prepared = "staged";
+    });
   }
 
-  async install(evidence: PublicationEvidence): Promise<void> {
-    if (evidence !== "published") throw new Error("Publication must be confirmed before installing the Git index");
-    await assertRegularIndex(this.indexPath);
-    await this.#assertOwned();
-    await rename(lockPath(this.indexPath), this.indexPath);
-    await this.close();
-    const dir = await open(dirname(this.indexPath), "r");
-    try { await dir.sync(); }
-    finally { await dir.close(); }
+  install(evidence: PublicationEvidence): Promise<void> {
+    return this.#serialize(async () => {
+      if (evidence !== "published") throw new Error("Publication must be confirmed before installing the Git index");
+      await this.#assertOwned();
+      if (this.#prepared === "empty" || (this.#prepared === "recovered" && !(await validRecoveredIndex(this.indexPath, this.file)))) {
+        throw new GitPublicationError("index-not-ready", "The Git index lock does not hold a complete prepared index");
+      }
+      await assertRegularIndex(this.indexPath);
+      await this.#assertOwned();
+      await rename(lockPath(this.indexPath), this.indexPath);
+      await this.#closeHandle();
+      const dir = await open(dirname(this.indexPath), "r");
+      try { await dir.sync(); }
+      finally { await dir.close(); }
+    });
   }
 
   /** Delete this lock only while its identity still matches. */
-  async release(): Promise<boolean> {
-    try {
-      if (!(await this.#ownsPath())) return false;
-      await unlink(lockPath(this.indexPath));
-      return true;
-    } finally { await this.close(); }
+  release(): Promise<boolean> {
+    return this.#serialize(async () => {
+      try {
+        if (!(await this.#ownsPath())) return false;
+        await unlink(lockPath(this.indexPath));
+        return true;
+      } finally { await this.#closeHandle(); }
+    });
+  }
+
+  async #closeHandle(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    try { await this.file.close(); }
+    finally { activeIndexLocks.delete(lockKey(this.identity)); }
   }
 
   /** Close the descriptor and preserve the file for a journal consumer. */
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    await this.file.close();
+  close(): Promise<void> {
+    return this.#serialize(() => this.#closeHandle());
   }
 }
 
@@ -143,7 +211,14 @@ export async function acquireIndexLock(indexPath: string, waitMs = INDEX_WAIT_MS
   let stat: BigIntStats;
   try { stat = await file.stat({ bigint: true }); }
   catch (error) { await file.close(); throw error; }
-  const lock = new IndexLock(indexPath, { device: String(stat.dev), inode: String(stat.ino) }, file);
+  const identity = { device: String(stat.dev), inode: String(stat.ino) };
+  const key = lockKey(identity);
+  if (activeIndexLocks.has(key)) {
+    await file.close();
+    throw new GitPublicationError("busy", "Git is busy");
+  }
+  activeIndexLocks.add(key);
+  const lock = new IndexLock(indexPath, identity, file);
   try {
     await assertRegularIndex(indexPath);
     return lock;
@@ -160,23 +235,28 @@ export async function reopenIndexLock(indexPath: string, owner: JournaledIndexLo
   catch (error) { if (!fsError(error, "ESRCH")) return null; }
 
   const path = lockPath(indexPath);
-  const stat = await statPath(path);
-  if (!stat || !matchesLock(stat, owner)) return null;
-  let file: FileHandle;
-  try { file = await open(path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch (error) {
-    if (fsError(error, "ENOENT") || fsError(error, "ELOOP")) return null;
-    throw error;
-  }
+  const key = lockKey(owner);
+  if (activeIndexLocks.has(key)) return null;
+  activeIndexLocks.add(key);
+  let file: FileHandle | undefined;
   let reopened = false;
   try {
+    const stat = await statPath(path);
+    if (!stat || !matchesLock(stat, owner)) return null;
+    file = await open(path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     if (!matchesLock(await file.stat({ bigint: true }), owner)) return null;
     const current = await statPath(path);
     if (!current || !matchesLock(current, owner)) return null;
     reopened = true;
-    return new IndexLock(indexPath, { device: owner.device, inode: owner.inode }, file);
+    return new IndexLock(indexPath, { device: owner.device, inode: owner.inode }, file, true);
+  } catch (error) {
+    if (fsError(error, "ENOENT") || fsError(error, "ELOOP")) return null;
+    throw error;
   } finally {
-    if (!reopened) await file.close();
+    if (!reopened) {
+      try { await file?.close(); }
+      finally { activeIndexLocks.delete(key); }
+    }
   }
 }
 
@@ -261,15 +341,19 @@ export async function captureGitHead(cwd: string): Promise<GitHead> {
   return { branch, oid: await branchTip(cwd, branch) };
 }
 
+async function objectFormat(cwd: string, options: string[] = []): Promise<keyof typeof OID_BYTES> {
+  const format = gitRecord(await readGit(cwd, [...options, "rev-parse", "--show-object-format"]));
+  if (format === "sha1" || format === "sha256") return format;
+  throw new Error("Unsupported Git object format");
+}
+
 async function oldOid(cwd: string, head: GitHead): Promise<string> {
   if (head.oid !== null) {
     if (!isOid(head.oid)) throw new Error("Invalid base commit OID");
     return head.oid;
   }
-  const format = (await readGit(cwd, ["rev-parse", "--show-object-format"])).trimEnd();
-  if (format === "sha1") return "0".repeat(40);
-  if (format === "sha256") return "0".repeat(64);
-  throw new Error("Unsupported Git object format");
+  const format = await objectFormat(cwd);
+  return "0".repeat(OID_BYTES[format] * 2);
 }
 
 export type RefCommitResult = { kind: "acknowledged" } | { kind: "failed"; detail: string };
@@ -380,11 +464,11 @@ export async function prepareGitRefVerify(cwd: string, head: GitHead): Promise<P
   return { abort, close };
 }
 
-async function reflogContains(cwd: string, branch: string, commit: string): Promise<boolean> {
-  const exists = await git(cwd, ["reflog", "exists", branch]);
+async function reflogContains(cwd: string, ref: string, commit: string): Promise<boolean> {
+  const exists = await git(cwd, ["reflog", "exists", ref]);
   if (exists.code === 1 && !exists.stdout.length && !exists.stderr) return false;
-  if (exists.code !== 0 || exists.stderr) throw new Error("Git could not read the branch reflog");
-  const log = await readGit(cwd, ["reflog", "show", "--no-notes", "--no-show-signature", "--format=%H", branch, "--"]);
+  if (exists.code !== 0 || exists.stderr) throw new Error("Git could not read the reflog");
+  const log = await readGit(cwd, ["reflog", "show", "--no-notes", "--no-show-signature", "--format=%H", ref, "--"]);
   return log.split("\n").includes(commit);
 }
 
@@ -400,7 +484,12 @@ export async function classifyGitPublication(cwd: string, base: GitHead, commit:
       if (reachable.code === 0 && !reachable.stderr) return "published";
       if (reachable.code !== 1 || reachable.stderr) return "indeterminate";
     }
-    if (tip !== base.oid || await reflogContains(cwd, base.branch, commit)) return "indeterminate";
+    if (tip !== base.oid) return "indeterminate";
+    const reflogs = await Promise.all([
+      reflogContains(cwd, base.branch, commit),
+      reflogContains(cwd, "HEAD", commit),
+    ]);
+    if (reflogs.some(Boolean)) return "indeterminate";
     if (await branchTip(cwd, base.branch) === tip) return "not-published";
   } catch { /* Unreadable evidence cannot establish either outcome. */ }
   return "indeterminate";

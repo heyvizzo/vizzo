@@ -55,8 +55,8 @@ function newCommit(cwd: string, content: string, parent?: string): string {
   return git(cwd, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", content]);
 }
 
-function startRepo(format: "files" | "reftable") {
-  const cwd = repo(format);
+function startRepo(format: "files" | "reftable", objectFormat = "sha1") {
+  const cwd = repo(format, objectFormat);
   const base = newCommit(cwd, "base\n");
   git(cwd, ["update-ref", "HEAD", base]);
   git(cwd, ["read-tree", base]);
@@ -79,6 +79,13 @@ async function take(cwd: string, waitMs?: number): Promise<IndexLock> {
 function retain<T extends PreparedGitRefVerification>(tx: T): T {
   transactions.push(tx);
   return tx;
+}
+
+function deadPid(): number {
+  const dead = spawnSync(process.execPath, ["-e", ""]);
+  expect(dead.status).toBe(0);
+  expect(dead.pid).toBeGreaterThan(0);
+  return dead.pid;
 }
 
 const failed: RefCommitResult = { kind: "failed", detail: "Injected failure at the commit observation boundary" };
@@ -116,23 +123,85 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     expect(readFileSync(path, "utf8")).toBe("foreign replacement");
   });
 
-  it("only reopens a journaled lock with matching identity and an exited owner", async () => {
+  it("only reopens a matching lock from a dead owner and grants one handle at a time", async () => {
     const { cwd, commit } = startRepo(format);
     const lock = await take(cwd);
     const bytes = preparedIndex(cwd, commit);
     await lock.write(bytes);
     await expect(reopenIndexLock(lock.indexPath, { ...lock.identity, pid: process.pid })).resolves.toBeNull();
 
-    const dead = spawnSync(process.execPath, ["-e", ""]);
-    expect(dead.status).toBe(0);
-    expect(dead.pid).toBeGreaterThan(0);
+    const owner = { ...lock.identity, pid: deadPid() };
+    await expect(reopenIndexLock(lock.indexPath, owner)).resolves.toBeNull();
     await lock.close();
-    await expect(reopenIndexLock(lock.indexPath, { ...lock.identity, inode: "0", pid: dead.pid })).resolves.toBeNull();
-    const recovered = await reopenIndexLock(lock.indexPath, { ...lock.identity, pid: dead.pid });
+    await expect(reopenIndexLock(lock.indexPath, { ...owner, inode: "0" })).resolves.toBeNull();
+    const [recovered, competing] = await Promise.all([
+      reopenIndexLock(lock.indexPath, owner),
+      reopenIndexLock(lock.indexPath, owner),
+    ]);
     expect(recovered).not.toBeNull();
+    expect(competing).toBeNull();
     locks.push(recovered!);
     expect(readFileSync(lock.indexPath + ".lock")).toEqual(bytes);
-    expect(await recovered!.release()).toBe(true);
+    await recovered!.close();
+
+    const reopenedAgain = await reopenIndexLock(lock.indexPath, owner);
+    expect(reopenedAgain).not.toBeNull();
+    locks.push(reopenedAgain!);
+    const releasing = reopenedAgain!.release();
+    await expect(reopenIndexLock(lock.indexPath, owner)).resolves.toBeNull();
+    expect(await releasing).toBe(true);
+    expect(existsSync(lock.indexPath + ".lock")).toBe(false);
+  });
+
+  it("requires a completed staged write before installing a fresh lock after an acknowledged publish", async () => {
+    const { cwd, commit } = startRepo(format);
+    const lock = await take(cwd);
+    const before = readFileSync(lock.indexPath);
+    const original = await captureGitHead(cwd);
+    const receipt = await retain(await prepareGitRefUpdate(cwd, original, commit)).commit();
+    expect(receipt.kind).toBe("acknowledged");
+    const evidence = await classifyGitPublication(cwd, original, commit, receipt);
+    await expect(lock.install(evidence)).rejects.toMatchObject({ code: "index-not-ready" });
+    await expect(lock.write(Buffer.alloc(0))).rejects.toMatchObject({ code: "index-not-ready" });
+    expect(readFileSync(lock.indexPath)).toEqual(before);
+    expect(readFileSync(lock.indexPath + ".lock")).toHaveLength(0);
+
+    const bytes = preparedIndex(cwd, commit);
+    await lock.write(bytes);
+    await lock.install(evidence);
+    expect(readFileSync(lock.indexPath)).toEqual(bytes);
+  });
+
+  it.each(["sha1", "sha256"])("validates a recovered %s payload before installing it", async (objectFormat) => {
+    const { cwd, commit } = startRepo(format, objectFormat);
+    const original = await captureGitHead(cwd);
+    const receipt = await retain(await prepareGitRefUpdate(cwd, original, commit)).commit();
+    expect(receipt.kind).toBe("acknowledged");
+    const evidence = await classifyGitPublication(cwd, original, commit);
+    expect(evidence).toBe("published");
+
+    const lock = await take(cwd);
+    const before = readFileSync(lock.indexPath);
+    const bytes = preparedIndex(cwd, commit);
+    const path = lock.indexPath + ".lock";
+    const owner = { ...lock.identity, pid: deadPid() };
+    await lock.close();
+    const recovered = await reopenIndexLock(lock.indexPath, owner);
+    expect(recovered).not.toBeNull();
+    locks.push(recovered!);
+
+    const width = objectFormat === "sha1" ? 20 : 32;
+    for (const incomplete of [Buffer.alloc(0), bytes.subarray(0, -1), Buffer.concat([bytes.subarray(0, -width), Buffer.alloc(width)])]) {
+      writeFileSync(path, incomplete);
+      await expect(recovered!.install(evidence)).rejects.toMatchObject({ code: "index-not-ready" });
+      expect(readFileSync(lock.indexPath)).toEqual(before);
+      expect(readFileSync(path)).toEqual(incomplete);
+    }
+
+    writeFileSync(path, bytes);
+    await recovered!.install(evidence);
+    expect(readFileSync(lock.indexPath)).toEqual(bytes);
+    expect(existsSync(path)).toBe(false);
   });
 
   it("refuses a symlink index and preserves the actual index and symlink", async () => {
@@ -335,6 +404,25 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     expect(readFileSync(lock.indexPath)).toEqual(before);
   });
 
+  it("checks the HEAD reflog even when the branch reflog is absent", async () => {
+    const { cwd, base, commit } = startRepo(format);
+    const original = await captureGitHead(cwd);
+    git(cwd, ["config", "core.logAllRefUpdates", "false"]);
+    git(cwd, ["reflog", "drop", original.branch]);
+    expect(run(cwd, ["reflog", "exists", "HEAD"]).status).toBe(0);
+    expect(run(cwd, ["reflog", "exists", original.branch]).status).toBe(1);
+
+    const receipt = await retain(await prepareGitRefUpdate(cwd, original, commit)).commit();
+    expect(receipt.kind).toBe("acknowledged");
+    git(cwd, ["reset", "--soft", "HEAD^"]);
+    expect(git(cwd, ["rev-parse", "HEAD"])).toBe(base);
+    expect(run(cwd, ["reflog", "exists", original.branch]).status).toBe(1);
+    expect(git(cwd, ["reflog", "show", "--format=%H", "HEAD"]).split("\n")).toContain(commit);
+
+    expect(await classifyGitPublication(cwd, original, commit, failed)).toBe("indeterminate");
+    expect(await classifyGitPublication(cwd, original, commit)).toBe("indeterminate");
+  });
+
   it("uses the exact commit acknowledgment even after an external soft reset", async () => {
     const { cwd, base, commit } = startRepo(format);
     const original = await captureGitHead(cwd);
@@ -355,4 +443,29 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     expect(git(cwd, ["show", ":tracked.txt"])).toBe("selected");
     expect(readFileSync(join(cwd, "tracked.txt"), "utf8")).toBe("unsaved work\n");
   });
+});
+
+it("treats a genuine files-backend branch reflog failure as indeterminate", async () => {
+  const { cwd, base, commit } = startRepo("files");
+  const lock = await take(cwd);
+  const before = readFileSync(lock.indexPath);
+  const original = await captureGitHead(cwd);
+  const tx = retain(await prepareGitRefUpdate(cwd, original, commit));
+  await lock.write(preparedIndex(cwd, commit));
+
+  const log = git(cwd, ["rev-parse", "--path-format=absolute", "--git-path", "logs/" + original.branch]);
+  renameSync(log, log + "-saved");
+  mkdirSync(log);
+  writeFileSync(join(log, "blocker"), "prevent Git from replacing the directory");
+  const receipt = await tx.commit();
+  expect(receipt).toMatchObject({ kind: "failed", detail: expect.stringContaining(original.branch) });
+  expect(git(cwd, ["rev-parse", "HEAD"])).toBe(base);
+  expect(run(cwd, ["reflog", "exists", original.branch]).status).toBe(1);
+  expect(git(cwd, ["reflog", "show", "--format=%H", "HEAD"]).split("\n")).toContain(commit);
+
+  const evidence = await classifyGitPublication(cwd, original, commit, receipt);
+  expect(evidence).toBe("indeterminate");
+  await expect(lock.install(evidence)).rejects.toThrow("Publication must be confirmed");
+  await lock.release();
+  expect(readFileSync(lock.indexPath)).toEqual(before);
 });
