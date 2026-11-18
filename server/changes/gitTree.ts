@@ -354,8 +354,8 @@ export async function buildCommitTree({ root, indexPath, base, entries, message 
     const attributeFiles = content.filter(({ path }) => isAttributes(path));
     for (const entry of attributeFiles) if (entry.kind !== "whole") throw nonIdentity(entry.path);
     const attributes = await prepareAttributes(root, treeIndex, zero, attributeFiles);
-    await assertPartialIdentity(root, treeIndex, attributes.tree, base,
-      content.filter(({ kind }) => kind === "partial"), baseEntries);
+    const partial = content.filter(({ kind }) => kind === "partial");
+    await assertPartialIdentity(root, treeIndex, attributes.tree, base, partial, baseEntries);
 
     const changes: GitIndexEdit[] = [];
     for (const entry of content) {
@@ -367,6 +367,13 @@ export async function buildCommitTree({ root, indexPath, base, entries, message 
     const applied = startingEntries.map((entry) => ({ ...entry, next: next.get(entry.path) ?? null }));
     const actualTree = readEntries(await git(root, treeIndex, ["ls-tree", "-rz", "--full-tree", tree]), true);
     assertAppliedEntries(actualTree, applied, "commit tree");
+    // An absent, empty, or unterminated base can look identity-converted when the new blob is not.
+    for (const { path, content: frozen } of partial) {
+      const working = await git(root, treeIndex, [
+        "--attr-source=" + attributes.tree, "cat-file", "--filters", "--path=" + path, next.get(path)!.oid,
+      ]);
+      if (!frozen.equals(working)) throw nonIdentity(path);
+    }
 
     const signArgs = ["config", "--bool", "--get", "commit.gpgSign"];
     const sign = await runGit(root, treeIndex, signArgs);
