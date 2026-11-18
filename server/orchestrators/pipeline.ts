@@ -38,6 +38,8 @@ import { DEFAULT_TURN_TIMEOUT_MS, errMessage, relabelTtsMark, TurnBase, type Seg
 import { FillerScheduler } from "./fillers.ts";
 import { isLocalTts, taskTimeoutMs, type LlmChoice } from "../../shared/config.ts";
 import { startJob } from "./jobs.ts";
+import { projectDir } from "../project.ts";
+import { writerRegistry, type WriterExecution } from "../changes/writers.ts";
 import { browserUrl, onPage } from "../browserPage.ts";
 import { threadStore } from "../threads/store.ts";
 import { cancelRun, correctRun, submitRun, type RunSpec } from "../threads/runner.ts";
@@ -455,6 +457,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         let asking = true;
         let stop = (): void => {};
         let centralHandle: HarnessThread | null = null;
+        let execution: WriterExecution | undefined;
         let solving: Promise<{ text: string; usage: unknown } | null>;
         base.onCleanup((reason) => { if (reason !== "done" && !handedOff && asking) stop(); });
         if (plan && threadSpec) {
@@ -471,25 +474,31 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
             onDelta,
             ...trace(),
             onSpokenLine,
-          }));
+          }, (running) => { execution = running; }));
           centralHandle = centralSession();
           solverSession = centralHandle;
           const handle = centralHandle;
-          stop = () => handle?.abort();
+          stop = () => { execution?.stopping(); handle?.abort(); };
           const ran = handle?.choice;
           if (ran && JSON.stringify(ran) !== JSON.stringify(cfg.llm.smart)) solverLlm = ran;
         } else {
           // No memory: one request on a fresh agent.
           const abort = new AbortController();
-          stop = () => abort.abort(new Error("stopped by the user"));
-          solving = tag("solver", deps.solveTask({
+          const running = writerRegistry().queue({
+            writer: { kind: "central", id: ctx.turnId }, title: delegate.question, request: own,
+            folder: projectDir(), harness: cfg.llm.smart.provider, purpose: "request",
+          });
+          execution = running;
+          stop = () => { running.stopping(); abort.abort(new Error("stopped by the user")); };
+          solving = tag("solver", running.run(() => deps.solveTask({
+            execution: running,
             mark: base.mark, question: delegate.question, original: own, pointing, fast: cfg.solverFast, history, intent: delegate.intent, annotation: ctx.annotation, pageContext: solverContext, language: base.language, llm: cfg.llm.smart,
             timeoutMs: taskTimeoutMs(cfg), voiceCues: useVoiceCues(cfg.ttsModel, base.language),
             signal: abort.signal,
             onDelta,
             ...trace(),
             onSpokenLine,
-          }));
+          })));
         }
         solving = solving.finally(() => { asking = false; });
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -527,7 +536,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
               turnId: ctx.turnId, config: cfg, intent: delegate.intent, question: delegate.question, original: own,
               estimateS: delegate.estimateS, pointing, history: history ?? [], annotation: ctx.annotation, pageContext: solverContext, language: base.language,
             }, {
-              promise: solving.then((r) => r!), startedAt, spoken: () => solverSpoken, abort: stop,
+              promise: solving.then((r) => r!), execution, startedAt, spoken: () => solverSpoken, abort: stop,
               ...(handle ? { session: handle, choice: handle.choice } : {}),
             });
             base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], jobId: job.jobId };

@@ -15,6 +15,8 @@ import { harnessSessionInfo } from "../adapters/sessionInfo.ts";
 import type { HarnessThread } from "../adapters/types.ts";
 import { tracer } from "./trace.ts";
 import { beginTask } from "../activity.ts";
+import { projectDir } from "../project.ts";
+import { writerRegistry, type WriterExecution } from "../changes/writers.ts";
 import { useVoiceCues } from "../adapters/voiceCues.ts";
 import type { ConnectionCache, ConnectionChannel, OrchestratorDeps } from "./types.ts";
 
@@ -45,6 +47,7 @@ export interface RunningJob {
   close?(): void | Promise<void>;
   session?: HarnessThread;
   choice?: LlmChoice;
+  execution?: WriterExecution;
 }
 
 class JobRegistry {
@@ -111,6 +114,7 @@ export function startJob(
     question: spec.question, estimateS: spec.estimateS, state: "running", ...(spec.language ? { language: spec.language } : {}),
     ...(running ? { elapsedMs: Math.round(performance.now() - running.startedAt) } : {}),
   };
+  running?.execution?.handoff(job.jobId, spec.question);
   reg.jobs.set(job.jobId, job);
   channel.send({ type: "job", job: { ...job } });
   const t0 = running?.startedAt ?? performance.now();
@@ -148,14 +152,30 @@ export function startJob(
     session = openJobSession(deps.openThread, llmOf(spec.config).smart, spec.history);
     const handle = session;
     if (session.choice) costConfig = { ...spec.config, llm: { ...llmOf(spec.config), smart: session.choice } };
-    const stop = (): void => { try { handle.abort(); } catch { /* ignore */ } };
+    const execution = writerRegistry().queue({
+      writer: { kind: "job", id: job.jobId }, title: spec.question, request: spec.original ?? spec.question,
+      folder: handle.projectFolder !== undefined ? handle.projectFolder : handle.spec ? handle.spec.project ?? null : projectDir(),
+      harness: (handle.choice ?? llmOf(spec.config).smart).provider, purpose: "request",
+    });
+    const stop = (): void => {
+      execution.stopping();
+      try { handle.abort(); } catch { /* ignore */ }
+    };
     abort.signal.addEventListener("abort", stop, { once: true });
-    run = deps.solveInThread({ ...common, thread: session, kind: "request" }).finally(async () => {
+    run = execution.run(() => deps.solveInThread!({ ...common, thread: handle, execution, kind: "request" })).finally(async () => {
       abort.signal.removeEventListener("abort", stop);
       await finishJobSession(handle);
     });
   } else {
-    run = deps.solveTask({ ...common, signal: abort.signal, fast: spec.config.solverFast, history: spec.history, llm: llmOf(spec.config).smart });
+    const choice = llmOf(spec.config).smart;
+    const execution = writerRegistry().queue({
+      writer: { kind: "job", id: job.jobId }, title: spec.question, request: spec.original ?? spec.question,
+      folder: projectDir(), harness: choice.provider, purpose: "request",
+    });
+    const stop = () => execution.stopping();
+    abort.signal.addEventListener("abort", stop, { once: true });
+    run = execution.run(() => deps.solveTask({ ...common, execution, signal: abort.signal, fast: spec.config.solverFast,
+      history: spec.history, llm: choice })).finally(() => abort.signal.removeEventListener("abort", stop));
   }
   // Tracked so the app asks before quitting while it works (server/activity.ts).
   const end = beginTask(`Background task: ${shortQuestion(spec.question)}`);

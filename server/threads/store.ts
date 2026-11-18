@@ -5,6 +5,7 @@ import { drawingContext } from "../adapters/drawing.ts";
 // and restored at the next start (server/threads/persist.ts). Every change goes out to every connected Session
 // (`thread`, `thread.removed`); a Session gets `threads.snapshot` when it connects.
 import { randomUUID } from "node:crypto";
+import { projectDir } from "../project.ts";
 import type { Intent, ServerMsg } from "../../shared/protocol.ts";
 import type { ThreadAnchor, ThreadInfo, ThreadMessage } from "../../shared/threads.ts";
 import type { HarnessThread } from "../adapters/types.ts";
@@ -29,6 +30,7 @@ export interface ThreadRecord {
   info: ThreadInfo;
   handle: HarnessThread | null;
   run: ThreadRunState | null;
+  projectFolder?: string | null;
   /** Restored from disk: what its harness session is reopened with (until a handle is opened). */
   resume?: ThreadResume;
 }
@@ -85,7 +87,7 @@ export class ThreadStore {
       threadId: randomUUID(), pageUrl: anchor.pageUrl, anchor, title, state: "idle", intent, summary: "",
       unread: false, awaitingReply: false, messages: [], createdAt: now, lastInteractionAt: now,
     };
-    this.records.set(info.threadId, { info, handle: null, run: null });
+    this.records.set(info.threadId, { info, handle: null, run: null, projectFolder: projectDir() });
     this.emit(info.threadId);
     return info;
   }
@@ -165,7 +167,7 @@ export class ThreadStore {
     for (const saved of loadThreads(file)) {
       if (this.records.has(saved.info.threadId)) continue;
       const info = restoredInfo(saved, this.now());
-      this.records.set(info.threadId, { info, handle: null, run: null, ...(saved.resume ? { resume: saved.resume } : {}) });
+      this.records.set(info.threadId, { info, handle: null, run: null, projectFolder: saved.projectFolder, ...(saved.resume ? { resume: saved.resume } : {}) });
     }
     if (this.records.size) console.log(`[threads] restored ${this.records.size} thread${this.records.size === 1 ? "" : "s"} from ${file}`);
     this.broadcast({ type: "threads.snapshot", threads: this.list() });
@@ -199,7 +201,7 @@ function savedOf(r: ThreadRecord): SavedThread {
   const resume: ThreadResume | undefined = h?.spec && h.choice
     ? { choice: h.choice, spec: h.spec, ...(h.session?.() ? { ref: h.session!()! } : {}) }
     : r.resume;
-  return { info: r.info, ...(resume ? { resume } : {}) };
+  return { info: r.info, projectFolder: r.projectFolder, ...(resume ? { resume } : {}) };
 }
 
 /** A saved thread as it comes back: nothing is running any more. */

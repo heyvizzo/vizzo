@@ -6,6 +6,7 @@ import { batchKey, exactBytes, exactText, MAX_FILE_BYTES, parsePatch, PENDING_MS
 import { LedgerPersistence } from "./persistence.ts";
 import { evidencePath, pathAcceptsEvidence, readBaseEntry, readLedgerHead, readWorkingEntry, sameHead,
   type LedgerHead, type LedgerProject } from "./project.ts";
+import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
 interface Effect {
   path: string;
@@ -33,6 +34,7 @@ interface ProjectState {
   executions: Record<string, LedgerProject>;
   moves: Record<string, readonly [string, string]>;
   notices: Record<string, string>;
+  writerRecords?: Record<string, WriterExecutionRecord>;
 }
 
 export interface BatchResult {
@@ -381,6 +383,50 @@ export class LedgerStore {
       if (chain && !pending.has(path)) compact(chain, content);
     }
     save();
+  }
+
+  saveWriter(project: LedgerProject, execution: WriterExecutionRecord): void {
+    this.persistence.assertExternal(project.id, [project.root, project.gitDir, project.commonDir]);
+    const all = this.persistence.load();
+    const state = all[project.id] ?? newState(readLedgerHead(project));
+    const id = executionKey(execution.executionId);
+    for (const candidate of [state, ...Object.values(all)]) {
+      const pinned = candidate.executions[id];
+      if (pinned && (pinned.id !== project.id || pinned.gitDir !== project.gitDir ||
+          pinned.scope !== project.scope || pinned.servedDir !== project.servedDir)) throw new Error("Execution project scope changed");
+    }
+    if (execution.folder !== project.servedDir) throw new Error("Writer execution folder differs from the pinned scope");
+    state.executions[id] = project;
+    (state.writerRecords ??= {})[id] = execution;
+    all[project.id] = state;
+    this.persistence.save(all);
+  }
+
+  restoreWriters(): void {
+    const all = this.persistence.load();
+    let changed = false;
+    for (const state of Object.values(all)) {
+      for (const writer of Object.values(state.writerRecords ?? {})) {
+        if (writer.phase === "settled") continue;
+        writer.phase = "settled";
+        writer.outcome = writer.outcome === "stopped" || writer.outcome === "timed-out" ? writer.outcome : "interrupted";
+        changed = true;
+      }
+    }
+    if (changed) this.persistence.save(all);
+  }
+
+  writerSnapshot(projectId: string, now = Date.now()): ProjectWriterSnapshot {
+    this.persistence.content(projectId); // Validate the journal key.
+    this.pending(now);
+    const state = this.persistence.load()[projectId];
+    const pending = new Set(Object.values(state?.receipts ?? {}).flatMap((receipt) =>
+      receipt.pending.length ? [receipt.executionId] : []));
+    return {
+      projectId, executions: Object.values(state?.writerRecords ?? {}).map((record) => ({
+        ...record, projectId, pending: pending.has(record.executionId),
+      })),
+    };
   }
 
   pending(now = Date.now()): { executionIds: string[]; deadline?: number } {

@@ -198,10 +198,9 @@ function prompts(): { router: string; routerThreads: string; solver: string; fil
  * file; for the solver, the project note (what its harness's switches give it) and the saved instructions, each scope
  * its own layer.
  */
-export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { label: string; text: string }[] {
+export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles, dir = projectDir()): { label: string; text: string }[] {
   if (role === "router") return [{ label: ROLE_PROMPT_LABEL.router, text: routerSystem() + ROUTER_FORMAT }];
   if (role === "fillers") return [{ label: ROLE_PROMPT_LABEL.fillers, text: prompts().fillers + FILLERS_FORMAT }];
-  const dir = projectDir();
   return [
     { label: ROLE_PROMPT_LABEL.solver, text: prompts().solver },
     // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
@@ -211,10 +210,9 @@ export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: H
 }
 
 /** Each role's system prompt on a harness; the solver works in the project folder when there is one. */
-export function roleSystem(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { system: string; project?: string } {
-  const system = rolePromptParts(role, harness, toggles).map((x) => x.text).join("\n\n");
-  const dir = role === "solver" ? projectDir() : undefined;
-  return dir ? { system, project: dir } : { system };
+export function roleSystem(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles, dir = projectDir()): { system: string; project?: string } {
+  const system = rolePromptParts(role, harness, toggles, dir).map((x) => x.text).join("\n\n");
+  return role === "solver" && dir ? { system, project: dir } : { system };
 }
 registerRoleSpecs(roleSystem);
 
@@ -583,14 +581,14 @@ export function buildSolverParams(
 }
 
 /** Only solvers without a shell need a snapshot; an existing session's pinned switches take precedence. */
-async function solverGitContext(choice: LlmChoice | undefined, spec?: AgentSpec): Promise<string> {
+async function solverGitContext(choice: LlmChoice | undefined, spec?: AgentSpec, folder = projectDir()): Promise<string> {
   const harness = spec?.harness ?? choice?.provider;
   const toggles = spec ? spec.toggles : choice?.toggles;
   if (harness && isHarness(harness) && toggleOn(harness, toggles, "shell", "smart")) return "";
-  return gitContext(projectDir());
+  return gitContext(spec ? spec.project ?? null : folder);
 }
 
-export const solveTask: SolveTask = async ({ mark, question, original, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation }) => {
+export const solveTask: SolveTask = async ({ mark, question, original, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation, execution }) => {
   const t0 = performance.now();
   const choice = choiceFor(llm, "solver");
   let text = "";
@@ -602,9 +600,10 @@ export const solveTask: SolveTask = async ({ mark, question, original, pointing,
     onSpokenLine(line);
   });
   const params = attachDrawing(buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues, original), annotation, history);
-  const git = await solverGitContext(choice);
+  const pinned = execution ? agentSpec("solver", choice, false, execution.folder) : undefined;
+  const git = await solverGitContext(choice, pinned);
   if (git) params.messages.at(-1)!.content += `\n\n${git}`;
-  onPrompt?.(harnessPromptInfo("solver", choice, params));
+  onPrompt?.(harnessPromptInfo("solver", choice, params, pinned));
   mark("solver.request", {
     model: choice.model, backend: choice.provider, fast: choice.speed === "fast",
     ...(choice.level ? { level: choice.level } : {}), ...(intent === "task" ? { intent } : {}),
@@ -620,7 +619,7 @@ export const solveTask: SolveTask = async ({ mark, question, original, pointing,
   const gate = new NarrationGate(onText);
   let res: HarnessResult;
   try {
-    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations);
+    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations, pinned);
     gate.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));
@@ -680,7 +679,7 @@ export function threadUserMessage(
 const threadChoice = (thread: { choice?: LlmChoice }): LlmChoice | undefined => thread.choice;
 
 export const solveInThread: SolveInThread = async ({
-  thread, kind, mark, question, original, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation,
+  thread, kind, mark, question, original, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation, execution,
 }) => {
   const t0 = performance.now();
   const choice = threadChoice(thread);
@@ -692,7 +691,7 @@ export const solveInThread: SolveInThread = async ({
     mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-  const git = await solverGitContext(choice, thread.spec);
+  const git = await solverGitContext(choice, thread.spec, execution ? execution.folder : thread.projectFolder);
   const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues, original) + (annotation ? `\n\n${drawingContext(annotation)}` : "") + (git ? `\n\n${git}` : "");
   const params: ChatParams = { messages: [{ role: "user", content: user }], ...(annotation ? { annotations: [annotation] } : {}) };
   // The prompt goes to the debug view as it is dispatched: with the history or notes the session added, and how the
@@ -728,7 +727,7 @@ export const solveInThread: SolveInThread = async ({
   const gate = new NarrationGate(onText);
   let res: Awaited<ReturnType<typeof thread.send>>;
   try {
-    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations, showPrompt);
+    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations, showPrompt, execution);
     showPrompt();
     gate.end();
   } catch (err) {

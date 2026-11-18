@@ -30,6 +30,9 @@ port.on("message", (request: LedgerRequest) => {
       case "observe": result = store.observe(request.project, request.paths); break;
       case "compact": result = store.compact(request.project, request.paths); break;
       case "pending": result = store.pending(); break;
+      case "saveWriter": result = store.saveWriter(request.project, request.execution); break;
+      case "restoreWriters": result = store.restoreWriters(); break;
+      case "writerSnapshot": result = store.writerSnapshot(request.projectId); break;
     }
     if (request.method !== "discover") scheduleExpiry(store.pending().deadline);
     port.postMessage({ id, result } satisfies LedgerResponse);

@@ -21,7 +21,7 @@ let log: (msg: string) => void = (msg) => console.info(msg);
 export function setWarmLogger(fn: (msg: string) => void): void { log = fn; }
 
 /** The system prompt and project folder of each role on a harness with these toggles (registered by claude.ts). */
-type SpecSource = (role: CliRole, harness: HarnessId, toggles?: HarnessToggles) => { system: string; project?: string };
+type SpecSource = (role: CliRole, harness: HarnessId, toggles?: HarnessToggles, projectFolder?: string | null) => { system: string; project?: string };
 let specSource: SpecSource | null = null;
 export function registerRoleSpecs(fn: SpecSource): void { specSource = fn; }
 
@@ -35,12 +35,12 @@ export function setAgentFactory(fn: AgentFactory | null): void {
  * What an agent for `role` with `choice` starts with, as things stand now (the prompt, the saved instructions, the
  * project folder). `persist`: its conversation is saved by the harness (a session's agent).
  */
-export function agentSpec(role: CliRole, choice: LlmChoice, persist = false): AgentSpec {
+export function agentSpec(role: CliRole, choice: LlmChoice, persist = false, projectFolder?: string | null): AgentSpec {
   if (!specSource) throw new Error("role prompts not registered");
   const harness = choice.provider;
   if (!isHarness(harness)) throw new Error(`${LLM_PROVIDER_LABELS[harness]} is a model API, not a harness: it can't run the ${role}`);
   const toggles = cleanToggles(harness, choice.toggles, ROLE_TIER[role]);
-  const { system, project } = specSource(role, harness, toggles);
+  const { system, project } = specSource(role, harness, toggles, projectFolder);
   return {
     role, harness, model: choice.model,
     ...(choice.level ? { level: choice.level } : {}), ...(choice.speed === "fast" ? { speed: "fast" as const } : {}),
@@ -147,11 +147,11 @@ export function configureWarm(selection: Record<LlmTier, LlmChoice>): void {
  * aborted: the agent is killed and this rejects at once.
  */
 export async function harnessRequest(
-  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal, annotations?: readonly DrawingAnnotation[],
+  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal, annotations?: readonly DrawingAnnotation[], pinned?: AgentSpec,
 ): Promise<HarnessResult> {
   signal?.throwIfAborted();
   hookExit();
-  const spec = agentSpec(role, choice);
+  const spec = pinned ?? agentSpec(role, choice);
   const key = keyOf(spec);
   let pool = pools.get(key);
   if (!pool) {

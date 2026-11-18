@@ -17,6 +17,8 @@ import type { HarnessThread, OpenHarnessThread, SolveInThread, SolveInThreadOpts
 import { conversationText, getConversation, onConversationReset, type ChatTurn } from "./conversation.ts";
 import { harnessSessionInfo } from "./adapters/sessionInfo.ts";
 import { threadStore } from "./threads/store.ts";
+import { projectDir } from "./project.ts";
+import { writerRegistry, type WriterExecution } from "./changes/writers.ts";
 
 const HISTORY_HEADING = "Conversation so far (oldest first):";
 const NOTES_HEADING = "Since your last reply in this conversation (oldest first):";
@@ -24,6 +26,7 @@ const NOTES_HEADING = "Since your last reply in this conversation (oldest first)
 interface Central {
   handle: HarnessThread;
   choice: LlmChoice;
+  folder: string | null;
   /** What opened it (a different one, as tests swap in, gets a session of its own). */
   opener: OpenHarnessThread;
   /** The conversation's turns (by turnId) the session knows: it answered them, or was told them. */
@@ -63,8 +66,9 @@ function open(openThread: OpenHarnessThread, choice: LlmChoice, forkOf?: Central
     for (const t of turns) seen.add(t.turnId);
     return conversationText(turns, heading);
   };
+  const folder = forkOf ? forkOf.folder : projectDir();
   const handle = openThread({
-    role: "solver", choice,
+    role: "solver", choice, projectFolder: folder,
     ...(forkOf ? { forkOf: forkOf.handle } : {}),
     onSession: publishSession,
     replay: () => {
@@ -74,7 +78,7 @@ function open(openThread: OpenHarnessThread, choice: LlmChoice, forkOf?: Central
     replayAnnotations: () => replayed.flatMap((t) => (t.annotation ? [t.annotation] : [])).slice(-4),
     notes: () => tell((firstHistory ?? getConversation()).filter((t) => !seen.has(t.turnId)), NOTES_HEADING),
   });
-  const c = { handle, choice, seen, opener: openThread, running: 0 };
+  const c = { handle, choice, folder, seen, opener: openThread, running: 0 };
   sessions.set(handle, c);
   return c;
 }
@@ -128,7 +132,7 @@ export function backgroundCentralSession(handle: HarnessThread): void {
  */
 export async function solveCentral(
   deps: { openThread: OpenHarnessThread; solveInThread: SolveInThread }, choice: LlmChoice, turnId: string,
-  opts: Omit<SolveInThreadOpts, "thread" | "kind">,
+  opts: Omit<SolveInThreadOpts, "thread" | "kind" | "execution">, onExecution?: (execution: WriterExecution) => void,
 ): Promise<Awaited<ReturnType<SolveInThread>>> {
   if (central && central.opener !== deps.openThread) {
     try { central.handle.close(); } catch { /* gone */ }
@@ -140,8 +144,13 @@ export async function solveCentral(
   // The turn joins the conversation's log when it ends: the session has it already.
   c.seen.add(turnId);
   c.running++;
+  const execution = writerRegistry().queue({
+    writer: { kind: "central", id: turnId }, title: opts.question, request: opts.original ?? opts.question,
+    folder: c.folder, harness: (c.handle.choice ?? c.choice).provider, purpose: "request",
+  });
+  onExecution?.(execution);
   try {
-    return await deps.solveInThread({ ...opts, thread: c.handle, kind: "request" });
+    return await execution.run(() => deps.solveInThread({ ...opts, thread: c.handle, execution, kind: "request" }));
   } catch (e) {
     c.seen.delete(turnId);
     throw e;

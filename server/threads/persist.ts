@@ -21,6 +21,7 @@ export interface ThreadResume {
 
 export interface SavedThread {
   info: ThreadInfo;
+  projectFolder?: string | null;
   resume?: ThreadResume;
 }
 

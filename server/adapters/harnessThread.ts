@@ -13,6 +13,7 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // when it's needed again). `close()` stops a session for good; its saved session stays on disk for the user.
 import type { LlmChoice } from "../../shared/config.ts";
 import { MAX_LIVE_THREAD_SESSIONS } from "../../shared/threads.ts";
+import { projectDir } from "../project.ts";
 import { SessionUnavailableError, type AgentSpec, type SessionRef, type SessionStart, type WarmAgent } from "./harnesses.ts";
 import type { HarnessThread, OpenHarnessThread, OpenHarnessThreadOpts, SessionDispatch, SessionMode } from "./types.ts";
 import { agentSpec, releaseSessionAgent, releaseSessionAgentForResume, takeSessionAgent } from "./warmPool.ts";
@@ -48,10 +49,13 @@ class Thread implements HarnessThread {
   private stop: (() => void) | null = null;
   private closed = false;
   private sessionKey = "";
+  readonly projectFolder: string | null;
   busy = false;
   lastUsed = 0;
 
   constructor(private opts: OpenHarnessThreadOpts) {
+    this.projectFolder = opts.restore ? opts.restore.spec.project ?? null
+      : opts.projectFolder !== undefined ? opts.projectFolder : projectDir();
     if (opts.restore) {
       this.pinned = opts.restore.spec;
       this.ref = opts.restore.ref;
@@ -172,7 +176,7 @@ class Thread implements HarnessThread {
     let fallback: string | undefined;
     try {
       // What the session runs with is read once: a later change in Settings is for sessions opened after it.
-      this.pinned ??= agentSpec(this.opts.role, this.opts.choice, true);
+      this.pinned ??= agentSpec(this.opts.role, this.opts.choice, true, this.projectFolder);
       for (let attempt = 0; ; attempt++) {
         let at: ReturnType<Thread["attach"]>;
         try {
