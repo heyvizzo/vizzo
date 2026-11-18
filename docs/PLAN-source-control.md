@@ -509,3 +509,11 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Automatic orphan shutdown also requires the native supervisor to confirm loss of its owning voice connection.
   A ledger worker can exit and release the kernel lock while its voice process is still live. A previous group
   whose owner cannot be verified stays unconfirmed unless Vizzo can verify the group has already exited.
+- Ledger startup checks the private storage location before creating a lock or directory. A configured threads
+  path can otherwise put the ledger's new lock inside a Git worktree or its metadata before project discovery.
+- The ledger can independently observe the reported postimage of a full edit receipt that arrives during a commit
+  pin. This preserves evidence of a return to a historical version across settlement. The intervening rollback
+  stays Other, and the commit is built entirely from the frozen selection.
+- Recovery settles a proved publication when the existing index already contains the commit's selected entries,
+  including after an attached HEAD switch or a reachable branch advance. The branch and exact tip checks still
+  apply to index writes. A crash reproduced an indefinitely pinned job after the index was already installed.
