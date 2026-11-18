@@ -183,14 +183,23 @@ async function main() {
   await until(() => previews().length === 6, 'reset preflights before cancellation');
   reply(previews()[5], states);
   await until(confirmReady, 'reset shows commit, keep and work warning');
+  assert.match(await confirmText(), /1 thread will be committed, 2 kept uncommitted/);
   assert.match(await confirmText(), /1 background task is running and will be stopped/);
   chat.webContents.send('page:comment', { type: 'comment.send', threadId: 't1', text: 'A follow-up held locally after the preview',
     sample: { t: Date.now(), x: 1, y: 1, scrollX: 0, scrollY: 0, elementPath: base.anchor.domPath, dataSource: null, label: 'A' } });
   await until(() => heldFeedback.some(c => c.threadId === 't1'), 'new follow-up waits behind the active turn');
   await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
+  await until(() => previews().length === 7, 'first confirmation refreshes the batch preview');
+  assert.deepEqual(previews()[6].threadIds, threads.map(t => t.threadId));
+  assert.deepEqual(mutations().map(m => m.type), ['threads.delete', 'thread.delete', 'thread.delete'], 'refresh performs no deletion or stop');
+  assert.equal(await confirmReady(), false, 'confirmation waits for the refreshed preview');
+  reply(previews()[6], { ...states, t3: { ...states.t3, willCommit: true } });
+  await until(confirmReady, 'refreshed confirmation ready');
+  assert.match(await confirmText(), /0 threads will be committed, 3 kept uncommitted/);
+  await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
   await until(() => resets() === 1, 'reset sent');
   assert.deepEqual(mutations().map(m => m.type), ['threads.delete', 'thread.delete', 'thread.delete', 'conversation.reset']);
-  assert.deepEqual(mutations()[3].threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'a newly held follow-up also caps the mode at keep');
+  assert.deepEqual(mutations()[3].threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'the refreshed batch keeps newly working and previously kept threads');
   assert.equal(await confirmText(), null);
   assert.equal(await listed(), 4, 'reset keeps threads during durable handoff');
   assert.equal(await evaluate('!!document.querySelector(".turn")'), true, 'conversation remains until reset completes');
@@ -204,7 +213,7 @@ async function main() {
   await until(() => resets() === 2, 'reset sent without asking');
   assert.equal(await confirmText(), null);
   assert.deepEqual(errors, []);
-  console.log('Reset confirm smoke passed: batches preview once, count tied and working threads, cap keep, keep markers through handoff, and reset without a preceding cancellation.');
+  console.log('Reset confirm smoke passed: batches count tied and working threads, refresh when work starts, preserve Keep choices and markers, and reset without a preceding cancellation.');
 }
 
 main().then(() => finish(0), error => { console.error(error); return finish(1); });
