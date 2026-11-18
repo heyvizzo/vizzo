@@ -446,3 +446,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   normalized CRLF and mixed line endings in `Edit` and in `Write` overwrite preimages without reporting the
   original line endings. Those edits remain Other under the exact-evidence rule. The installed CLI exposed no
   `MultiEdit` tool in the capture.
+- Codex 0.170.0 attributes only completed batches of exact updates and deletions. Recorded `add` results were
+  identical for create and overwrite, and move results omitted whether they overwrote a destination. A case-only
+  move even reported success after removing the file on the case-insensitive test volume. Batches containing
+  these ambiguous operations remain Other under the exact-evidence rule.
