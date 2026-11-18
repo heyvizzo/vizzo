@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 
 const harness = process.env.VIZZO_FAKE_NATIVE_HARNESS;
-const late = process.env.VIZZO_FAKE_STOP_MODE === "late";
-const descendant = process.env.VIZZO_FAKE_STOP_MODE === "descendant";
+const mode = process.env.VIZZO_FAKE_STOP_MODE;
+const late = mode === "late";
+const descendant = mode === "descendant";
 const sid = "native-session";
 const tid = "native-turn";
 const text = "working";
@@ -150,6 +151,16 @@ if (harness === "opencode") {
         stdout({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
       }
       if (m.type === "abort") afterStop(() => {
+        if (mode === "reject-prompt") {
+          stdout({ type: "response", id: "prompt", success: false });
+          writeFileSync("rejected", "");
+          const wait = setInterval(() => {
+            if (!existsSync("release-terminal")) return;
+            clearInterval(wait);
+            stdout({ type: "agent_end" });
+          }, 10);
+          return;
+        }
         const report = () => {
           stdout({ type: "tool_execution_start", toolCallId: "native-tool", toolName: "edit", args: { input: "exact" } });
           stdout({ type: "tool_execution_end", toolCallId: "native-tool", toolName: "edit", isError: false,
