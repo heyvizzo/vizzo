@@ -7,6 +7,7 @@ import type { ChangeGroup, ChangesView } from "../../shared/changes.ts";
 import { changeWriterId } from "./components.ts";
 import { runCommitTransaction, type CommitContext, type CommitRequest } from "./commitTransaction.ts";
 import { MAX_FILE_BYTES, type EditChange } from "./evidence.ts";
+import type { LedgerView } from "./ledger.ts";
 import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import type { LedgerProject } from "./project.ts";
 import { ScanRuntime, type ScanResponse, type ScanRuntimePorts } from "./scanRuntime.ts";
@@ -62,6 +63,7 @@ async function fixture(format: string) {
   const observations: string[][] = [];
   const hooks: {
     beforeObserve?: () => Promise<void>;
+    afterObserve?: (view: LedgerView) => LedgerView;
     beforeWriters?: () => Promise<void>;
     groupState?: ScanRuntimePorts["groupState"];
   } = {};
@@ -73,7 +75,8 @@ async function fixture(format: string) {
       observe: async (project, paths) => {
         observations.push([...paths]);
         await hooks.beforeObserve?.();
-        return ledger.observe(project, paths);
+        const observed = await ledger.observe(project, paths);
+        return hooks.afterObserve?.(observed) ?? observed;
       },
     },
     writers: {
@@ -253,7 +256,7 @@ describe.each(["files", "reftable"])("source-control scan runtime (%s refs)", (f
   });
 
   it("freezes just the reviewed hunk through runCommitTransaction when a different same-file hunk appears", async () => {
-    const { root, put, commit, project, edit, runtime } = await fixture(format);
+    const { root, put, commit, project, edit, runtime, hooks } = await fixture(format);
     await put("f", BASE);
     commit();
     const pinned = await project();
@@ -277,6 +280,12 @@ describe.each(["files", "reftable"])("source-control scan runtime (%s refs)", (f
     })).toMatchObject({ status: "done" });
     expect(git(root, "show", "HEAD:f")).toBe(LAST.trimEnd());
     expect(await readFile(join(root, "f"), "utf8")).toBe(WITH_OTHER);
+
+    // The durable settlement port classifies a Vizzo publication as an owned HEAD move.
+    hooks.afterObserve = (observed) => ({ ...observed, headMoved: false });
+    await runtime.refresh();
+    expect(ready(runtime).view).toMatchObject({ base: git(root, "rev-parse", "HEAD"), notices: [] });
+    expect(await review.scanAndFreeze(selected)).toBeNull();
   });
 
   it("rejects ownership from mixed file reads and retries a mixed HEAD read", async () => {

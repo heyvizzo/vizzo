@@ -291,10 +291,8 @@ export class ScanRuntime {
         const moved = previous && !sameHead(input.head, {
           branch: previous.graph.view.branch, oid: previous.graph.view.base,
         });
-        const graph = buildChangeComponents({
-          ...input, generation: this.generation + 1,
-          ledger: { ...input.ledger, headMoved: !!moved || input.ledger.headMoved },
-        });
+        // The ledger distinguishes external moves from Vizzo's settled publications.
+        const graph = buildChangeComponents({ ...input, generation: this.generation + 1 });
         const { generation, ...view } = graph.view;
         const signature = JSON.stringify(view);
         if (signature === previous?.signature) return;
