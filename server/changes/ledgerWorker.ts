@@ -13,7 +13,10 @@ let expiry: ReturnType<typeof setTimeout> | undefined;
 function scheduleExpiry(deadline: number | undefined): void {
   clearTimeout(expiry);
   if (deadline === undefined) return;
-  expiry = setTimeout(() => scheduleExpiry(store.pending().deadline), Math.max(0, deadline - Date.now()));
+  expiry = setTimeout(() => {
+    try { scheduleExpiry(store.pending().deadline); }
+    catch (error) { console.warn("[changes] could not expire pending edits", error); }
+  }, Math.max(0, deadline - Date.now()));
   expiry.unref();
 }
 

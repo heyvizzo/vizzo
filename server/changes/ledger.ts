@@ -177,6 +177,11 @@ function applyPending(state: ProjectState, content: Content): void {
           continue;
         }
         const placements = effects.map(({ path, evidence }) => place(state.files[fileKey(path)]!, evidence, content));
+        if (placements.includes("ambiguous")) {
+          setPendingResult(receipt, index, "rejected");
+          receipt.reason = "Patch matches more than one recorded preimage";
+          continue;
+        }
         if (placements.includes("too-large")) {
           for (const { path } of effects) state.notices[fileKey(path)] = TOO_LARGE;
           setPendingResult(receipt, index, "rejected");
@@ -188,7 +193,7 @@ function applyPending(state: ProjectState, content: Content): void {
         if (move) state.moves[move] = [effects[0].path, effects[1]!.path];
         effects.forEach(({ path }, effectIndex) => {
           const placement = placements[effectIndex]!;
-          if (placement === "too-large") throw new Error("Oversized placement");
+          if (typeof placement === "string") throw new Error("Invalid placement");
           insert(state.files[fileKey(path)]!, placement, {
             executionId: receipt.executionId, key: JSON.stringify([key, path]), move,
           });

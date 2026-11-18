@@ -179,6 +179,69 @@ describe("chain of custody", () => {
     ]);
   });
 
+  it("preserves a numbered patch's exact duplicate insertion when another patch rewrites it", () => {
+    const base = "start\nsame\nend\n";
+    const inserted = "start\nsame\nsame\nend\n";
+    const path = join(root, "f");
+    put("f", base);
+    commit();
+    put("f", inserted);
+    const a = event("A", { path, patch: "@@ -1,3 +1,4 @@\n start\n+same\n same\n end\n" });
+    expect(store.ingest(project, a).results).toEqual(["applied"]);
+    expect(file().hunks[0]).toMatchObject({ range: { newStart: 1 }, ownership: { owners: ["A"] } });
+    put("f", "start\nB\nsame\nend\n");
+    const b = event("B", { path, patch: "@@ -1,4 +1,4 @@\n start\n-same\n+B\n same\n end\n" });
+    expect(store.ingest(project, b).results).toEqual(["applied"]);
+    expect(owners()).toEqual([["A", "B"]]);
+  });
+
+  it("leaves a full-content duplicate insertion ambiguous when another writer edits one copy", () => {
+    const base = "start\nsame\nend\n";
+    const inserted = "start\nsame\nsame\nend\n";
+    put("f", base);
+    commit();
+    put("f", inserted);
+    expect(store.ingest(project, edit("A", base, inserted)).results).toEqual(["applied"]);
+    expect(owners()).toEqual([[null]]);
+    put("f", "start\nB\nsame\nend\n");
+    const b = event("B", { path: join(root, "f"), patch: "@@ -1,4 +1,4 @@\n start\n-same\n+B\n same\n end\n" });
+    expect(store.ingest(project, b).results).toEqual(["applied"]);
+    expect(owners()).toEqual([[null, "B"]]);
+  });
+
+  it("projects the exact original-line tombstone for a numbered duplicate deletion", () => {
+    put("f", "start\nsame\nsame\nend\n");
+    commit();
+    put("f", "start\nsame\nend\n");
+    const a = event("A", { path: join(root, "f"), patch: "@@ -1,4 +1,3 @@\n start\n-same\n same\n end\n" });
+    expect(store.ingest(project, a).results).toEqual(["applied"]);
+    expect(file().hunks[0]).toMatchObject({ range: { oldStart: 1, oldCount: 1 }, ownership: { owners: ["A"] } });
+  });
+
+  it("does not choose the newest of two patch preimages when their identical removed lines have different origins", () => {
+    put("f", "a\nold\nb\nc\nd\nold\ne\n");
+    commit();
+    put("f", "r\nold\ne\n");
+    file();
+    put("f", "a\nold\nb\nc\nd\ne\n");
+    const a = event("A", { path: join(root, "f"), patch: "@@ -2 +1,0 @@\n-old\n" });
+    expect(store.ingest(project, a)).toMatchObject({ results: ["rejected"], reason: "Patch matches more than one recorded preimage" });
+    expect(owners().every((labels) => !labels.includes("A"))).toBe(true);
+    store.compact(project, ["f"]);
+    expect(store.ingest(project, a)).toMatchObject({ duplicate: true, results: ["rejected"] });
+  });
+
+  it("does not choose between recorded patch preimages with identical numbered context", () => {
+    put("f", "start\nsame\nend\nfirst\n");
+    commit();
+    put("f", "start\nsame\nend\nsecond\n");
+    file();
+    put("f", "start\nB\nend\nsecond\n");
+    const a = event("A", { path: join(root, "f"), patch: "@@ -1,3 +1,3 @@\n start\n-same\n+B\n end\n" });
+    expect(store.ingest(project, a).results).toEqual(["rejected"]);
+    expect(owners().every((labels) => !labels.includes("A"))).toBe(true);
+  });
+
   it("requires before bytes in every bare patch hunk and complete consumption for deletion", () => {
     put("f", "one\ntwo\n");
     commit();
@@ -420,6 +483,20 @@ describe("project identity and worker", () => {
     const inGitDir = new LedgerStore(new LedgerPersistence(join(folder, "alias", "ledger.json")));
     expect(() => inGitDir.ingest(project, edit("A", null, "foo"))).toThrow("storage must be outside");
     expect(() => readFileSync(join(project.gitDir, "ledger.json"))).toThrow();
+  });
+
+  it("refuses substituted private content directories during receipt expiry and pruning", () => {
+    put("f", "base");
+    commit();
+    expect(store.ingest(project, edit("A", "unseen", "A"), 100).results).toEqual(["pending"]);
+    const directory = join(folder, "config", "ledger", project.id, "content");
+    renameSync(directory, directory + "-original");
+    symlinkSync(root, directory);
+    const userPath = "a".repeat(64);
+    put(userPath, "user data");
+    expect(() => store.pending(100 + PENDING_MS)).toThrow("storage directory was substituted");
+    expect(readFileSync(join(root, userPath), "utf8")).toBe("user data");
+    expect(() => store.observe(project, ["f"])).toThrow("storage directory was substituted");
   });
 
   it("processes worker commands and makes completed receipts visible on restart", async () => {

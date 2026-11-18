@@ -56,3 +56,39 @@ export function lineCount(content: Buffer): number {
   for (const byte of content) if (byte === 10) count++;
   return count;
 }
+
+export interface AmbiguousRange extends HunkRange {
+  left: number;
+  right: number;
+}
+
+function offsets(bytes: Buffer): Uint32Array {
+  const result = new Uint32Array(lineCount(bytes) + 1);
+  let line = 0;
+  for (let index = 0; index < bytes.length; index++) if (bytes[index] === 10) result[++line] = index + 1;
+  result[result.length - 1] = bytes.length;
+  return result;
+}
+
+/** The same line diff can slide across identical context, which is insufficient to locate a reported edit. */
+export function hunkAlternatives(before: Buffer, after: Buffer): AmbiguousRange[] {
+  const hunks = lineDiff(before, after);
+  if (!hunks.length) return [];
+  const oldLines = offsets(before);
+  const newLines = offsets(after);
+  const equal = (i: number, j: number): boolean =>
+    before.subarray(oldLines[i]!, oldLines[i + 1]!).equals(after.subarray(newLines[j]!, newLines[j + 1]!));
+  return hunks.map((hunk, index) => {
+    const previous = hunks[index - 1];
+    const next = hunks[index + 1];
+    const oldEnd = hunk.oldStart + hunk.oldCount;
+    const newEnd = hunk.newStart + hunk.newCount;
+    const beforeHunk = hunk.oldStart - (previous ? previous.oldStart + previous.oldCount : 0);
+    const afterHunk = (next?.oldStart ?? oldLines.length - 1) - oldEnd;
+    let left = 0;
+    let right = 0;
+    while (left < beforeHunk && equal(oldEnd - left - 1, newEnd - left - 1)) left++;
+    while (right < afterHunk && equal(hunk.oldStart + right, hunk.newStart + right)) right++;
+    return { ...hunk, left, right };
+  });
+}

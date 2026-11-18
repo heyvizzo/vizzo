@@ -1,6 +1,7 @@
 import { applyLink, hunkOwnership, initialAnnotation, rebaseAnnotation, type Annotation, type Link } from "./annotations.ts";
 import { ABSENT, sameEntry, type Content, type Entry } from "./entries.ts";
 import { applyExactPatch, parsePatch, MAX_FILE_BYTES, MAX_VERSIONS } from "./evidence.ts";
+import type { HunkRange } from "./lineDiff.ts";
 
 type Version = { entry: Entry; link?: Link; observed?: true };
 
@@ -22,53 +23,63 @@ export function tip(chain: Chain): Entry {
   return chain.versions.at(-1)!.entry;
 }
 
-type Placement = { from: number; after: Entry; rejoin?: number; reconnect?: number };
+type Placement = { from: number; after: Entry; rejoin?: number; reconnect?: number; ranges?: HunkRange[] };
+export type PlacementResult = Placement | "too-large" | "ambiguous" | undefined;
 
-export function place(chain: Chain, evidence: FileEvidence, content: Content): Placement | "too-large" | undefined {
-  const patch = "patch" in evidence && parsePatch(evidence.patchPath, content.get(evidence.patch).toString("utf8"));
-  if ("patch" in evidence && !patch) return;
+function linkPlacement(chain: Chain, from: number, after: Entry, ranges?: HunkRange[]): PlacementResult {
+  if (sameEntry(chain.versions[from]!.entry, after)) return { from, after };
+  if (chain.versions[from + 1]?.link) {
+    // A full preimage can witness a return to this version. Reconnect only if a later
+    // independently observed gap is exactly the reported result. A patch cannot prove the return.
+    if (ranges) return;
+    let reconnect: number | undefined;
+    for (let candidate = from + 2; candidate < chain.versions.length; candidate++) {
+      const node = chain.versions[candidate]!;
+      if (node.entry.kind === "opaque" || node.entry.kind === "symlink") break;
+      const matching = sameEntry(after, node.entry) ||
+        (after.kind === "file" && node.entry.kind === "file" && after.blob === node.entry.blob);
+      if (!node.link && node.observed && matching) reconnect = candidate;
+    }
+    return reconnect === undefined ? undefined : { from, after, reconnect };
+  }
+  let rejoin: number | undefined;
+  for (let candidate = from + 1; candidate < chain.versions.length; candidate++) {
+    const node = chain.versions[candidate]!;
+    if (node.link || node.entry.kind === "opaque" || node.entry.kind === "symlink") break;
+    if (sameEntry(after, node.entry)) rejoin = candidate;
+  }
+  return { from, after, rejoin, ranges };
+}
+
+export function place(chain: Chain, evidence: FileEvidence, content: Content): PlacementResult {
+  if ("patch" in evidence) {
+    const patch = parsePatch(evidence.patchPath, content.get(evidence.patch).toString("utf8"));
+    if (!patch) return;
+    let matched: { index: number; applied: Buffer; entry: Extract<Entry, { kind: "file" }> } | undefined;
+    for (const [index, { entry }] of chain.versions.entries()) {
+      if (entry.kind !== "file") continue;
+      const applied = applyExactPatch(content.get(entry.blob), patch, evidence.deletion);
+      if (!applied) continue;
+      if (matched) return "ambiguous";
+      matched = { index, applied, entry };
+    }
+    if (!matched) return;
+    if (matched.applied.length > MAX_FILE_BYTES) return "too-large";
+    const after = evidence.deletion ? ABSENT : { ...matched.entry, blob: content.put(matched.applied) };
+    return linkPlacement(chain, matched.index, after, patch.flatMap(({ edits }) => edits));
+  }
   for (let index = chain.versions.length - 1; index >= 0; index--) {
     const { entry: before } = chain.versions[index]!;
-    let after: Entry;
-    if ("patch" in evidence) {
-      if (before.kind !== "file" || !patch) continue;
-      const applied = applyExactPatch(content.get(before.blob), patch, evidence.deletion);
-      if (!applied) continue;
-      if (applied.length > MAX_FILE_BYTES) return "too-large";
-      after = evidence.deletion ? ABSENT : { kind: "file", mode: before.mode, blob: content.put(applied) };
-    } else {
-      if (evidence.from === null ? before.kind !== "absent" : before.kind !== "file" || before.blob !== evidence.from) continue;
-      after = evidence.to === null ? ABSENT : {
-        kind: "file", mode: before.kind === "file" ? before.mode : "100644", blob: evidence.to,
-      };
-    }
-    if (sameEntry(before, after)) return { from: index, after };
-    const next = chain.versions[index + 1];
-    if (next?.link) {
-      // A full preimage can witness a return to this version. Reconnect only if a later
-      // independently observed gap is exactly the reported result. A patch cannot prove the return.
-      if ("patch" in evidence) return;
-      let reconnect: number | undefined;
-      for (let candidate = index + 2; candidate < chain.versions.length; candidate++) {
-        const node = chain.versions[candidate]!;
-        if (node.entry.kind === "opaque" || node.entry.kind === "symlink") break;
-        const matching = sameEntry(after, node.entry) ||
-          (after.kind === "file" && node.entry.kind === "file" && after.blob === node.entry.blob);
-        if (!node.link && node.observed && matching) reconnect = candidate;
-      }
-      return reconnect === undefined ? undefined : { from: index, after, reconnect };
-    }
-    let rejoin: number | undefined;
-    for (let candidate = index + 1; candidate < chain.versions.length; candidate++) {
-      const node = chain.versions[candidate]!;
-      if (node.link || node.entry.kind === "opaque" || node.entry.kind === "symlink") break;
-      if (sameEntry(after, node.entry)) rejoin = candidate;
-    }
-    return { from: index, after, rejoin };
+    if (evidence.from === null ? before.kind !== "absent" : before.kind !== "file" || before.blob !== evidence.from) continue;
+    const after: Entry = evidence.to === null ? ABSENT : {
+      kind: "file", mode: before.kind === "file" ? before.mode : "100644", blob: evidence.to,
+    };
+    return linkPlacement(chain, index, after);
   }
 }
 
-export function insert(chain: Chain, placement: Placement, link: Link): void {
+export function insert(chain: Chain, placement: Placement, source: Link): void {
+  const link = placement.ranges ? { ...source, ranges: placement.ranges } : source;
   if (sameEntry(chain.versions[placement.from]!.entry, placement.after)) return;
   if (placement.reconnect !== undefined) {
     const observed = chain.versions[placement.reconnect]!;

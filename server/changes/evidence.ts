@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import type { HunkRange } from "./lineDiff.ts";
 
 export const MAX_FILE_BYTES = 5_000_000;
 export const PENDING_MS = 120_000;
@@ -51,6 +52,7 @@ interface PatchHunk {
   newStart: number;
   before: string[];
   after: string[];
+  edits: HunkRange[];
 }
 
 const HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@$/;
@@ -80,7 +82,8 @@ export function parsePatch(path: string, patch: string): PatchHunk[] | undefined
         oldCount === 0 || oldCount > rows.length || newCount > rows.length) return;
     const before: string[] = [];
     const after: string[] = [];
-    let edited = false;
+    const edits: HunkRange[] = [];
+    let edit: HunkRange | undefined;
     while (before.length < oldCount || after.length < newCount) {
       const row = rows[index++];
       const sign = row?.[0];
@@ -89,6 +92,15 @@ export function parsePatch(path: string, patch: string): PatchHunk[] | undefined
       if (!newline) index++;
       const line = row.slice(1) + (newline ? "\n" : "");
       if (!line) return;
+      if (sign === " ") edit = undefined;
+      else {
+        if (!edit) {
+          edit = { oldStart: oldStart + before.length, oldCount: 0, newStart: newStart + after.length, newCount: 0 };
+          edits.push(edit);
+        }
+        if (sign === "-") edit.oldCount++;
+        else edit.newCount++;
+      }
       if (sign !== "+") {
         if (oldEof || before.length >= oldCount) return;
         before.push(line);
@@ -99,10 +111,9 @@ export function parsePatch(path: string, patch: string): PatchHunk[] | undefined
         after.push(line);
         newEof = !newline;
       }
-      edited ||= sign !== " ";
     }
-    if (!edited) return;
-    result.push({ oldStart, newStart, before, after });
+    if (!edits.length) return;
+    result.push({ oldStart, newStart, before, after, edits });
     oldEnd = oldStart + before.length;
     newEnd = newStart + after.length;
   }

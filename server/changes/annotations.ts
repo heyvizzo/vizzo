@@ -1,5 +1,5 @@
 import { ABSENT, bytesFor, type Content, type Entry } from "./entries.ts";
-import { lineCount, lineDiff, type HunkRange } from "./lineDiff.ts";
+import { hunkAlternatives, lineCount, type AmbiguousRange, type HunkRange } from "./lineDiff.ts";
 
 export interface Ownership {
   owners: (string | null)[];
@@ -10,6 +10,8 @@ export interface Link {
   executionId: string;
   key: string;
   move?: string;
+  /** Exact contiguous edit rows reported by a numbered patch, excluding context. */
+  ranges?: HunkRange[];
 }
 
 interface Range { start: number; end: number }
@@ -118,6 +120,31 @@ function mergedRanges(ranges: Range[]): Range[] {
   return result;
 }
 
+interface BlameRange extends HunkRange { ambiguous?: boolean }
+
+function expand({ oldStart, oldCount, newStart, newCount, left, right }: AmbiguousRange): BlameRange {
+  return {
+    oldStart: oldStart - left, oldCount: oldCount + left + right,
+    newStart: newStart - left, newCount: newCount + left + right,
+    ambiguous: left + right > 0,
+  };
+}
+
+function blameRanges(before: Buffer, after: Buffer): BlameRange[] {
+  const result: BlameRange[] = [];
+  for (const candidate of hunkAlternatives(before, after)) {
+    const range = expand(candidate);
+    const previous = result.at(-1);
+    if (previous && previous.oldStart + previous.oldCount >= range.oldStart &&
+        previous.newStart + previous.newCount >= range.newStart) {
+      previous.oldCount = Math.max(previous.oldStart + previous.oldCount, range.oldStart + range.oldCount) - previous.oldStart;
+      previous.newCount = Math.max(previous.newStart + previous.newCount, range.newStart + range.newCount) - previous.newStart;
+      previous.ambiguous ||= range.ambiguous;
+    } else result.push(range);
+  }
+  return result;
+}
+
 export function applyLink(annotation: Annotation, before: Entry, after: Entry, content: Content, link?: Link): Annotation {
   const oldBytes = bytesFor(before, content);
   const newBytes = bytesFor(after, content);
@@ -131,9 +158,9 @@ export function applyLink(annotation: Annotation, before: Entry, after: Entry, c
       tombstones: [], presence: OTHER, moves };
   }
   const typeChanged = before.kind !== "absent" && after.kind !== "absent" && before.kind !== after.kind;
-  const hunks = typeChanged
+  const hunks: BlameRange[] = typeChanged
     ? [{ oldStart: 0, oldCount: lineCount(oldBytes), newStart: 0, newCount: lineCount(newBytes) }]
-    : lineDiff(oldBytes, newBytes);
+    : link?.ranges ?? blameRanges(oldBytes, newBytes);
   const tombstones = annotation.tombstones.slice();
   const lines: Span<Line>[] = [];
   let oldEnd = 0;
@@ -144,11 +171,12 @@ export function applyLink(annotation: Annotation, before: Entry, after: Entry, c
     oldEnd = oldStart + oldCount;
     newEnd = newStart + newCount;
     const removed = copyLines(annotation.lines, oldStart, oldEnd, 0);
-    const own: Ownership = link ? {
-      owners: [link.executionId],
-      ties: [link.move ?? JSON.stringify([link.key, index])],
+    const writer = hunk.ambiguous ? undefined : link;
+    const own: Ownership = writer ? {
+      owners: [writer.executionId],
+      ties: [writer.move ?? JSON.stringify([writer.key, index])],
     } : OTHER;
-    const by = link ? combine([own, ...removed.filter((span) => span.value.baseStart === undefined).map((span) => span.value.by)]) : own;
+    const by = writer ? combine([own, ...removed.filter((span) => span.value.baseStart === undefined).map((span) => span.value.by)]) : own;
     const replaced: Range[] = [];
     for (const { start, end, value } of removed) {
       if (value.baseStart !== undefined) {
@@ -167,6 +195,42 @@ export function applyLink(annotation: Annotation, before: Entry, after: Entry, c
   return { lines, tombstones, presence, moves };
 }
 
+function displayRange(candidate: AmbiguousRange, lines: Span<Line>[]): { range: HunkRange; blame: BlameRange } {
+  const { oldStart, oldCount, newStart, newCount, left, right } = candidate;
+  const original = { oldStart, oldCount, newStart, newCount };
+  if (!left && !right) return { range: original, blame: original };
+  const neighborhood = expand(candidate);
+  const beforeOffset = newStart - oldStart;
+  const afterOffset = beforeOffset + newCount - oldCount;
+  if (beforeOffset === afterOffset) return { range: original, blame: neighborhood };
+  let lo = -left;
+  let hi = right;
+  const end = neighborhood.newStart + neighborhood.newCount;
+  for (const span of overlaps(lines, neighborhood.newStart, end)) {
+    const { baseStart } = span.value;
+    if (baseStart === undefined) continue;
+    const offset = span.start - baseStart;
+    if (offset === beforeOffset) lo = Math.max(lo, Math.min(span.end, end) - newStart);
+    else if (offset === afterOffset) hi = Math.min(hi, Math.max(span.start, neighborhood.newStart) - newStart - newCount);
+    else return { range: original, blame: neighborhood };
+  }
+  if (lo !== hi) return { range: original, blame: neighborhood };
+  const range = { ...original, oldStart: oldStart + lo, newStart: newStart + lo };
+  return { range, blame: range };
+}
+
+function displayRanges(before: Buffer, after: Buffer, lines: Span<Line>[]) {
+  const candidates = hunkAlternatives(before, after);
+  const resolved = candidates.map((candidate) => displayRange(candidate, lines));
+  // Resolving one repeated run cannot consume context that a neighboring hunk needs.
+  const disjoint = resolved.every(({ range }, index) => {
+    const previous = resolved[index - 1]?.range;
+    return !previous || (previous.oldStart + previous.oldCount <= range.oldStart &&
+      previous.newStart + previous.newCount <= range.newStart);
+  });
+  return disjoint ? resolved : candidates.map(({ left, right, ...range }) => ({ range, blame: expand({ ...range, left, right }) }));
+}
+
 export function hunkOwnership(base: Entry, current: Entry, annotation: Annotation, content: Content, path: string): OwnedHunk[] {
   if (base.kind === "opaque" || current.kind === "opaque") {
     const reason = current.kind === "opaque" ? current.reason : base.kind === "opaque" ? base.reason : undefined;
@@ -178,18 +242,18 @@ export function hunkOwnership(base: Entry, current: Entry, annotation: Annotatio
   const typeChanged = base.kind !== "absent" && current.kind !== "absent" && base.kind !== current.kind;
   const structuralTie = JSON.stringify(["entry", path]);
   const dependency: Ownership = { owners: [], ties: [structuralTie] };
-  const hunks: OwnedHunk[] = lineDiff(oldBytes, newBytes).map((range) => {
-    const oldEnd = range.oldStart + range.oldCount;
-    const newEnd = range.newStart + range.newCount;
-    const added = overlaps(annotation.lines, range.newStart, newEnd);
-    const removed = overlaps(annotation.tombstones, range.oldStart, oldEnd);
+  const hunks: OwnedHunk[] = displayRanges(oldBytes, newBytes, annotation.lines).map(({ range, blame }) => {
+    const oldEnd = blame.oldStart + blame.oldCount;
+    const newEnd = blame.newStart + blame.newCount;
+    const added = overlaps(annotation.lines, blame.newStart, newEnd);
+    const removed = overlaps(annotation.tombstones, blame.oldStart, oldEnd);
     const uncovered = <T>(spans: Span<T>[], start: number, end: number): number => spans.reduce(
       (remaining, span) => remaining - (Math.min(end, span.end) - Math.max(start, span.start)), end - start,
     );
     const ownership = combine([
       ...added.map((span) => span.value.by),
       ...removed.map((span) => span.value),
-      ...(uncovered(added, range.newStart, newEnd) || uncovered(removed, range.oldStart, oldEnd) ? [OTHER] : []),
+      ...(blame.ambiguous || uncovered(added, blame.newStart, newEnd) || uncovered(removed, blame.oldStart, oldEnd) ? [OTHER] : []),
       ...(presentChanged || typeChanged ? [dependency] : []),
     ]);
     return { kind: "content", range, ownership };
@@ -214,10 +278,10 @@ export function rebaseAnnotation(base: Entry, current: Entry, annotation: Annota
   const common = (end: number) => {
     if (newEnd < end) lines.push({ start: newEnd, end, value: { baseStart: oldEnd, by: OTHER, replaced: [] } });
   };
-  for (const hunk of lineDiff(oldBytes, newBytes)) {
+  for (const hunk of blameRanges(oldBytes, newBytes)) {
     common(hunk.newStart);
     for (const span of copyLines(annotation.lines, hunk.newStart, hunk.newStart + hunk.newCount, 0)) {
-      lines.push({ ...span, value: { by: span.value.by, replaced: [] } });
+      lines.push({ ...span, value: { by: hunk.ambiguous ? OTHER : span.value.by, replaced: [] } });
     }
     oldEnd = hunk.oldStart + hunk.oldCount;
     newEnd = hunk.newStart + hunk.newCount;
