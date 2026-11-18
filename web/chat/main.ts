@@ -2782,7 +2782,7 @@ function closeDeleteConfirm(restoreFocus = false): void {
   if (restoreFocus) dialog?.anchor()?.focus();
 }
 
-async function openDeleteConfirm(button: HTMLButtonElement, page?: string): Promise<void> {
+async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep: ReadonlySet<string> = new Set()): Promise<void> {
   const reset = button.id === "reset";
   const anchor = () => page === undefined ? $<HTMLButtonElement>(button.id)
     : [...$("threads-list").querySelectorAll<HTMLButtonElement>(".thread-bulk")].find((b) => b.dataset.page === page);
@@ -2837,16 +2837,19 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string): Prom
     if (batchConfirm !== dialog) return;
     const choices = previews.map((preview): ThreadDeleteChoice => {
       const { threadId, state, defaultMode, willCommit } = preview;
-      return { threadId, mode: state === "complete" && defaultMode === "commit" && willCommit !== false ? "commit" : "keep" };
+      return { threadId, mode: !keep.has(threadId) && state === "complete" && defaultMode === "commit" && willCommit !== false ? "commit" : "keep" };
     });
     const committed = choices.filter((c) => c.mode === "commit").length;
     description.replaceChildren(...deleteBatchLines(previews, committed, reset, page !== undefined, tasks).map((l) => el("p", "", l)));
     ok.onclick = () => {
       const current = scope();
       const next = anchor();
+      const nowWorking = choices.filter(({ threadId, mode }) => mode === "commit"
+        && (threads.get(threadId)?.state === "running" || localThreadWorking(threadId)));
       closeDeleteConfirm(true);
-      if (current.length !== ids.length || current.some((id) => !ids.includes(id)) || runningJobs() !== tasks) {
-        if (next) void openDeleteConfirm(next, page);
+      if (nowWorking.length || current.length !== ids.length || current.some((id) => !ids.includes(id)) || runningJobs() !== tasks) {
+        const stillKeep = new Set([...choices.filter(({ mode }) => mode === "keep"), ...nowWorking].map(({ threadId }) => threadId));
+        if (next) void openDeleteConfirm(next, page, stillKeep);
         return;
       }
       submitDelete(reset ? "conversation.reset" : "threads.delete", choices);
