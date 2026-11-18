@@ -491,3 +491,5 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   An isolated OpenCode run wrote again after the voice process was killed. Vizzo durably records the native
   process identity before dispatch and keeps affected writers unavailable until the native work has settled.
   An identity Vizzo cannot verify remains unconfirmed, with a reason shown to the user.
+- Index repair also checks user-facing flags on selected paths. Repair refuses when replacing a base entry would
+  clear assume-unchanged, skip-worktree, or intent-to-add state that the journal cannot account for.
