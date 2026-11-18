@@ -474,3 +474,5 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   This keeps a same-size edit visible after index installation. Selected commit bytes still come from the freeze.
 - Preparing an index may expand sparse-directory records to retain the original skip-worktree flags, including
   when a file in an excluded directory was recreated. Repository sparse-checkout settings are preserved.
+- The journal records cleanup intent before aborting or releasing locks. It records terminal `refused` or
+  `not-published` only after cleanup because startup skips terminal jobs and must still see a lock left by a crash.
