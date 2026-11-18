@@ -75,10 +75,10 @@ async function repository(format: "files" | "reftable") {
   const queueWriter = (id: string) => session.writers.queue({
     writer: { kind: "thread", id }, title: id, request: "Edit the file", folder: old, purpose: "request", harness: "codex",
   });
-  const edit = async (id: string, from: string, to: string) => {
+  const edit = async (id: string, from: string, to: string, observed = to) => {
     const writer = queueWriter(id);
     await writer.run(async () => {
-      put(selectedPath, to);
+      put(selectedPath, observed);
       writer.edits(id, "edit", [{ path: join(root, selectedPath), from, to }]);
     });
     await expect.poll(async () => (await session.writers.snapshot(project.id)).executions.find(({ executionId }) =>
@@ -100,6 +100,12 @@ function requestFor(review: ScanReview, jobId = "job"): CommitRequest {
 
 function gitOwners(view: Awaited<ReturnType<LedgerWorkerClient["observe"]>>) {
   return view.files.flatMap(({ hunks }) => hunks.map(({ ownership }) => ownership.owners));
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 describe.each(["files", "reftable"] as const)("durable Changes service on %s refs", (format) => {
@@ -208,6 +214,68 @@ it("claims a durable queued job only with the exact request and refuses duplicat
     .toMatchObject({ status: "refused", code: "duplicate-job" });
   expect(repo.git("rev-list", "--count", "HEAD").trim()).toBe("2");
 });
+
+it.each(["files", "reftable"] as const)("reattaches an independent pre-freeze patch reported during the %s pin", async (format) => {
+  const repo = await repository(format);
+  await repo.edit("A", base, onlyA);
+  const b = repo.queueWriter("B");
+  const wrote = deferred();
+  const report = deferred();
+  const run = b.run(async () => {
+    repo.put(selectedPath, onlyA.replace("three", "THREE"));
+    wrote.resolve();
+    await report.promise;
+    b.edits("B", "delayed", [{
+      path: join(repo.root, selectedPath),
+      patch: "@@ -1,5 +1,5 @@\n ONE\n blank a\n two\n blank b\n-three\n+THREE\n",
+    }]);
+  });
+  await wrote.promise;
+  const review = await repo.scanner.reviewProject(repo.project);
+  expect(review.view.components).toEqual(expect.arrayContaining([expect.objectContaining({ other: true })]));
+  const checkpoint = repo.ledger.checkpointCommit.bind(repo.ledger);
+  repo.ledger.checkpointCommit = async (record, proof) => {
+    await checkpoint(record, proof);
+    if (record.phase !== "publishing" || record.step !== "prepare-ref") return;
+    report.resolve();
+    await run;
+    await expect.poll(async () => (await repo.writers.snapshot(repo.project.id)).executions.find(({ executionId }) =>
+      executionId === b.id), { timeout: 10_000 }).toMatchObject({ phase: "settled", pending: true });
+  };
+  try {
+    expect(await repo.service.commit(repo.project, requestFor(review), review.scanAndFreeze)).toMatchObject({ status: "done" });
+    expect(repo.git("show", `HEAD:${selectedPath}`)).toBe(onlyA);
+    expect(gitOwners(await repo.ledger.observe(repo.project, [selectedPath]))).toEqual([[b.id]]);
+  } finally {
+    report.resolve();
+    await run;
+  }
+}, 90_000);
+
+it.each([
+  { format: "files", witness: true },
+  { format: "reftable", witness: true },
+  { format: "files", witness: false },
+] as const)("keeps an unexplained rollback Other and requires a disk witness ($format, $witness)", async ({ format, witness }) => {
+  const repo = await repository(format);
+  await repo.edit("A", base, onlyA);
+  const review = await repo.scanner.reviewProject(repo.project);
+  const after = base.replace("three", "THREE");
+  const onDisk = witness ? after : base.replace("three", "manual");
+  const checkpoint = repo.ledger.checkpointCommit.bind(repo.ledger);
+  let b: string | undefined;
+  repo.ledger.checkpointCommit = async (record, proof) => {
+    await checkpoint(record, proof);
+    if (record.phase !== "index-ready" || record.step !== "install") return;
+    repo.put(selectedPath, base);
+    b = await repo.edit("B", base, after, onDisk);
+  };
+  expect(await repo.service.commit(repo.project, requestFor(review), review.scanAndFreeze)).toMatchObject({ status: "done" });
+  expect(repo.git("show", `HEAD:${selectedPath}`)).toBe(onlyA);
+  expect(repo.git("show", `:${selectedPath}`)).toBe(onlyA);
+  expect(readFileSync(join(repo.root, selectedPath), "utf8")).toBe(onDisk);
+  expect(gitOwners(await repo.ledger.observe(repo.project, [selectedPath]))).toEqual([[null], [witness ? b : null]]);
+}, 90_000);
 
 it("gates a competing voice process before recovery or observation", async () => {
   const repo = await repository("files");
@@ -332,7 +400,7 @@ describe.each(["files", "reftable"] as const)("restart from durable %s checkpoin
     const restarted = repo.connect();
     const jobs = await restarted.service.jobs(repo.project.id);
     expect(jobs).toMatchObject([{ jobId: "interrupted", status: "indeterminate", commit: published }]);
-    await expect(restarted.ledger.trackedPaths(repo.project)).rejects.toThrow("check git log");
+    await expect(restarted.ledger.trackedPaths(repo.project)).rejects.toThrow(/check git log/i);
     await restarted.scanner.setProject(repo.old);
     expect(restarted.scanner.status()).toMatchObject({ kind: "unavailable", project: { id: repo.project.id } });
     expect(repo.git("show", `:${selectedPath}`)).toBe(base);
