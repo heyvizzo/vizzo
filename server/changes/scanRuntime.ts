@@ -27,7 +27,7 @@ export interface ScanWriterSource {
   snapshot(projectId: string): Promise<ChangeComponentInput["writers"]>;
 }
 
-type ScanGroupState = Pick<ChangeComponentInput, "closedWriters" | "continuedExecutionIds" | "notices">;
+export type ScanGroupState = Pick<ChangeComponentInput, "closedGroups" | "notices">;
 
 export interface ScanRuntimePorts {
   ledger: ScanLedgerSource;
@@ -75,7 +75,9 @@ interface ActiveProject {
   binding?: { readonly key: string };
 }
 
-class ScanProjectChangedError extends Error {
+class GitScanUnavailableError extends Error {}
+
+class ScanProjectChangedError extends GitScanUnavailableError {
   constructor() { super("The served Git project changed: review again"); }
 }
 
@@ -134,6 +136,10 @@ function reconcile(gitEntries: GitScanEntry[], ledger: LedgerView): Pick<ChangeC
 function isHeadChange(error: unknown): boolean {
   return error instanceof GitScanBaseChangedError ||
     (error instanceof Error && error.message === "Git HEAD moved while updating the source-control ledger");
+}
+
+export function isGitScanUnavailable(error: unknown): boolean {
+  return error instanceof GitScanUnavailableError || isHeadChange(error);
 }
 
 function reason(error: unknown): string {
@@ -374,7 +380,9 @@ export class ScanRuntime {
   private async head(project: Readonly<LedgerProject>): Promise<GitScanHead> {
     try { return await captureGitHead(project.root); }
     catch (error) {
-      if (!(error instanceof GitPublicationError) || error.code !== "detached-head") throw error;
+      if (!(error instanceof GitPublicationError) || error.code !== "detached-head") {
+        throw new GitScanUnavailableError(reason(error), { cause: error });
+      }
       const { head } = await this.ports.ledger.observe(project, []);
       if (head.branch !== null) throw new GitScanBaseChangedError();
       return head;
@@ -386,7 +394,10 @@ export class ScanRuntime {
     const head = captured ?? await this.head(project);
     const scope = { worktreeRoot: project.root, projectDir: project.scope };
     const tracked = (await this.ports.ledger.trackedPaths(project)).filter((path) => belongsToScope(project, path));
-    const git = await scanGitChanges(scope, head, tracked);
+    const git = await scanGitChanges(scope, head, tracked).catch((error: unknown) => {
+      if (isHeadChange(error)) throw error;
+      throw new GitScanUnavailableError(reason(error), { cause: error });
+    });
     const paths = new Set(tracked);
     for (const entry of git.entries) {
       if (entry.path && belongsToScope(project, entry.path)) paths.add(entry.path);

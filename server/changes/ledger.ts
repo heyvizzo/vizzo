@@ -1,4 +1,4 @@
-import { relative, sep } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { combine } from "./annotations.ts";
 import { boundVersions, changeBase, compact, insert, inspect, newChain, observe, place, tip, type Chain, type FileEvidence } from "./chain.ts";
@@ -73,6 +73,27 @@ export type CommitJobSummary = Pick<CommitJobRecord, "version" | "project" | "ou
   canFix: boolean;
 };
 
+export interface ClosedThread {
+  project: LedgerProject;
+  threadId: string;
+  title: string;
+  requests: readonly string[];
+  summary?: string;
+  reason?: string;
+  notice?: boolean;
+  commitJobId?: string;
+  removalPending: boolean;
+}
+
+export type ThreadDeleteHandoff = Omit<ClosedThread, "commitJobId" | "removalPending"> & { request?: CommitRequest };
+export interface ThreadDeleteContext {
+  threadId: string;
+  project?: LedgerProject;
+  closed?: ClosedThread;
+}
+
+export class LedgerCommitPinnedError extends Error {}
+
 interface ProjectState {
   head: LedgerHead;
   headMoved: boolean;
@@ -83,6 +104,7 @@ interface ProjectState {
   notices: Record<string, string>;
   writerRecords?: Record<string, WriterExecutionRecord>;
   commitJobs?: Record<string, CommitJobRecord>;
+  closedThreads?: Record<string, ClosedThread>;
   pinnedJob?: string;
 }
 
@@ -104,6 +126,11 @@ export interface LedgerView {
 function fileKey(path: string): string { return "/" + path; }
 function executionKey(id: string): string { return JSON.stringify(id); }
 function caseKey(path: string): string { return path.normalize("NFC").toUpperCase().normalize("NFC"); }
+
+function contains(parent: string, child: string): boolean {
+  const path = relative(parent, child);
+  return path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+}
 
 function newState(head: LedgerHead): ProjectState {
   return { head, headMoved: false, files: {}, receipts: {}, executions: {}, moves: {}, notices: {} };
@@ -296,6 +323,10 @@ function wholeWorktree(project: LedgerProject): LedgerProject {
 
 function jobKey(id: string): string { return JSON.stringify(id); }
 
+function queuedCommit(project: LedgerProject, request: CommitRequest): CommitJobRecord {
+  return { version: 1, project, journal: { project, request, phase: "queued", pid: process.pid } };
+}
+
 function isTerminal({ phase }: CommitJobRecord["journal"]): boolean {
   return phase === "done" || phase === "not-published" || phase === "refused";
 }
@@ -330,7 +361,7 @@ function assertUnpinned(state: ProjectState): void {
   if (state.pinnedJob === undefined) return;
   const job = currentJob(state, state.pinnedJob);
   if (!job) throw new Error("The source-control commit pin has no journal");
-  throw new Error(jobReason(job) ?? "Vizzo is settling a source-control commit for this project");
+  throw new LedgerCommitPinnedError(jobReason(job) ?? "Vizzo is settling a source-control commit for this project");
 }
 
 function rebaseState(
@@ -672,9 +703,100 @@ export class LedgerStore {
     const { state, save } = this.loadProject(project);
     const key = jobKey(request.jobId);
     if (request.projectId !== project.id || currentJob(state, key)) return false;
-    (state.commitJobs ??= {})[key] = {
-      version: 1, project, journal: { project, request, phase: "queued", pid: process.pid },
-    };
+    (state.commitJobs ??= {})[key] = queuedCommit(project, request);
+    save();
+    return true;
+  }
+
+  threadDeleteContexts(targets: readonly { threadId: string; folder: string | null }[]): ThreadDeleteContext[] {
+    const all = this.persistence.load();
+    const contexts = new Map<string, ThreadDeleteContext & { folder: string | null }>(
+      targets.map(({ threadId, folder }) => [threadId, { threadId, folder }]));
+    for (const state of Object.values(all)) {
+      for (const closed of Object.values(state.closedThreads ?? {})) {
+        const context = contexts.get(closed.threadId);
+        if (context) context.closed = closed;
+      }
+      for (const [key, record] of Object.entries(state.writerRecords ?? {})) {
+        if (record.writer.kind !== "thread") continue;
+        const context = contexts.get(record.writer.id);
+        const pinned = state.executions[key];
+        if (!context || context.closed || !pinned || pinned.servedDir !== context.folder) continue;
+        if (context.project && !isDeepStrictEqual(context.project, pinned)) {
+          throw new Error("A thread's source-control project changed between executions");
+        }
+        context.project = pinned;
+      }
+    }
+    return [...contexts.values()].map(({ threadId, closed, project }) => ({ threadId, closed, project: closed?.project ?? project }));
+  }
+
+  /** One journal replacement covers every group and queued request before any thread can be removed. */
+  handoffThreadDeletes(handoffs: readonly ThreadDeleteHandoff[]): { projectIds: string[]; jobIds: string[] } {
+    const all = this.persistence.load();
+    const inserted = new Set<string>();
+    const jobIds = [];
+    for (const { request, ...group } of handoffs) {
+      const { project, threadId } = group;
+      const key = executionKey(threadId);
+      if (Object.values(all).some((state) => state.closedThreads?.[key])) continue;
+      this.persistence.assertExternal(project.id, [project.root, project.gitDir, project.commonDir]);
+      const state = all[project.id] ??= newState(readLedgerHead(project));
+      if (request) {
+        const writerId = changeWriterId({ kind: "thread", id: threadId });
+        if (request.projectId !== project.id || request.selection.kind !== "delete" || request.selection.writerId !== writerId ||
+            request.writerIds.length !== 1 || request.writerIds[0] !== writerId || currentJob(state, jobKey(request.jobId))) {
+          throw new Error("Invalid thread delete commit request");
+        }
+        (state.commitJobs ??= {})[jobKey(request.jobId)] = queuedCommit(project, request);
+        jobIds.push(request.jobId);
+      }
+      (state.closedThreads ??= {})[key] = { ...group, commitJobId: request?.jobId, removalPending: true };
+      inserted.add(project.id);
+    }
+    if (inserted.size) this.persistence.save(all);
+    return { projectIds: [...inserted], jobIds };
+  }
+
+  pendingThreadDeletes(): string[] {
+    return Object.values(this.persistence.load()).flatMap((state) => Object.values(state.closedThreads ?? {})
+      .filter(({ removalPending }) => removalPending).map(({ threadId }) => threadId));
+  }
+
+  completeThreadDeletes(threadIds: readonly string[]): void {
+    const wanted = new Set(threadIds.map(executionKey));
+    const all = this.persistence.load();
+    let changed = false;
+    for (const state of Object.values(all)) {
+      for (const key of wanted) {
+        const closed = state.closedThreads?.[key];
+        if (!closed?.removalPending) continue;
+        closed.removalPending = false;
+        changed = true;
+      }
+    }
+    if (changed) this.persistence.save(all);
+  }
+
+  closedThreads(project: LedgerProject): (ClosedThread & { commitReason?: string })[] {
+    this.persistence.content(project.id);
+    const state = this.persistence.load()[project.id];
+    return Object.values(state?.closedThreads ?? {}).flatMap((group) => {
+      if (!contains(project.scope, group.project.scope) && !contains(group.project.scope, project.scope)) return [];
+      const job = group.commitJobId && currentJob(state, jobKey(group.commitJobId));
+      const commitReason = job && job.journal.phase !== "queued" ? jobReason(job) : undefined;
+      return [{ ...group, commitReason }];
+    });
+  }
+
+  /** Revise the message or carry reviewed components after a proved publication, keeping the job and writer. */
+  carryThreadDeleteCommit(key: CommitJobKey, expected: CommitRequest, request: CommitRequest): boolean {
+    const { job, state, id, save } = this.loadCommit(key);
+    if (job.journal.phase !== "queued" || expected.selection.kind !== "delete" ||
+        !isDeepStrictEqual(job.journal.request, expected) ||
+        !isDeepStrictEqual({ ...request, generation: expected.generation, componentIds: expected.componentIds, message: expected.message }, expected) ||
+        expected.componentIds.length !== request.componentIds.length) return false;
+    state.commitJobs![id] = { ...job, journal: { ...job.journal, request } };
     save();
     return true;
   }

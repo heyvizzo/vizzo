@@ -194,7 +194,7 @@ describe("change components", () => {
   it("projects registry state across executions and refuses automatic deletion of incomplete work", () => {
     const path = "example";
     const another = "other";
-    const records = [record("a"), record("a2", writerA, { outcome: "stopped" }), record("b", writerB)];
+    const records = [record("a"), record("a2", writerA, { outcome: "stopped", nativeSessionId: "saved-A" }), record("b", writerB)];
     const files = [evidence(path, before, after, [changed(0, ["a"]), changed(2, ["a2", "b"])]),
       evidence(another, one, two, [changed(0, ["b"])])];
     const entries = [gitEntry(path, before, after), gitEntry(another, one, two)];
@@ -205,7 +205,15 @@ describe("change components", () => {
     expect(groupB!.incomplete).toBeUndefined();
     expect(select(graph, groupA!.own, [a], { kind: "delete", writerId: a })).toBeNull();
     expect(select(graph, groupA!.tied, [a, b])!.components[0]!.incomplete).toBe(true);
-    const continued = buildChangeComponents({ ...setup, continuedExecutionIds: ["a2"], closedWriters: [writerA] });
+    const unproved = buildChangeComponents({
+      ...setup, writers: { projectId: "project", executions: [...records, record("a3", writerA, { continuesExecutionId: "a2" })] },
+    });
+    expect(unproved.view.groups[0]!.incomplete).toBe(true);
+    const continued = buildChangeComponents({
+      ...setup,
+      writers: { projectId: "project", executions: [...records, record("a3", writerA, { continuesExecutionId: "a2", nativeSessionId: "saved-A" })] },
+      closedGroups: [{ writer: writerA, title: "Deleted A" }],
+    });
     expect(continued.view.groups[0]!.state).toBe("closed");
     expect(select(continued, continued.view.groups[0]!.own, [a], { kind: "delete", writerId: a })).toBeTruthy();
     const pending = buildChangeComponents({ ...setup, writers: {
