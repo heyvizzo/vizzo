@@ -1,0 +1,964 @@
+{
+  "codexVersion": "0.170.0",
+  "notes": [
+    "Recorded from the real stdio app server running one native apply_patch call per turn in a disposable directory, with gpt-6-luna.",
+    "Paths and move footers use /fixture/project in place of each temporary project root. Unrelated notifications and most response fields are omitted. All other fileChange fields and content bytes are retained.",
+    "Disk maps show UTF-8 strings read from the disposable project before/after the tool. Their absence is represented by an omitted path.",
+    "The reconnect restarted the app server, then called thread/resume. The resume response retains the session, turn and fileChange fields. The history arrived in that response.",
+    "The failed patch searched for a nonexistent line before any write. The partial patch added first.txt, then failed to add blocker/last.txt because blocker was a file.",
+    "The case-only move and the updates to case aliases ran on the host’s case-insensitive volume. The move removed the file, and both update paths referred to one file."
+  ],
+  "exactBatch": {
+    "wire": [
+      {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-9b6355fb-5a8f-428b-9a75-c415aa435e42",
+            "changes": [
+              {
+                "path": "/fixture/project/delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": "delete exactly\r\nlast"
+              },
+              {
+                "path": "/fixture/project/empty-delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": ""
+              },
+              {
+                "path": "/fixture/project/long.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -2,3 +2,3 @@\n line 1\n-line 2\n+TWO\n line 3\n@@ -75,3 +75,3 @@\n line 74\n-line 75\n+SEVENTY FIVE\n line 76\n"
+              },
+              {
+                "path": "/fixture/project/update.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+              }
+            ],
+            "status": "inProgress",
+            "startedAtMs": 1795021240796,
+            "completedAtMs": null
+          },
+          "threadId": "01a1ef9a-66b7-71a1-8170-370a9b06dc63",
+          "turnId": "01a1ef9a-6840-7001-979e-3b6e8119ac19",
+          "startedAtMs": 1795021240796
+        },
+        "emittedAtMs": 1795021240796
+      },
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-9b6355fb-5a8f-428b-9a75-c415aa435e42",
+            "changes": [
+              {
+                "path": "/fixture/project/delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": "delete exactly\r\nlast"
+              },
+              {
+                "path": "/fixture/project/empty-delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": ""
+              },
+              {
+                "path": "/fixture/project/long.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -2,3 +2,3 @@\n line 1\n-line 2\n+TWO\n line 3\n@@ -75,3 +75,3 @@\n line 74\n-line 75\n+SEVENTY FIVE\n line 76\n"
+              },
+              {
+                "path": "/fixture/project/update.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021240796,
+            "completedAtMs": 1795021240797
+          },
+          "threadId": "01a1ef9a-66b7-71a1-8170-370a9b06dc63",
+          "turnId": "01a1ef9a-6840-7001-979e-3b6e8119ac19",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021240797
+        },
+        "emittedAtMs": 1795021240799
+      }
+    ],
+    "disk": {
+      "before": {
+        "delete.txt": "delete exactly\r\nlast",
+        "empty-delete.txt": "",
+        "update.txt": "alpha\nbeta\ngamma\n",
+        "long.txt": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nline 75\nline 76\nline 77\nline 78\nline 79\n"
+      },
+      "after": {
+        "long.txt": "line 0\nline 1\nTWO\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nSEVENTY FIVE\nline 76\nline 77\nline 78\nline 79\n",
+        "update.txt": "alpha\nBETA\ngamma\n"
+      }
+    },
+    "resumeResponse": {
+      "id": 2,
+      "result": {
+        "thread": {
+          "id": "01a1ef9a-66b7-71a1-8170-370a9b06dc63",
+          "turns": [
+            {
+              "id": "01a1ef9a-6840-7001-979e-3b6e8119ac19",
+              "items": [
+                {
+                  "type": "fileChange",
+                  "id": "exec-9b6355fb-5a8f-428b-9a75-c415aa435e42",
+                  "changes": [
+                    {
+                      "path": "/fixture/project/delete.txt",
+                      "kind": {
+                        "type": "delete"
+                      },
+                      "diff": "delete exactly\r\nlast"
+                    },
+                    {
+                      "path": "/fixture/project/empty-delete.txt",
+                      "kind": {
+                        "type": "delete"
+                      },
+                      "diff": ""
+                    },
+                    {
+                      "path": "/fixture/project/long.txt",
+                      "kind": {
+                        "type": "update",
+                        "move_path": null
+                      },
+                      "diff": "@@ -2,3 +2,3 @@\n line 1\n-line 2\n+TWO\n line 3\n@@ -75,3 +75,3 @@\n line 74\n-line 75\n+SEVENTY FIVE\n line 76\n"
+                    },
+                    {
+                      "path": "/fixture/project/update.txt",
+                      "kind": {
+                        "type": "update",
+                        "move_path": null
+                      },
+                      "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+                    }
+                  ],
+                  "status": "completed",
+                  "startedAtMs": 1795021240796,
+                  "completedAtMs": 1795021240797
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "unwitnessedInsertion": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-1c20b4a6-0014-434c-a4ec-2c0c116dddd9",
+            "changes": [
+              {
+                "path": "/fixture/project/delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": "delete exactly\r\nlast"
+              },
+              {
+                "path": "/fixture/project/empty-delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": ""
+              },
+              {
+                "path": "/fixture/project/empty-update.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -0,0 +1 @@\n+new first line\n"
+              },
+              {
+                "path": "/fixture/project/long.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -2,3 +2,3 @@\n line 1\n-line 2\n+TWO\n line 3\n@@ -75,3 +75,3 @@\n line 74\n-line 75\n+SEVENTY FIVE\n line 76\n"
+              },
+              {
+                "path": "/fixture/project/update.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021162174,
+            "completedAtMs": 1795021162176
+          },
+          "threadId": "01a1ef99-1283-7812-824b-c22e35beb90b",
+          "turnId": "01a1ef99-1a71-76e2-bc8f-e3322c6c6958",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021162176
+        },
+        "emittedAtMs": 1795021162177
+      }
+    ],
+    "disk": {
+      "before": {
+        "delete.txt": "delete exactly\r\nlast",
+        "empty-delete.txt": "",
+        "update.txt": "alpha\nbeta\ngamma\n",
+        "empty-update.txt": "",
+        "long.txt": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nline 75\nline 76\nline 77\nline 78\nline 79\n"
+      },
+      "after": {
+        "empty-update.txt": "new first line\n",
+        "long.txt": "line 0\nline 1\nTWO\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nSEVENTY FIVE\nline 76\nline 77\nline 78\nline 79\n",
+        "update.txt": "alpha\nBETA\ngamma\n"
+      }
+    }
+  },
+  "endings": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-86ceddca-d6e4-440b-bb39-f5793f5653f4",
+            "changes": [
+              {
+                "path": "/fixture/project/crlf.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\r\n-beta\r\n+BETA\r\n last\r\n"
+              },
+              {
+                "path": "/fixture/project/eof-end.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,2 +1,2 @@\n alpha\n-last\n\\ No newline at end of file\n+LAST\n"
+              },
+              {
+                "path": "/fixture/project/eof.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n-last\n\\ No newline at end of file\n+BETA\n+last\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021041908,
+            "completedAtMs": 1795021041909
+          },
+          "threadId": "01a1ef97-5829-7410-9f9b-2ca4a4d3df88",
+          "turnId": "01a1ef97-5b6a-7ab1-863d-62102ead2aee",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021041909
+        },
+        "emittedAtMs": 1795021041909
+      }
+    ],
+    "disk": {
+      "before": {
+        "eof.txt": "alpha\nbeta\nlast",
+        "eof-end.txt": "alpha\nlast",
+        "crlf.txt": "alpha\r\nbeta\r\nlast\r\n"
+      },
+      "after": {
+        "crlf.txt": "alpha\r\nBETA\r\nlast\r\n",
+        "eof-end.txt": "alpha\nLAST\n",
+        "eof.txt": "alpha\nBETA\nlast\n"
+      }
+    }
+  },
+  "mixedUnsupported": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-ea22b005-4a95-4f61-a933-8f8be3df0a1d",
+            "changes": [
+              {
+                "path": "/fixture/project/add.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "add exactly\n\nlast\n"
+              },
+              {
+                "path": "/fixture/project/delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": "delete exactly\nlast"
+              },
+              {
+                "path": "/fixture/project/empty-add.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": ""
+              },
+              {
+                "path": "/fixture/project/empty-delete.txt",
+                "kind": {
+                  "type": "delete"
+                },
+                "diff": ""
+              },
+              {
+                "path": "/fixture/project/update.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021041636,
+            "completedAtMs": 1795021041637
+          },
+          "threadId": "01a1ef97-5829-7ea0-b8ca-c99dd06de8cd",
+          "turnId": "01a1ef97-5af4-7860-9b5e-94f9ea931a92",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021041637
+        },
+        "emittedAtMs": 1795021041638
+      }
+    ],
+    "disk": {
+      "before": {
+        "delete.txt": "delete exactly\nlast",
+        "empty-delete.txt": "",
+        "update.txt": "alpha\nbeta\ngamma\n"
+      },
+      "after": {
+        "add.txt": "add exactly\n\nlast\n",
+        "empty-add.txt": "",
+        "update.txt": "alpha\nBETA\ngamma\n"
+      }
+    }
+  },
+  "addNew": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-ff466976-b8b4-4602-84c6-f192499d7c12",
+            "changes": [
+              {
+                "path": "/fixture/project/same.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "written result\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021160416,
+            "completedAtMs": 1795021160421
+          },
+          "threadId": "01a1ef99-1355-7711-8215-44fd74d6d9b2",
+          "turnId": "01a1ef99-190e-7e23-afe9-f5843cbd68e2",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021160421
+        },
+        "emittedAtMs": 1795021160422
+      }
+    ],
+    "disk": {
+      "before": {},
+      "after": {
+        "same.txt": "written result\n"
+      }
+    }
+  },
+  "addOverwrite": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-8015d4f2-4cc0-4848-9ba7-7de027861862",
+            "changes": [
+              {
+                "path": "/fixture/project/same.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "written result\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021164027,
+            "completedAtMs": 1795021164027
+          },
+          "threadId": "01a1ef99-1285-7de3-9328-2f3adbf0833b",
+          "turnId": "01a1ef99-18ec-7fb0-90e0-2ba6ca33f7cf",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021164027
+        },
+        "emittedAtMs": 1795021164028
+      }
+    ],
+    "disk": {
+      "before": {
+        "same.txt": "old result\n"
+      },
+      "after": {
+        "same.txt": "written result\n"
+      }
+    }
+  },
+  "moveNew": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-54e59126-e8a3-4467-bc94-4e201e565da1",
+            "changes": [
+              {
+                "path": "/fixture/project/same.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": "/fixture/project/destination.txt"
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n\n\nMoved to: /fixture/project/destination.txt"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021161836,
+            "completedAtMs": 1795021161839
+          },
+          "threadId": "01a1ef99-12f4-7600-93a0-31bc96397309",
+          "turnId": "01a1ef99-1886-7ac1-87f0-2044c2b72923",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021161839
+        },
+        "emittedAtMs": 1795021161841
+      }
+    ],
+    "disk": {
+      "before": {
+        "same.txt": "alpha\nbeta\ngamma\n"
+      },
+      "after": {
+        "destination.txt": "alpha\nBETA\ngamma\n"
+      }
+    }
+  },
+  "moveOverwrite": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-249c489b-9955-4729-8a82-c3451a83a73d",
+            "changes": [
+              {
+                "path": "/fixture/project/same.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": "/fixture/project/destination.txt"
+                },
+                "diff": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n\n\nMoved to: /fixture/project/destination.txt"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021161863,
+            "completedAtMs": 1795021161877
+          },
+          "threadId": "01a1ef99-13a4-7730-9b75-9c1e765182d9",
+          "turnId": "01a1ef99-1912-7282-a52b-a06bf03fa3e4",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021161877
+        },
+        "emittedAtMs": 1795021161878
+      }
+    ],
+    "disk": {
+      "before": {
+        "same.txt": "alpha\nbeta\ngamma\n",
+        "destination.txt": "old destination\n"
+      },
+      "after": {
+        "destination.txt": "alpha\nBETA\ngamma\n"
+      }
+    }
+  },
+  "pureMove": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-e9a10280-d468-4cd2-8525-73fa836f9792",
+            "changes": [
+              {
+                "path": "/fixture/project/pure.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": "/fixture/project/pure-destination.txt"
+                },
+                "diff": "\n\nMoved to: /fixture/project/pure-destination.txt"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021161156,
+            "completedAtMs": 1795021161159
+          },
+          "threadId": "01a1ef99-13b4-78f3-abec-7c568666b05f",
+          "turnId": "01a1ef99-1c2d-72c0-ba2c-27d2a5671bf3",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021161159
+        },
+        "emittedAtMs": 1795021161160
+      }
+    ],
+    "disk": {
+      "before": {
+        "pure.txt": "pure\n"
+      },
+      "after": {
+        "pure-destination.txt": "pure\n"
+      }
+    }
+  },
+  "caseOnlyMove": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-411ad3fe-201f-4fcd-92ec-5dc39b472ca1",
+            "changes": [
+              {
+                "path": "/fixture/project/Case.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": "/fixture/project/case.txt"
+                },
+                "diff": "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n\n\nMoved to: /fixture/project/case.txt"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021161863,
+            "completedAtMs": 1795021161878
+          },
+          "threadId": "01a1ef99-1287-7103-b780-e6eae0b14df1",
+          "turnId": "01a1ef99-1a4b-7c82-a4a1-d99505750d31",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021161878
+        },
+        "emittedAtMs": 1795021161897
+      }
+    ],
+    "disk": {
+      "before": {
+        "Case.txt": "one\ntwo\nthree\n"
+      },
+      "after": {}
+    }
+  },
+  "caseAliasedUpdates": {
+    "wire": [
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-9648ca03-3613-455d-8c82-6601ed9e807b",
+            "changes": [
+              {
+                "path": "/fixture/project/Alias.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -1,2 +1,2 @@\n-alpha\n+FIRST\n beta\n"
+              },
+              {
+                "path": "/fixture/project/alias.txt",
+                "kind": {
+                  "type": "update",
+                  "move_path": null
+                },
+                "diff": "@@ -2,2 +2,2 @@\n beta\n-gamma\n+LAST\n"
+              }
+            ],
+            "status": "completed",
+            "startedAtMs": 1795021160970,
+            "completedAtMs": 1795021161026
+          },
+          "threadId": "01a1ef99-1285-7092-8ef8-c82e45464e80",
+          "turnId": "01a1ef99-19d9-72a0-b8e6-c249c733146d",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021161026
+        },
+        "emittedAtMs": 1795021161029
+      }
+    ],
+    "disk": {
+      "before": {
+        "Alias.txt": "alpha\nbeta\ngamma\n"
+      },
+      "after": {
+        "Alias.txt": "FIRST\nbeta\nLAST\n"
+      }
+    }
+  },
+  "failedBeforeLifecycle": {
+    "wire": [
+      {
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a1ef99-1323-7a20-8232-ee4fbd248a64",
+          "turn": {
+            "id": "01a1ef99-18db-7ef1-8246-4c30a41a68a1",
+            "rootTurnId": "01a1ef99-18db-7ef1-8246-4c30a41a68a1",
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": 1795021150,
+            "completedAt": null,
+            "durationMs": null
+          }
+        },
+        "emittedAtMs": 1795021151640
+      },
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1ef99-1323-7a20-8232-ee4fbd248a64",
+          "turn": {
+            "id": "01a1ef99-18db-7ef1-8246-4c30a41a68a1",
+            "rootTurnId": "01a1ef99-18db-7ef1-8246-4c30a41a68a1",
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1795021150,
+            "completedAt": 1795021162,
+            "durationMs": 11906
+          }
+        },
+        "emittedAtMs": 1795021162383
+      }
+    ],
+    "disk": {
+      "before": {
+        "existing.txt": "existing\n"
+      },
+      "after": {
+        "existing.txt": "existing\n"
+      }
+    },
+    "resumeResponse": {
+      "id": 2,
+      "result": {
+        "thread": {
+          "id": "01a1ef99-1323-7a20-8232-ee4fbd248a64",
+          "turns": [
+            {
+              "id": "01a1ef99-18db-7ef1-8246-4c30a41a68a1",
+              "items": []
+            }
+          ]
+        }
+      }
+    }
+  },
+  "partialWrite": {
+    "wire": [
+      {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-4733e17a-45bc-4018-8d33-19d5600d350d",
+            "changes": [
+              {
+                "path": "/fixture/project/blocker/last.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "this cannot be created\n"
+              },
+              {
+                "path": "/fixture/project/first.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "first written\n"
+              }
+            ],
+            "status": "inProgress",
+            "startedAtMs": 1795021040821,
+            "completedAtMs": null
+          },
+          "threadId": "01a1ef97-5849-73d1-bf4e-e03c50d5af52",
+          "turnId": "01a1ef97-5b32-76c1-9dea-c860c15cd36f",
+          "startedAtMs": 1795021040821
+        },
+        "emittedAtMs": 1795021040821
+      },
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-4733e17a-45bc-4018-8d33-19d5600d350d",
+            "changes": [
+              {
+                "path": "/fixture/project/blocker/last.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "this cannot be created\n"
+              },
+              {
+                "path": "/fixture/project/first.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "first written\n"
+              }
+            ],
+            "status": "failed",
+            "startedAtMs": 1795021040821,
+            "completedAtMs": 1795021040822
+          },
+          "threadId": "01a1ef97-5849-73d1-bf4e-e03c50d5af52",
+          "turnId": "01a1ef97-5b32-76c1-9dea-c860c15cd36f",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021040822
+        },
+        "emittedAtMs": 1795021040822
+      },
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1ef97-5849-73d1-bf4e-e03c50d5af52",
+          "turn": {
+            "id": "01a1ef97-5b32-76c1-9dea-c860c15cd36f",
+            "rootTurnId": "01a1ef97-5b32-76c1-9dea-c860c15cd36f",
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1795021036,
+            "completedAt": 1795021042,
+            "durationMs": 6089
+          }
+        },
+        "emittedAtMs": 1795021042431
+      }
+    ],
+    "disk": {
+      "before": {
+        "blocker": "this is a file\n"
+      },
+      "after": {
+        "blocker": "this is a file\n",
+        "first.txt": "first written\n"
+      }
+    }
+  },
+  "cancelled": {
+    "wire": [
+      {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-f44d3ae5-fe9a-46cb-9ddc-07feab0640d2",
+            "changes": [
+              {
+                "path": "/fixture/project/cancel.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "never if cancelled\n"
+              }
+            ],
+            "status": "inProgress",
+            "startedAtMs": 1795021040818,
+            "completedAtMs": null
+          },
+          "threadId": "01a1ef97-5848-7ee0-8296-fbfe97f360f4",
+          "turnId": "01a1ef97-5b87-7fa1-bd98-bb354c29884c",
+          "startedAtMs": 1795021040818
+        },
+        "emittedAtMs": 1795021040819
+      },
+      {
+        "method": "item/fileChange/requestApproval",
+        "id": 0,
+        "params": {
+          "threadId": "01a1ef97-5848-7ee0-8296-fbfe97f360f4",
+          "turnId": "01a1ef97-5b87-7fa1-bd98-bb354c29884c",
+          "itemId": "exec-f44d3ae5-fe9a-46cb-9ddc-07feab0640d2",
+          "startedAtMs": 1795021040820,
+          "reason": null,
+          "grantRoot": null
+        }
+      },
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1ef97-5848-7ee0-8296-fbfe97f360f4",
+          "turn": {
+            "id": "01a1ef97-5b87-7fa1-bd98-bb354c29884c",
+            "rootTurnId": "01a1ef97-5b87-7fa1-bd98-bb354c29884c",
+            "itemsView": "notLoaded",
+            "status": "interrupted",
+            "error": null,
+            "startedAt": 1795021036,
+            "completedAt": 1795021040,
+            "durationMs": 4488
+          }
+        },
+        "emittedAtMs": 1795021040925
+      }
+    ],
+    "disk": {
+      "before": {},
+      "after": {}
+    }
+  },
+  "declined": {
+    "wire": [
+      {
+        "method": "item/started",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-659dcb74-806e-4568-9be2-e4c00dfb02f0",
+            "changes": [
+              {
+                "path": "/fixture/project/decline.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "never if declined\n"
+              }
+            ],
+            "status": "inProgress",
+            "startedAtMs": 1795021159790,
+            "completedAtMs": null
+          },
+          "threadId": "01a1ef99-140e-7db2-b0cd-f293880f6a48",
+          "turnId": "01a1ef99-19c1-77a0-b63e-a8e1de787529",
+          "startedAtMs": 1795021159790
+        },
+        "emittedAtMs": 1795021159792
+      },
+      {
+        "method": "item/fileChange/requestApproval",
+        "id": 0,
+        "params": {
+          "threadId": "01a1ef99-140e-7db2-b0cd-f293880f6a48",
+          "turnId": "01a1ef99-19c1-77a0-b63e-a8e1de787529",
+          "itemId": "exec-659dcb74-806e-4568-9be2-e4c00dfb02f0",
+          "startedAtMs": 1795021159795,
+          "reason": null,
+          "grantRoot": null
+        }
+      },
+      {
+        "method": "item/completed",
+        "params": {
+          "item": {
+            "type": "fileChange",
+            "id": "exec-659dcb74-806e-4568-9be2-e4c00dfb02f0",
+            "changes": [
+              {
+                "path": "/fixture/project/decline.txt",
+                "kind": {
+                  "type": "add"
+                },
+                "diff": "never if declined\n"
+              }
+            ],
+            "status": "declined",
+            "startedAtMs": 1795021159790,
+            "completedAtMs": 1795021159807
+          },
+          "threadId": "01a1ef99-140e-7db2-b0cd-f293880f6a48",
+          "turnId": "01a1ef99-19c1-77a0-b63e-a8e1de787529",
+          "contentTokenCount": null,
+          "completedAtMs": 1795021159807
+        },
+        "emittedAtMs": 1795021159808
+      },
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a1ef99-140e-7db2-b0cd-f293880f6a48",
+          "turn": {
+            "id": "01a1ef99-19c1-77a0-b63e-a8e1de787529",
+            "rootTurnId": "01a1ef99-19c1-77a0-b63e-a8e1de787529",
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1795021150,
+            "completedAt": 1795021160,
+            "durationMs": 9986
+          }
+        },
+        "emittedAtMs": 1795021160679
+      }
+    ],
+    "disk": {
+      "before": {},
+      "after": {}
+    }
+  }
+}
