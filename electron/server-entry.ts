@@ -16,6 +16,8 @@ import { threadStore } from "../server/threads/store.ts";
 import { threadsFile } from "../server/threads/persist.ts";
 import { onActivity, runningTasks } from "../server/activity.ts";
 import { changesService } from "../server/changes/changesService.ts";
+import { changesStatus, subscribeChangesStatus } from "../server/changes/http.ts";
+import type { ChangesStatus } from "../shared/changes.ts";
 
 function useProject(dir: string | null) {
   setProjectDir(dir);
@@ -30,12 +32,24 @@ threadStore().persistTo(threadsFile());
 await changesService().restore().catch((error) => console.warn("[changes] could not recover source-control state", error));
 const running = await startServer(Number(process.env.PORT ?? 0), { host: "127.0.0.1" });
 process.parentPort.postMessage({ type: "ready", port: running.port });
+let changesRequest = 0;
+function publishChangesStatus(status: ChangesStatus) {
+  process.parentPort.postMessage({ type: "changes-status", status, changesRequest });
+}
+subscribeChangesStatus(changesService(), publishChangesStatus);
 // What's working, for the quit prompt and finishing in the background (electron/main.ts, "quitting").
 onActivity((c) => process.parentPort.postMessage({ type: "activity", ...c }));
 process.parentPort.postMessage({ type: "activity", running: runningTasks() });
 
 let instructionsTimer: ReturnType<typeof setTimeout> | undefined;
-process.parentPort.on("message", (e: { data: { type: string; dir?: string | null; url?: string | null; env?: Record<string, string> } }) => {
+process.parentPort.on("message", (e: { data: {
+  type: string;
+  dir?: string | null;
+  url?: string | null;
+  env?: Record<string, string>;
+  visible?: boolean;
+  changesRequest?: number;
+} }) => {
   // The app is about to stop this process: what changed in the last moments goes to disk first.
   if (e.data.type === "flush") {
     threadStore().flush();
@@ -48,7 +62,13 @@ process.parentPort.on("message", (e: { data: { type: string; dir?: string | null
     clearTimeout(instructionsTimer);
     instructionsTimer = setTimeout(() => warmSaved(), 500);
   }
-  if (e.data.type === "project") useProject(e.data.dir ?? null);
+  if (e.data.type === "project") {
+    changesRequest = e.data.changesRequest ?? 0;
+    useProject(e.data.dir ?? null);
+    publishChangesStatus(changesStatus());
+  }
+  if (e.data.type === "changes-visible") void changesService().scanner.setVisible(e.data.visible === true);
+  if (e.data.type === "changes-focus") void changesService().scanner.focus();
   if (e.data.type === "page") {
     setBrowserUrl(e.data.url ?? null);
     console.log(`[browser] page: ${e.data.url ?? "(none)"}`);
@@ -63,6 +83,7 @@ process.parentPort.on("message", (e: { data: { type: string; dir?: string | null
 });
 
 useProject(process.env.PROJECT_DIR || null);
+publishChangesStatus(changesStatus());
 void loadPriceCatalog();
 // On-device speech: only the selected Voice / Speech models' engines (server/speechEngines.ts).
 startSavedSpeech();

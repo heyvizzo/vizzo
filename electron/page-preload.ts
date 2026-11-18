@@ -17,7 +17,7 @@ import { createPageContextRecorder } from "../web/cursor/pageContext.ts";
 import { findPath, renderOverlay } from "../web/cursor/overlay.ts";
 import { reactInfo } from "../web/cursor/reactInfo.ts";
 import { Sampler } from "../web/cursor/sampler.ts";
-import { shiftPageEvents, shiftSamples, type PageCmd, type PageCommentAction, type PageConfirmAction, type PageEventsMsg, type PageHeldAction, type PageOrbAction, type PagePanelAction, type PageThreadAction } from "../web/cursor/pageBridge.ts";
+import { shiftPageEvents, shiftSamples, type PageChangesStatus, type PageCmd, type PageCommentAction, type PageConfirmAction, type PageEventsMsg, type PageHeldAction, type PageOrbAction, type PagePanelAction, type PageThreadAction } from "../web/cursor/pageBridge.ts";
 import { UI_THEME_CSS } from "../web/cursor/colors.ts";
 import { THREAD_CSS, createThreadOverlay } from "../web/cursor/threadOverlay.ts";
 import { COMMENT_CSS, createCommentOverlay } from "../web/cursor/commentOverlay.ts";
@@ -308,6 +308,9 @@ function init(): void {
   ipcRenderer.send("page:comment", { type: "comment.draft", open: false } satisfies PageCommentAction);
   ipcRenderer.on("page:open-thread", (_e, threadId: unknown) => {
     if (typeof threadId === "string") threads.open(threadId);
+  });
+  ipcRenderer.on("changes:page-status", (_e, status: PageChangesStatus) => {
+    threads.setChangesStatus(status);
   });
 
   ipcRenderer.on("page:cmd", (_e, cmd: PageCmd) => {
