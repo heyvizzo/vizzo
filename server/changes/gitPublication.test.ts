@@ -221,9 +221,10 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     await retain(await prepareGitRefVerify(cwd, await captureGitHead(cwd))).abort();
   });
 
-  it("refuses if the old OID no longer matches", async () => {
+  it("refuses if the old OID is malformed or no longer matches", async () => {
     const { cwd, base, commit } = startRepo(format);
     const original = await captureGitHead(cwd);
+    await expect(prepareGitRefVerify(cwd, { ...original, oid: base + "\n" })).rejects.toThrow("Invalid base commit OID");
     const moved = newCommit(cwd, "external\n", base);
     git(cwd, ["update-ref", "HEAD", moved]);
     await expect(prepareGitRefUpdate(cwd, original, commit)).rejects.toMatchObject({ code: "head-moved" });

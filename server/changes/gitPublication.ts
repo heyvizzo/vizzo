@@ -223,7 +223,7 @@ export interface GitHead {
 }
 
 function isOid(value: string): boolean {
-  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value) && /[1-9a-f]/.test(value);
+  return (value.length === 40 || value.length === 64) && !/[^0-9a-f]/.test(value) && /[1-9a-f]/.test(value);
 }
 
 async function isBranch(cwd: string, branch: string): Promise<boolean> {
