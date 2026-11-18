@@ -450,3 +450,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   identical for create and overwrite, and move results omitted whether they overwrote a destination. A case-only
   move even reported success after removing the file on the case-insensitive test volume. Batches containing
   these ambiguous operations remain Other under the exact-evidence rule.
+- A selected `.gitattributes` file whose own clean conversion changes its bytes gets one rebuilt attributes tree.
+  Vizzo refuses the commit if converting the frozen attributes under that tree still produces different bytes.
+  A clean filter can change which filter applies to `.gitattributes` itself, and a temporary-repo probe produced
+  a cycle with no stable tree. The verification permits stable normalization such as CRLF to LF.
