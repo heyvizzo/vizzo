@@ -442,3 +442,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   `git status` and `git cat-file --filters` ran filters that wrote files in temporary repositories, with both
   ref formats. The product owner approved this exception to preserve Git conversion and LFS support. Scans do
   not stage changes or update refs.
+- Claude Code 2.1.327 attributes successful `Write` creates with explicit prior absence. Recorded tool results
+  normalized CRLF and mixed line endings in `Edit` and in `Write` overwrite preimages without reporting the
+  original line endings. Those edits remain Other under the exact-evidence rule. The installed CLI exposed no
+  `MultiEdit` tool in the capture.
