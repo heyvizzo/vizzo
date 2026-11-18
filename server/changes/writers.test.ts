@@ -1,8 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HarnessTurn } from "../adapters/harnesses.ts";
+import { NativeHarnessProcess } from "../adapters/nativeProcess.ts";
+import { LedgerLeaseRefusedError } from "./ledgerLease.ts";
 import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import { WriterRegistry, type WriterDispatch } from "./writers.ts";
 
@@ -130,5 +133,55 @@ describe("source-control writer registry", () => {
     expect((await registry.snapshot(p.id)).executions[0]).toMatchObject({
       executionId: execution.id, folder: scope, projectId: p.id, phase: "settled", outcome: "interrupted",
     });
+  });
+});
+
+describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("native dispatch with an unavailable writer ledger", () => {
+  it("keeps solver dispatch available when the lease was refused before any registration", async () => {
+    const refused = new LedgerLeaseRefusedError("Another Vizzo process owns the source-control ledger");
+    vi.spyOn(client, "restoreWriters").mockRejectedValue(refused);
+    const save = vi.spyOn(client, "saveWriter");
+    const discover = vi.spyOn(client, "discover");
+    await expect(registry.restore()).rejects.toBe(refused);
+    const execution = registry.queue(writer());
+    const marker = join(root, "dispatched");
+    await expect(execution.run(async () => {
+      const turn = new HarnessTurn(execution);
+      const native = new NativeHarnessProcess("/bin/sh", ["-c", "touch dispatched"], root, undefined, true);
+      try {
+        await turn.prepare(native);
+        turn.holdUntil(native.closed);
+        native.start();
+        return await native.closed;
+      } finally {
+        await native.stop(true);
+      }
+    })).resolves.toBe(0);
+    expect(existsSync(marker)).toBe(true);
+    expect(discover).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    await expect(registry.snapshot("project")).rejects.toBe(refused);
+  });
+
+  it("blocks native dispatch if recording a process identity fails after writer registration", async () => {
+    const saveWriter = client.saveWriter.bind(client);
+    const failure = new LedgerLeaseRefusedError("Cannot record the native process");
+    const save = vi.spyOn(client, "saveWriter").mockImplementation((project, execution) =>
+      execution.nativeProcess ? Promise.reject(failure) : saveWriter(project, execution));
+    const execution = registry.queue(writer());
+    await expect(execution.run(async () => {
+      const turn = new HarnessTurn(execution);
+      const native = new NativeHarnessProcess("/bin/sh", ["-c", "touch dispatched"], root, undefined, true);
+      try {
+        await turn.prepare(native);
+        native.start();
+      } finally {
+        await native.stop(true);
+        await native.closed;
+      }
+    })).rejects.toBe(failure);
+    expect(save).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ phase: "running", nativeDispatched: false }));
+    expect(save).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ phase: "running", nativeDispatched: true }));
+    expect(existsSync(join(root, "dispatched"))).toBe(false);
   });
 });

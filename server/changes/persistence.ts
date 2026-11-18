@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { threadsFile } from "../threads/persist.ts";
 import type { Content } from "./entries.ts";
 import { MAX_FILE_BYTES } from "./evidence.ts";
+import { isLedgerLeaseRefused, LedgerLease, LedgerLeaseRefusedError } from "./ledgerLease.ts";
 
 const VERSION = 1;
 const SHA = /^[0-9a-f]{64}$/;
@@ -81,21 +82,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export class LedgerPersistence<Project> {
   private readonly file: string;
   private readonly directoryIds = new Map<string, string>();
+  private lease?: LedgerLease | LedgerLeaseRefusedError;
 
   constructor(file = ledgerFile()) {
     const requested = resolve(file);
     this.file = join(resolvedDirectory(dirname(requested)), basename(requested));
   }
 
+  /** The ledger actor takes this once, before any request or recovery can read the journal. */
+  acquireLease(): void {
+    if (isLedgerLeaseRefused(this.lease)) throw this.lease;
+    if (this.lease) throw new Error("The source-control ledger lease is already held");
+    const directory = dirname(this.file);
+    let lease: LedgerLease | undefined;
+    try {
+      this.guard(directory);
+      ensureDirectory(directory);
+      this.guard(directory);
+      lease = LedgerLease.acquire(this.file);
+      this.guard(directory);
+      this.lease = lease;
+    } catch (error) {
+      lease?.close();
+      this.lease = isLedgerLeaseRefused(error)
+        ? error
+        : new LedgerLeaseRefusedError("Could not acquire the source-control ledger lock", { cause: error });
+      throw this.lease;
+    }
+  }
+
   /** Refuse substitutions anywhere on the pinned path, including during timer-driven garbage collection. */
   private guard: Guard = (directory) => {
+    if (isLedgerLeaseRefused(this.lease)) throw this.lease;
     const parts: string[] = [];
     for (let path = directory; ; path = dirname(path)) {
       parts.unshift(path);
       if (dirname(path) === path) break;
     }
     for (const path of parts) {
-      const stat = lstatSync(path, { throwIfNoEntry: false });
+      const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
       const existing = this.directoryIds.get(path);
       if (!stat) {
         if (existing) throw new Error("A source-control storage directory disappeared");
@@ -107,6 +132,7 @@ export class LedgerPersistence<Project> {
       }
       this.directoryIds.set(path, id);
     }
+    this.lease?.assertHeld();
   };
 
   load(): Record<string, Project> {
