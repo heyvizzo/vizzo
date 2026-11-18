@@ -11,6 +11,7 @@ import {
 } from "electron";
 import type { ViteDevServer } from "vite";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
@@ -28,6 +29,8 @@ import { chromeKeychainAccess, fullDiskAccess, fullDiskRow, keychainRow, microph
 import { THEME } from "../shared/theme.ts";
 import { continueSession, prepareSessionResume } from "../shared/sessionResume.ts";
 import { endsHold, fromElectronInput, hotkeys, matchesDown, onHotkeys, setHotkeys } from "../shared/hotkeys.ts";
+import type { ChangesStatus } from "../shared/changes.ts";
+import { isPageThreadAction, type PageChangesStatus } from "../web/cursor/pageBridge.ts";
 
 const TOOLBAR_HEIGHT = 44;
 const SIDEBAR_WIDTH = 480;
@@ -40,6 +43,8 @@ const DIVIDER_WIDTH = 7;
 const COLLAPSED_BAR_WIDTH = 56;
 const HOME_PAGE = "https://heyvizzo.com/";
 const ROOT = join(__dirname, "..");
+const TOOLBAR_FILE = join(__dirname, "shell", "index.html");
+const TOOLBAR_URL = pathToFileURL(TOOLBAR_FILE).href;
 const APP_NAME = "Vizzo";
 // Electron names the settings folder after package.json's name, which `npm run dev` uses too: the packaged app keeps
 // its own (~/Library/Application Support/Vizzo), so the two never share settings and its Uninstall
@@ -82,6 +87,11 @@ let sidebarHidden = false;
 let drag: { x: number; width: number; timer: ReturnType<typeof setInterval> } | null = null;
 let server: UtilityProcess | null = null;
 let settingsWin: BrowserWindow | null = null;
+let changesWin: BrowserWindow | null = null;
+let changesHash = "";
+let changesVisible = false;
+let changesProjectRequest = 0;
+let changesStatus: ChangesStatus = { kind: "none" };
 let vite: ViteDevServer | null = null;
 /** The packaged app's page server (instead of Vite). */
 let webServer: import("node:http").Server | null = null;
@@ -99,8 +109,9 @@ let turnFrom: number | null = null;
 interface Settings {
   instructions?: StoredInstructions;
   projectDir?: string; sidebarWidth?: number; sidebarHidden?: boolean; lastUrl?: string;
-  /** Where the Settings window was last left (it opens there again). */
+  /** Where the auxiliary windows were last left (they open there again). */
   settingsBounds?: { x: number; y: number; width: number; height: number };
+  changesBounds?: { x: number; y: number; width: number; height: number };
   /** Settings' readable values (voice IDs…); the API keys are in `secrets`, encrypted (electron/secrets.ts). */
   env?: Record<string, string>;
   secrets?: Record<string, string>;
@@ -217,6 +228,96 @@ function openSettings(section?: string) {
   // A Vite page (web/settings.html), like the chat: it shares the chat's settings code and asks the server for voices and models.
   const w = settingsWin;
   void webAppBase().then((base) => { if (!w.isDestroyed()) void w.loadURL(`${base}settings.html${hash}`); }, (err: unknown) => console.error(err));
+}
+
+function setChangesScope(threadId?: string) {
+  changesHash = threadId === undefined ? "" : `#thread=${encodeURIComponent(threadId)}`;
+  updateChangesScope();
+}
+
+function updateChangesScope() {
+  const wc = changesWin?.webContents;
+  if (!wc || wc.isLoadingMainFrame() || wc.getURL().split("#")[0] !== `${appBase}changes.html`) return;
+  // Reopening the same scope resets its checkboxes. Replacing the hash keeps the window's history flat.
+  void wc.executeJavaScript(`{
+    const oldURL = location.href;
+    const next = new URL(oldURL);
+    next.hash = ${JSON.stringify(changesHash)};
+    history.replaceState(history.state, "", next);
+    dispatchEvent(new HashChangeEvent("hashchange", { oldURL, newURL: next.href }));
+  }`).catch(() => {});
+}
+
+function openChanges(threadId?: string) {
+  setChangesScope(threadId);
+  if (changesWin) {
+    if (!changesWin.webContents.getURL()) return; // the window will show itself after its first load
+    if (changesWin.isMinimized()) changesWin.restore();
+    if (!changesWin.isVisible()) changesWin.show();
+    if (changesWin.isFocused()) server?.postMessage({ type: "changes-focus" });
+    else changesWin.focus();
+    return;
+  }
+  const saved = readSettings().changesBounds;
+  const onScreen = saved && screen.getAllDisplays().some(({ workArea: a }) =>
+    saved.x < a.x + a.width && saved.x + saved.width > a.x && saved.y < a.y + a.height && saved.y + saved.height > a.y);
+  const w = changesWin = new BrowserWindow({
+    ...(onScreen ? saved : { width: 920, height: 760 }),
+    minWidth: 560,
+    minHeight: 400,
+    title: "Changes",
+    show: false,
+    webPreferences: { contextIsolation: true, sandbox: true, partition: "changes" },
+  });
+  w.webContents.session.setPermissionRequestHandler((_wc, _permission, done) => done(false));
+  w.webContents.session.setPermissionCheckHandler(() => false);
+  w.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // This window only hosts Changes. In-page hash updates do not need a document navigation.
+  w.webContents.on("will-navigate", (e) => e.preventDefault());
+  w.webContents.on("will-redirect", (e) => e.preventDefault());
+  const keepBounds = () => saveSettings({ changesBounds: w.getNormalBounds() });
+  w.on("resized", keepBounds);
+  w.on("moved", keepBounds);
+  w.on("close", keepBounds);
+  const reportVisibility = () => {
+    const visible = !w.isDestroyed() && w.isVisible() && !w.isMinimized();
+    if (visible === changesVisible) return;
+    changesVisible = visible;
+    server?.postMessage({ type: "changes-visible", visible });
+  };
+  w.on("show", reportVisibility);
+  w.on("hide", reportVisibility);
+  w.on("minimize", reportVisibility);
+  w.on("restore", reportVisibility);
+  w.on("focus", () => server?.postMessage({ type: "changes-focus" }));
+  w.on("closed", () => {
+    changesWin = null;
+    reportVisibility();
+  });
+  void webAppBase().then(async (base) => {
+    if (w.isDestroyed()) return;
+    const hash = changesHash;
+    await w.loadURL(`${base}changes.html${hash}`);
+    if (w.isDestroyed()) return;
+    // A second open can arrive before the renderer is ready. Apply the latest request once loaded.
+    if (hash !== changesHash) updateChangesScope();
+    if (quitState === "none") w.show();
+  }).catch((error) => {
+    if (!w.isDestroyed()) { console.error("[changes] could not open Changes", error); w.destroy(); }
+  });
+}
+
+function pageChangesStatus(status: ChangesStatus): PageChangesStatus {
+  if (status.kind === "ready") return { kind: "ready", ownedThreadIds: status.ownedThreadIds };
+  if (status.kind === "unavailable") return { kind: "unavailable", reason: status.reason };
+  return null;
+}
+
+function setChangesStatus(status: ChangesStatus) {
+  changesStatus = status;
+  const wc = toolbar?.webContents;
+  if (wc?.getURL() === TOOLBAR_URL) wc.send("changes:status", status);
+  browser?.webContents.send("changes:page-status", pageChangesStatus(status));
 }
 
 /** A JSON object's fields; {} for anything else. */
@@ -555,6 +656,7 @@ function createWindow() {
     nativeTheme.off("updated", onTheme);
     if (drag) clearInterval(drag.timer);
     settingsWin?.close();
+    changesWin?.close();
     win = null; toolbar = null; folderBar = null; browser = null; sidebar = null; divider = null; tooltip = null; tooltipPending = null; drag = null;
   });
   win.on("resize", layout);
@@ -581,7 +683,7 @@ function createWindow() {
 
   toolbar = new WebContentsView({ webPreferences: appPrefs });
   toolbar.setBackgroundColor("#00000000");
-  toolbar.webContents.loadFile(join(__dirname, "shell", "index.html"));
+  toolbar.webContents.loadFile(TOOLBAR_FILE);
   win.contentView.addChildView(toolbar);
 
   folderBar = new WebContentsView({ webPreferences: appPrefs });
@@ -670,12 +772,16 @@ function createWindow() {
 
 /** Makes `dir` the project folder: saved, handed to the server (which restarts its claude -p agents there). */
 async function setProjectFolder(dir: string) {
+  const previous = projectFolder;
   projectFolder = dir;
   saveProjectFolder(dir);
+  if (previous !== dir) setChangesScope();
+  const request = ++changesProjectRequest;
+  setChangesStatus({ kind: "loading" });
   settingsWin?.webContents.send("project-changed", dir);
   // Started at launch (maybe without a folder, or still starting): it gets the folder once it's listening.
   await startVoiceServer();
-  server?.postMessage({ type: "project", dir });
+  server?.postMessage({ type: "project", dir, changesRequest: request });
   await startBackend();
   sidebar?.webContents.send("project-changed", projectFolder);
 }
@@ -760,6 +866,12 @@ async function clearCookies(): Promise<{ cleared: number; message: string }> {
 // ── wiring ──
 
 function registerIpc() {
+  const fromChangesToolbar = (e: IpcMainInvokeEvent) => e.sender === toolbar?.webContents
+    && e.senderFrame === e.sender.mainFrame && e.senderFrame?.url === TOOLBAR_URL;
+  ipcMain.handle("changes:get-status", (e) => fromChangesToolbar(e) ? changesStatus : null);
+  ipcMain.handle("changes:open", (e) => {
+    if (fromChangesToolbar(e) && (changesStatus.kind === "ready" || changesStatus.kind === "unavailable")) openChanges();
+  });
   ipcMain.handle("nav:go", (_e, input: string) => {
     const url = toUrl(input);
     if (url) currentPage()?.loadURL(url);
@@ -919,7 +1031,11 @@ function registerIpc() {
     if (!(fromSidebar(e) || fromPage(e)) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
     await continueSession(sessionId, `http://127.0.0.1:${serverPort}`, typeof context === "string" ? context : undefined);
   });
-  ipcMain.on("page:ready", (e) => { if (fromPage(e)) sendPageUrl(); });
+  ipcMain.on("page:ready", (e) => {
+    if (!fromPage(e)) return;
+    e.sender.send("changes:page-status", pageChangesStatus(changesStatus));
+    sendPageUrl();
+  });
   // The chat's settings (read synchronously: the sidebar needs them before it builds its UI). The sidebar and the
   // Settings window each save only the keys they change (web/chat/settings.ts); they're merged here, and the
   // sidebar gets what Settings changed.
@@ -937,7 +1053,13 @@ function registerIpc() {
   onHotkeys((hk) => { for (const view of [toolbar, folderBar, browser, sidebar]) view?.webContents.send("hotkeys", hk); });
   ipcMain.handle("page:url", (e) => (fromSidebar(e) ? browser?.webContents.getURL() || null : null));
   ipcMain.on("page:thread", (e, action: unknown) => {
-    if (fromPage(e)) sidebar?.webContents.send("page:thread", action);
+    if (!fromPage(e)) return;
+    if (isPageThreadAction(action) && action.type === "thread.commit") {
+      if (e.senderFrame === e.sender.mainFrame && changesStatus.kind === "ready"
+        && changesStatus.ownedThreadIds.includes(action.threadId)) openChanges(action.threadId);
+      return;
+    }
+    sidebar?.webContents.send("page:thread", action);
   });
   ipcMain.on("page:open-thread", (e, threadId: unknown) => {
     if (fromSidebar(e) && typeof threadId === "string") browser?.webContents.send("page:open-thread", threadId);
@@ -1067,8 +1189,7 @@ function buildMenu() {
         { role: "quit" },
       ],
     },
-    // File → Close Window (Cmd-W) closes the focused window: Settings, or the main window (hidden on macOS: the app and
-    // its work keep running; elsewhere it quits, asking first while something works).
+    // File → Close Window (Cmd-W) closes the focused window. Closing the main window hides it on macOS, or asks to quit elsewhere.
     { role: "fileMenu" },
     { role: "editMenu" },
     {
@@ -1149,7 +1270,14 @@ let relaunchWaiting = false;
 /** The waiting dev instance gives up when this file appears (the user kept the running one). */
 const relaunchCancelFile = () => join(app.getPath("userData"), "relaunch-cancelled");
 
-function onServerMessage(msg: { type: string; running?: string[]; finished?: { title: string; outcome: "done" | "failed" | "stopped" } }): void {
+function onServerMessage(msg: {
+  type: string;
+  running?: string[];
+  finished?: { title: string; outcome: "done" | "failed" | "stopped" };
+  status?: ChangesStatus;
+  changesRequest?: number;
+}): void {
+  if (msg.type === "changes-status" && msg.status && msg.changesRequest === changesProjectRequest) setChangesStatus(msg.status);
   if (msg.type !== "activity" || !Array.isArray(msg.running)) return;
   runningTasks = msg.running;
   const f = msg.finished;

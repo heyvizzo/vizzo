@@ -1243,6 +1243,7 @@ bridge.onThreadAction?.((a) => {
     return;
   }
   if (!isPageThreadAction(a)) return;
+  if (a.type === "thread.commit") return; // Electron handles opening the Changes window.
   if (a.type === "thread.stop") return stopThread(a.threadId);
   if (pendingOpen?.threadId === a.threadId) pendingOpen = null;
   // Queued feedback isn't on the server: its panel's Delete drops it, and the rest queued on that element, from the queue.

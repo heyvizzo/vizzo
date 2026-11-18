@@ -60,7 +60,9 @@
     #mic-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--err); pointer-events: none; }
     /* Feedback queue: Instant on runs each turn right away; off queues them until Send. */
     #instant[aria-pressed="false"] { color: var(--muted); }
-    #send-queue { width: auto; min-width: 30px; padding: 0 8px; gap: 4px; display: flex; align-items: center; font: inherit; font-variant-numeric: tabular-nums; }
+    #changes, #send-queue { width: auto; min-width: 30px; padding: 0 8px; gap: 4px; display: flex; align-items: center; font: inherit; font-variant-numeric: tabular-nums; }
+    #changes[data-kind="unavailable"] { color: var(--muted); }
+    #changes-count:empty { display: none; }
     #send-queue:not(:disabled) { color: var(--accent); }
     #send-queue svg { width: 14px; height: 14px; }
     .loading { animation: spin 1s linear infinite; }
@@ -97,6 +99,10 @@
     </div>
     <button id="instant" title="Instant feedback: on" aria-label="Instant feedback" aria-pressed="true" hidden>
       <svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>
+    </button>
+    <button id="changes" title="Changes" aria-label="Changes" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM8 12h4m-2-2v4m4 2h2"/></svg>
+      <span id="changes-count" aria-hidden="true"></span>
     </button>
     <button id="send-queue" title="Send queued feedback" aria-label="Send queued feedback" disabled hidden>
       <span id="queue-count">0</span>
@@ -159,6 +165,20 @@
     sendQueue.onclick = () => shell.queue.send();
     shell.queue.onState(showQueue);
     shell.queue.getState().then(showQueue);
+
+    const changes = $("changes");
+    function showChanges(s) {
+      changes.hidden = s?.kind !== "ready" && s?.kind !== "unavailable";
+      changes.dataset.kind = s?.kind ?? "none";
+      $("changes-count").textContent = s?.kind === "ready" ? String(s.changedFiles) : "";
+      const label = s?.kind === "ready" ? `Changes, ${s.changedFiles} changed file${s.changedFiles === 1 ? "" : "s"}`
+        : s?.kind === "unavailable" ? `Changes unavailable. ${s.reason}` : "Changes";
+      changes.title = label;
+      changes.setAttribute("aria-label", label);
+    }
+    changes.onclick = () => shell.changes.open();
+    shell.changes.onStatus(showChanges);
+    shell.changes.getStatus().then(showChanges, () => {});
 
     // Mic (the chat sidebar owns the microphone). Three looks: plain = push to talk; red dot = Always listen on;
     // red icon and dot = a turn is recording. A click toggles Always listen; holding it is push to talk, and while

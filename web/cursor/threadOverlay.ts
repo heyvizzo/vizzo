@@ -12,7 +12,7 @@ import { displayTitle, type ThreadAnchor, type ThreadInfo, type ThreadMessage, t
 import { stripVoiceCues } from "../../shared/cues.ts";
 import type { CursorSample } from "../../shared/protocol.ts";
 import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
-import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
+import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageChangesStatus, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
 import { mountPlasmaOrb, PLASMA_ORB_CSS, type PlasmaState } from "./plasmaOrb.ts";
 import { ORB_ASKING_COLORS, ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
 import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
@@ -159,6 +159,9 @@ ${MARKDOWN_CSS}
 .th-panel .th-trash:hover { color: var(--ui-err-text); }
 .th-panel .th-stop { color: var(--ui-err-text); }
 .th-panel .th-stop:hover { background: var(--ui-hover); }
+.th-panel .th-commit { padding: 3px 5px; border: 0; background: transparent; color: var(--ui-accent); }
+.th-panel .th-commit:not(:disabled):hover { background: var(--ui-hover); }
+.th-panel .th-commit:disabled { color: var(--ui-muted); }
 .th-summary { padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); }
 .th-body { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--ui-line); padding-top: 8px; }
 .th-msg { border-left: 2px solid var(--ui-line); padding-left: 8px; }
@@ -224,6 +227,7 @@ export interface ThreadOverlayOpts {
 
 export interface ThreadOverlay {
   setThreads(threads: ThreadInfo[]): void;
+  setChangesStatus(status: PageChangesStatus): void;
   bubble(say: ThreadSay, ended: boolean, confirm?: BubbleConfirm): void;
   provisional(turnId: string, anchor?: ThreadAnchor): void;
   clearProvisional(turnId: string): void;
@@ -393,6 +397,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   layer.classList.add("th-layer");
   const markers = new Map<string, MarkerView>();
   const bubbles = new Map<string, BubbleView>();
+  let changesStatus: PageChangesStatus = null;
   // Sizes belong to individual tasks (null is the conversation), across close/reopen and live updates.
   const panelSizes = new Map<string | null, { width: number; height: number }>();
   /** The provisional dot: where the pointer was on its element at release (bounds/point as in ThreadAnchor). */
@@ -1024,7 +1029,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     close.onclick = closePanel;
     const head = h("div", "th-head");
     head.append(h("span", "th-title", t ? displayTitle(t.title) : "Conversation"));
-    // The state chip, Stop and Delete: on the session row when it's shown (click-to-copy session on), else in the header.
+    // The state chip and actions go on the session row when shown, otherwise in the header.
     const controls: HTMLElement[] = [];
     const look = t ? markerLook(t) : orb.state;
     const chip = look === "asking" ? askingLabel(t) : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
@@ -1043,6 +1048,18 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
         stop.addEventListener("pointerdown", (e) => e.preventDefault());
         stop.onclick = () => { opts.send({ type: "thread.stop", threadId: t.threadId }); p.form?.focus(); };
         controls.push(stop);
+      }
+      if (changesStatus && t.state !== "queued") {
+        const reason = commitDisabledReason(t.threadId, changesStatus);
+        const commit = h("button", "th-commit", "Commit");
+        commit.type = "button";
+        commit.disabled = reason !== null;
+        commit.dataset.tip = reason ?? "Review this thread's changes";
+        if (reason !== null) commit.setAttribute("aria-label", `Commit unavailable. ${reason}`);
+        commit.onclick = (event) => {
+          if (event.isTrusted && !commit.disabled) opts.send({ type: "thread.commit", threadId: t.threadId });
+        };
+        controls.push(commit);
       }
       const del = h("button", "th-trash");
       del.type = "button";
@@ -1306,6 +1323,19 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     if (panel?.threadId) renderPanel();
   }
 
+  function commitDisabledReason(threadId: string, status: NonNullable<PageChangesStatus>): string | null {
+    if (status.kind === "unavailable") return status.reason;
+    return status.ownedThreadIds.includes(threadId) ? null : "This thread has no uncommitted owned changes";
+  }
+
+  function setChangesStatus(status: PageChangesStatus): void {
+    const before = changesStatus;
+    changesStatus = status;
+    const threadId = panel?.threadId;
+    if (threadId && (before ? commitDisabledReason(threadId, before) : undefined)
+      !== (status ? commitDisabledReason(threadId, status) : undefined)) renderPanel();
+  }
+
   function setDetails(on: boolean): void {
     if (on === details) return;
     details = on;
@@ -1326,6 +1356,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
 
   return {
     setThreads,
+    setChangesStatus,
     bubble,
     provisional,
     clearProvisional: (turnId) => { if (prov?.turnId === turnId) clearProv(); },

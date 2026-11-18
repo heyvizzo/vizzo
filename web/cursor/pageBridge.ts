@@ -129,10 +129,18 @@ export function isPageCommentAction(m: unknown): m is PageCommentAction {
 /** Page → chat: one document's events for the current turn (epoch ms). `final`: the reply to a stop. */
 export interface PageEventsMsg { doc: string; events: PageEvents; final: boolean }
 
-/** Page → chat: the user acted on a thread in the page overlay (opened its panel / confirmed its deletion). Sent on as the ClientMsg. */
+/** Electron main → isolated page preload: only the availability and thread ownership needed by the panel. */
+export type PageChangesStatus =
+  | { kind: "ready"; ownedThreadIds: readonly string[] }
+  | { kind: "unavailable"; reason: string }
+  | null;
+
+/** The user acted on a thread in the page overlay. */
 export type PageThreadAction =
   | { type: "thread.focus"; threadId: string }
   | { type: "thread.delete"; threadId: string }
+  /** Open the Changes window scoped to this thread. Handled by Electron main. */
+  | { type: "thread.commit"; threadId: string }
   /** Stop its active turn and solver, keeping the thread and its draft. Handled by the chat. */
   | { type: "thread.stop"; threadId: string }
   /** The panel's "Always use the smart model" checkbox. */
@@ -141,7 +149,8 @@ export type PageThreadAction =
 export function isPageThreadAction(m: unknown): m is PageThreadAction {
   const a = m as { type?: unknown; threadId?: unknown; on?: unknown } | null;
   if (!a || typeof a.threadId !== "string" || !a.threadId) return false;
-  return a.type === "thread.focus" || a.type === "thread.delete" || a.type === "thread.stop" || (a.type === "thread.smart" && typeof a.on === "boolean");
+  return a.type === "thread.focus" || a.type === "thread.delete" || a.type === "thread.stop" || a.type === "thread.commit"
+    || (a.type === "thread.smart" && typeof a.on === "boolean");
 }
 
 /**

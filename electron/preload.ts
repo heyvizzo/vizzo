@@ -4,6 +4,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { createTalkKey, isTypingTarget } from "../web/audio/ptt.ts";
 import { hotkeyLabel, hotkeys, onHotkeys, setHotkeys, type Hotkeys } from "../shared/hotkeys.ts";
+import type { ChangesStatus } from "../shared/changes.ts";
 // Hover tooltips here are Chromium's own `title` tooltips; the custom ones (tooltip.ts) are only for the browser pane.
 
 // The keyboard shortcuts (Settings → Keyboard): main sends each change.
@@ -39,6 +40,12 @@ contextBridge.exposeInMainWorld("shell", {
   pickProject: () => ipcRenderer.invoke("project:pick"),
   /** Opens Settings (at `section`, one of its sidebar's: "models", "permissions"…). */
   openSettings: (section?: string) => ipcRenderer.invoke("settings:open", section),
+  /** The toolbar's Changes button and count for the current project. */
+  changes: {
+    getStatus: () => ipcRenderer.invoke("changes:get-status"),
+    onStatus: (cb: (status: ChangesStatus) => void) => ipcRenderer.on("changes:status", (_e, status) => cb(status)),
+    open: () => ipcRenderer.invoke("changes:open"),
+  },
   /** The chat sidebar: what needs attention (permissions, which keys are set) and when Settings changed it. */
   attention: {
     get: () => ipcRenderer.invoke("attention:get"),
