@@ -308,6 +308,33 @@ function immutable<T>(value: T): T {
   return value;
 }
 
+function verifySelectedPath(chain: Chain, selected: SelectedPath, kind: PinnedPath["kind"], content: Content) {
+  const { base, working } = selected;
+  const current = tip(chain);
+  requireProof(matchesAnchor(chain.base, base) && matchesAnchor(current, working), "the frozen entry changed");
+  const annotation = annotate(chain, content);
+  const before = readFrozenBytes(chain.base, content);
+  const after = readFrozenBytes(current, content);
+  // For new or empty regular entries, whole conversion can write all selected content
+  // while the working tree's separately observed chmod stays unselected.
+  const independentMode = !selected.moves.length && current.kind === "file" &&
+    (chain.base.kind === "absent" || (chain.base.kind === "file" && !before.length));
+  verifyHunks(chain, annotation, selected, kind, independentMode, content);
+  if (base && base.rawSha256 === base.sha256) {
+    requireProof(matchesGitBlob(before, base.oid), "frozen base blob did not match Git");
+  }
+  const edited = layout(before, after, selected.hunks);
+  requireProof(kind !== "whole" || edited.bytes.equals(after), "whole entry evidence omits working content");
+  const expected = expectedFrozen(selected, kind, independentMode, edited.bytes);
+  requireProof(sameAnchor(expected, selected.frozen), "the frozen commit entry changed");
+  if (kind === "partial") {
+    requireProof(!selected.moves.length, "a move requires whole entries");
+    // Reject a partially selected repeated range if it also anchors an unselected line.
+    updateAnnotation(annotation, edited, selected.hunks.some(({ kind }) => kind === "presence"));
+  }
+  return { expected, independentMode };
+}
+
 /** Pin and verify selected-path custody before Git can publish. Hold new ledger events until settlement. */
 export function pinCommitOwnership(
   snapshot: CommitOwnershipSnapshot, frozen: FrozenCommitSelection<CommitOwnershipReceipt>, content: Content,
@@ -321,32 +348,11 @@ export function pinCommitOwnership(
   requireProof(receipt.generation === frozen.generation && sameMembers(receipt.componentIds, [...components.keys()]) &&
     entries.size > 0 && sameMembers(receipt.paths.map(({ path }) => path), [...entries.keys()]), "the frozen selection changed");
   const paths = receipt.paths.map((selected) => {
-    const { path, base, working } = selected;
+    const { path } = selected;
     const chain = selectedChain(snapshot, path);
     const entry = entries.get(path)!;
-    requireProof(matchesAnchor(chain.base, base) && matchesAnchor(tip(chain), working), "the frozen entry changed");
-    const annotation = annotate(chain, content);
-    const before = readFrozenBytes(chain.base, content);
-    const current = tip(chain);
-    const after = readFrozenBytes(current, content);
-    // For new or empty regular entries, whole conversion can write all selected content
-    // while the working tree's separately observed chmod stays unselected.
-    const independentMode = !selected.moves.length && current.kind === "file" &&
-      (chain.base.kind === "absent" || (chain.base.kind === "file" && !before.length));
-    verifyHunks(chain, annotation, selected, entry.kind, independentMode, content);
-    if (base && base.rawSha256 === base.sha256) {
-      requireProof(matchesGitBlob(before, base.oid), "frozen base blob did not match Git");
-    }
-    const edited = layout(before, after, selected.hunks);
-    requireProof(entry.kind !== "whole" || edited.bytes.equals(after), "whole entry evidence omits working content");
-    const expected = expectedFrozen(selected, entry.kind, independentMode, edited.bytes);
-    requireProof(sameAnchor(expected, selected.frozen) &&
-      sameAnchor(expected, entry.content && { mode: entry.mode, sha256: hash(entry.content) }), "the frozen commit entry changed");
-    if (entry.kind === "partial") {
-      requireProof(!selected.moves.length, "a move requires whole entries");
-      // Reject a partially selected repeated range if it also anchors an unselected line.
-      updateAnnotation(annotation, edited, selected.hunks.some(({ kind }) => kind === "presence"));
-    }
+    const { expected, independentMode } = verifySelectedPath(chain, selected, entry.kind, content);
+    requireProof(sameAnchor(expected, entry.content && { mode: entry.mode, sha256: hash(entry.content) }), "the frozen commit entry changed");
     const ids = new Set(selected.hunks.map(({ componentId }) => componentId));
     const wholeComponents = new Set(selected.hunks.flatMap(({ componentId, kind }) =>
       independentMode && kind === "mode" ? [] : [componentId]));
@@ -373,6 +379,24 @@ export function pinCommitOwnership(
   return immutable({ version: 1, receipt, paths, sha256: digest([receipt, paths]) });
 }
 
+/** A later report may explain an observed gap without changing the selected evidence or frozen bytes. */
+export function verifyLateCommitEdit(
+  plan: CommitOwnershipPlan, path: string, chain: Chain, content: Content,
+): CommitOwnershipPlan | undefined {
+  const { receipt, paths } = plan;
+  const index = paths.findIndex((item) => item.path === path);
+  if (index < 0) return;
+  const pinned = paths[index]!;
+  try {
+    verifySelectedPath(chain, receipt.paths[index]!, pinned.kind, content);
+  } catch (error) {
+    if (error instanceof CommitOwnershipError) return;
+    throw error;
+  }
+  const updated = paths.with(index, { ...pinned, chainSha256: digest(chain) });
+  return immutable({ version: 1, receipt, paths: updated, sha256: digest([receipt, updated]) });
+}
+
 function publishedEntry(
   raw: Buffer | null, working: ReadEntry, next: GitTreeEntry | null, frozen: EntryAnchor | null, kind: PinnedPath["kind"],
 ): { entry: Exclude<Entry, { kind: "opaque" }>; bytes: Buffer | null } {
@@ -392,15 +416,17 @@ function publishedEntry(
   return { entry, bytes };
 }
 
-/** Return selected-path updates only. Apply all updates and the done journal record atomically. */
-export function settleCommitOwnership(
-  snapshot: CommitOwnershipSnapshot, record: CommitSettlement<CommitOwnershipPlan>, proof: PublishedBaseEvidence, content: Content,
+type CandidateOwnership = Omit<CommitSettlement<CommitOwnershipPlan>, "phase" | "evidence" | "receipt">;
+
+function ownershipUpdates(
+  snapshot: CommitOwnershipSnapshot, record: CandidateOwnership,
+  proof: PublishedBaseEvidence, content: Content,
 ): CommitOwnershipUpdate[] {
-  const { ownership: plan, head, request, project, evidence, commit } = record;
+  const { ownership: plan, head, request, project, commit } = record;
   const { receipt, paths } = plan;
   requireProof(plan.version === 1 && plan.sha256 === digest([receipt, paths]), "the pinned receipt changed");
   checkSnapshot(snapshot, receipt);
-  requireProof(evidence === "published" && proof.commit === commit && sameHead(head, receipt.head) &&
+  requireProof(proof.commit === commit && sameHead(head, receipt.head) &&
     project.id === receipt.projectId && project.root === receipt.scope.worktreeRoot && request.projectId === project.id &&
     request.generation === receipt.generation && sameMembers(request.componentIds, receipt.componentIds), "publication does not match the pinned selection");
   const verified = uniqueIndex(proof.paths, ({ path }) => path);
@@ -430,4 +456,20 @@ export function settleCommitOwnership(
     }
     return { path, baseBytes: bytes, chain: structuredClone({ base: entry, anchor, versions: [{ entry: current }] }) };
   });
+}
+
+/** Verify the exact candidate while it is still safe to refuse publication. */
+export function validateCommitOwnershipCandidate(
+  snapshot: CommitOwnershipSnapshot, record: CandidateOwnership, proof: PublishedBaseEvidence, content: Content,
+): void {
+  ownershipUpdates(snapshot, record, proof, content);
+}
+
+/** Return selected-path updates only. Apply all updates and the done journal record atomically. */
+export function settleCommitOwnership(
+  snapshot: CommitOwnershipSnapshot, record: Omit<CommitSettlement<CommitOwnershipPlan>, "receipt">,
+  proof: PublishedBaseEvidence, content: Content,
+): CommitOwnershipUpdate[] {
+  requireProof(record.evidence === "published", "publication does not match the pinned selection");
+  return ownershipUpdates(snapshot, record, proof, content);
 }

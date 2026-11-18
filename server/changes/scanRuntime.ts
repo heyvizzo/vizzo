@@ -41,7 +41,7 @@ export type CurrentChanges =
   | { readonly kind: "none" }
   | { readonly kind: "loading"; readonly directory: string }
   | { readonly kind: "non-repository"; readonly directory: string; readonly reason: string }
-  | { readonly kind: "unavailable"; readonly directory: string; readonly reason: string }
+  | { readonly kind: "unavailable"; readonly directory: string; readonly reason: string; readonly project?: Readonly<LedgerProject> }
   | { readonly kind: "ready"; readonly project: Readonly<LedgerProject>; readonly view: ChangesView };
 
 export type ScanResponse<T> =
@@ -66,6 +66,7 @@ interface ActiveProject {
   requested: boolean;
   task?: Promise<void>;
   published?: Published;
+  project?: Readonly<LedgerProject>;
   unavailable?: Extract<CurrentChanges, { kind: "non-repository" | "unavailable" }>;
   /** A scope or HEAD change revokes public reviews, even if a later scan returns to it. */
   binding?: { readonly key: string };
@@ -177,7 +178,7 @@ export class ScanRuntime {
 
   /** Coalesce ledger notifications received together or during a scan into at most one pending scan. */
   ledgerChanged(projectId: string): void {
-    const activeProject = this.active?.published?.project;
+    const activeProject = this.active?.project;
     if (!activeProject || activeProject.id === projectId) void this.refresh();
   }
 
@@ -274,7 +275,7 @@ export class ScanRuntime {
         if (!found.project) {
           active.binding = undefined;
           active.published = undefined;
-          // Discovery only certifies a non-repository after its Git version probe succeeds.
+          active.project = undefined;
           active.unavailable = {
             kind: found.reason === NO_WORKTREE ? "non-repository" : "unavailable",
             directory: active.directory, reason: found.reason,
@@ -282,6 +283,7 @@ export class ScanRuntime {
           return;
         }
         const project = Object.freeze({ ...found.project });
+        active.project = project;
         const binding = projectKey(project);
         if (active.binding?.key !== binding) {
           active.binding = { key: binding };
@@ -309,7 +311,7 @@ export class ScanRuntime {
         active.published = undefined;
         active.binding = undefined;
         if ((isHeadChange(error) || error instanceof ScanProjectChangedError) && attempt === 0) continue;
-        active.unavailable = { kind: "unavailable", directory: active.directory, reason: reason(error) };
+        active.unavailable = { kind: "unavailable", directory: active.directory, reason: reason(error), project: active.project };
         return;
       }
     }

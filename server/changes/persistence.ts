@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { threadsFile } from "../threads/persist.ts";
 import type { Content } from "./entries.ts";
 import { MAX_FILE_BYTES } from "./evidence.ts";
+import { assertOutsideGitStorage } from "./project.ts";
 import { isLedgerLeaseRefused, LedgerLease, LedgerLeaseRefusedError } from "./ledgerLease.ts";
 
 const VERSION = 1;
@@ -66,13 +67,14 @@ function writeAtomic(target: string, bytes: string | Buffer, guard: Guard): void
   }
 }
 
+function existingAncestor(path: string): string {
+  while (!lstatSync(path, { throwIfNoEntry: false })) path = dirname(path);
+  return path;
+}
+
 function resolvedDirectory(path: string): string {
-  const trailing: string[] = [];
-  while (!lstatSync(path, { throwIfNoEntry: false })) {
-    trailing.unshift(basename(path));
-    path = dirname(path);
-  }
-  return join(realpathSync(path), ...trailing);
+  const ancestor = existingAncestor(path);
+  return join(realpathSync(ancestor), relative(ancestor, path));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -97,6 +99,10 @@ export class LedgerPersistence<Project> {
     let lease: LedgerLease | undefined;
     try {
       this.guard(directory);
+      try { assertOutsideGitStorage(existingAncestor(directory)); }
+      catch (error) {
+        throw new LedgerLeaseRefusedError(error instanceof Error ? error.message : String(error), { cause: error });
+      }
       ensureDirectory(directory);
       this.guard(directory);
       lease = LedgerLease.acquire(this.file);
