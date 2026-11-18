@@ -199,7 +199,7 @@ describe.each(["files", "reftable"])("source-control scan runtime (%s refs)", (f
     await put("b/f", LAST);
     await edit(pinnedA, "A", [{ path: join(a, "f"), from: BASE, to: FIRST }]);
     await edit(pinnedB, "B", [{ path: join(b, "f"), from: BASE, to: LAST }]);
-    hooks.groupState = async (pinned) => ({ closedWriters: pinned.scope === a ? [{ kind: "thread", id: "A" }] : [] });
+    hooks.groupState = async (pinned) => ({ closedGroups: pinned.scope === a ? [{ writer: { kind: "thread", id: "A" }, title: "Closed A" }] : [] });
 
     await runtime.setProject(a);
     const viewA = ready(runtime).view;

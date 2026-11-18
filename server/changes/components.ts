@@ -41,9 +41,18 @@ interface WriterRecord {
   readonly request?: string;
   readonly folder?: string | null;
   readonly harness?: LlmProvider;
+  readonly purpose?: string;
+  readonly continuesExecutionId?: string;
+  readonly nativeSessionId?: string;
   readonly phase: "queued" | "running" | "settling" | "unconfirmed" | "settled";
   readonly pending: boolean;
   readonly outcome?: "completed" | "stopped" | "failed" | "timed-out" | "interrupted";
+}
+
+export interface ClosedChangeGroup {
+  readonly writer: ChangeWriter;
+  readonly title: string;
+  readonly reason?: string;
 }
 
 export interface ChangeComponentInput {
@@ -60,9 +69,7 @@ export interface ChangeComponentInput {
     readonly snapshots: readonly LedgerSnapshot[];
   };
   readonly writers: { readonly projectId: string; readonly executions: readonly WriterRecord[] };
-  /** Executions whose explicit continuation has completed, supplied by the thread lifecycle. */
-  readonly continuedExecutionIds?: readonly string[];
-  readonly closedWriters?: readonly ChangeWriter[];
+  readonly closedGroups?: readonly ClosedChangeGroup[];
   readonly notices?: readonly string[];
   readonly grokInScope?: boolean;
 }
@@ -154,6 +161,11 @@ interface WriterStatus {
   readonly reason?: string;
 }
 
+interface IncompleteWork {
+  readonly reason: string;
+  readonly continuation?: { readonly executionId: string; readonly request: string; readonly nativeSessionId?: string };
+}
+
 interface ComponentDetails {
   readonly members: readonly Member[];
   readonly writerIds: readonly string[];
@@ -170,6 +182,9 @@ export interface ChangeComponentGraph {
     readonly components: ReadonlyMap<string, ComponentDetails>;
     readonly working: readonly string[];
     readonly groups: ReadonlyMap<string, ChangeGroup>;
+    readonly statuses: ReadonlyMap<string, WriterStatus>;
+    readonly incomplete: ReadonlyMap<string, IncompleteWork>;
+    readonly incompleteExecutions: ReadonlyMap<string, IncompleteWork>;
     readonly executionWriters: ReadonlyMap<string, string>;
     readonly movedPaths: ReadonlySet<string>;
   };
@@ -511,7 +526,7 @@ function writerBlock({ phase, outcome, pending }: WriterRecord): number {
   return Number(phase !== "settled" || pending);
 }
 
-function writerStatuses(records: Iterable<WriterRecord>, closed: ReadonlySet<string>): Map<string, WriterStatus> {
+function writerStatuses(records: Iterable<WriterRecord>, closed: ReadonlyMap<string, ClosedChangeGroup>): Map<string, WriterStatus> {
   const writers = new Map<string, WriterRecord>();
   const blocked = new Map<string, number>();
   for (const record of records) {
@@ -520,9 +535,43 @@ function writerStatuses(records: Iterable<WriterRecord>, closed: ReadonlySet<str
     blocked.set(id, Math.max(blocked.get(id) ?? 0, writerBlock(record)));
   }
   return new Map([...writers].map(([id, record]) => [id, {
-    writer: { ...record.writer }, title: record.title,
+    writer: { ...record.writer }, title: closed.get(id)?.title ?? record.title,
     ...writerBlocks[blocked.get(id)!] ?? { state: closed.has(id) ? "closed" : "open" },
   }]));
+}
+
+function continuedExecutions(records: ReadonlyMap<string, WriterRecord>): Set<string> {
+  const continued = new Set<string>();
+  for (const execution of records.values()) {
+    if (!execution.continuesExecutionId || execution.phase !== "settled" || execution.pending ||
+        execution.outcome !== "completed" || execution.purpose === "reconcile") continue;
+    const previous = records.get(execution.continuesExecutionId);
+    if (previous && previous.phase === "settled" && !previous.pending && previous.outcome &&
+        previous.outcome !== "completed" && previous.folder === execution.folder && previous.nativeSessionId &&
+        previous.nativeSessionId === execution.nativeSessionId &&
+        changeWriterId(previous.writer) === changeWriterId(execution.writer)) continued.add(previous.executionId);
+  }
+  return continued;
+}
+
+const incompleteReasons = {
+  stopped: "A task was stopped part-way",
+  failed: "A task failed before it finished",
+  "timed-out": "A task timed out before it finished",
+  interrupted: "A task was interrupted before it finished",
+};
+
+/** Work remains incomplete only while the graph contains surviving ownership from that execution. */
+export function writerWork(graph: ChangeComponentGraph, writer: ChangeWriter, interruptedExecutionId?: string) {
+  const id = changeWriterId(writer);
+  const { statuses, groups, incomplete, incompleteExecutions, executionWriters } = graph[details];
+  const work = incomplete.get(id);
+  const candidate = interruptedExecutionId && executionWriters.get(interruptedExecutionId) === id
+    ? incompleteExecutions.get(interruptedExecutionId) : undefined;
+  return {
+    status: statuses.get(id), group: groups.get(id),
+    incomplete: work && interruptedExecutionId ? { reason: candidate?.reason ?? work.reason, continuation: candidate?.continuation } : work,
+  };
 }
 
 function groupByEntry(members: readonly Member[]): Map<JoinedEntry, JoinedHunk[]> {
@@ -585,14 +634,16 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
   });
   const connections = connect(entries, input);
   const records = indexBy(input.writers.executions, ({ executionId }) => executionId);
-  const continued = new Set(input.continuedExecutionIds);
-  const status = writerStatuses(records.values(), new Set(input.closedWriters?.map(changeWriterId)));
+  const continued = continuedExecutions(records);
+  const closed = indexBy(input.closedGroups ?? [], ({ writer }) => changeWriterId(writer));
+  const status = writerStatuses(records.values(), closed);
   const components = new Map<string, ComponentDetails>();
   const working = [...status].filter(([, writer]) => writer.reason).map(([id]) => id).sort();
   const executionWriters = new Map([...records].map(([id, record]) => [id, changeWriterId(record.writer)]));
   const presence = new Map<JoinedEntry, string>();
   const dependent = new Map<string, JoinedEntry>();
   const groups = new Map<string, ChangeGroup & { own: string[]; tied: string[] }>();
+  const incompleteRecords = new Set<string>();
 
   for (const members of connections.groups) {
     const paths = groupByEntry(members);
@@ -605,9 +656,11 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
     const writerIds = unique(found.map(({ executionId }) => executionWriters.get(executionId)!));
     const writers = writerIds.map((id) => status.get(id)!.writer);
     const other = executionIds.includes(null) || unknown;
-    const incompleteWriters = new Set(found.filter(({ outcome, executionId }) =>
-      outcome !== undefined && outcome !== "completed" && !continued.has(executionId),
-    ).map(({ executionId }) => executionWriters.get(executionId)!));
+    const incompleteWriters = new Set(found.flatMap(({ outcome, executionId }) => {
+      if (!outcome || outcome === "completed" || continued.has(executionId)) return [];
+      incompleteRecords.add(executionId);
+      return [executionWriters.get(executionId)!];
+    }));
     const incomplete = incompleteWriters.size > 0;
     const reason = (head.branch === null ? DETACHED : undefined)
       ?? [...paths.keys()].find((entry) => entry.blocked)?.blocked
@@ -628,7 +681,9 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
     };
     components.set(id, { members, writerIds, presentation });
     for (const writerId of writerIds) {
-      const group = groups.get(writerId) ?? { ...status.get(writerId)!, own: [], tied: [] };
+      const writer = status.get(writerId)!;
+      const closedReason = writer.state === "closed" ? closed.get(writerId)?.reason : undefined;
+      const group = groups.get(writerId) ?? { ...writer, ...(closedReason && { reason: closedReason }), own: [], tied: [] };
       (writerIds.length === 1 && !other ? group.own : group.tied).push(id);
       groups.set(writerId, incompleteWriters.has(writerId) ? { ...group, incomplete: true } : group);
     }
@@ -637,6 +692,18 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
       if (hunks.some(({ kind }) => kind === "presence")) presence.set(entry, id);
       else if (hunks.some(({ kind }) => kind === "mode")) dependent.set(id, entry);
     }
+  }
+  const incomplete = new Map<string, IncompleteWork>();
+  const incompleteExecutions = new Map<string, IncompleteWork>();
+  for (const record of records.values()) {
+    const { executionId, outcome, phase, pending, request, purpose, nativeSessionId } = record;
+    if (!incompleteRecords.has(executionId) || !outcome || outcome === "completed") continue;
+    const id = executionWriters.get(executionId)!;
+    const continuation = phase === "settled" && !pending && request && nativeSessionId && purpose !== "reconcile"
+      ? { executionId, request, nativeSessionId } : undefined;
+    const reason = incompleteReasons[outcome];
+    incompleteExecutions.set(executionId, { reason, continuation });
+    incomplete.set(id, { reason, continuation: continuation ?? incomplete.get(id)?.continuation });
   }
   for (const [id, entry] of dependent) {
     const component = components.get(id)!;
@@ -663,7 +730,8 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
     projectId, scope: scopeKey, head: headKey, generation, componentIds: [...components.keys()],
   });
   return Object.freeze({ view, review, [details]: {
-    scope: Object.freeze(scope), head: Object.freeze(head), components, working, groups, executionWriters, movedPaths: connections.movedPaths,
+    scope: Object.freeze(scope), head: Object.freeze(head), components, working, groups, statuses: status,
+    incomplete, incompleteExecutions, executionWriters, movedPaths: connections.movedPaths,
   } });
 }
 
@@ -763,7 +831,7 @@ export function freezeChangeSelection(
   if (selected.length !== wanted.size || !sameSet(actualWriters, request.writerIds)) return null;
   if (selection.kind === "delete") {
     const group = graph.groups.get(selection.writerId);
-    if (!group || group.incomplete || group.reason || !sameSet(wanted, group.own)) return null;
+    if (!group || group.incomplete || graph.working.includes(selection.writerId) || !sameSet(wanted, group.own)) return null;
   }
 
   const byEntry = new Map<JoinedEntry, Map<JoinedHunk, string>>();
@@ -869,9 +937,12 @@ function afterPublicationKey(component: ComponentDetails, graph: ChangeComponent
 
 /** Match the same reviewed components after a prior job, without selecting new or enlarged components. */
 export function carryChangesAfterPublication(previous: ChangeComponentGraph, next: ChangeComponentGraph,
-  selection: ChangeOwnershipReceipt, ids: readonly string[]): Map<string, string> {
+  selection: ChangeOwnershipReceipt, ids: readonly string[], options?: { allowAnotherScope: boolean }): Map<string, string> {
+  const scope = previous[details].scope;
   if (previous.review.projectId !== selection.projectId || selection.projectId !== next.review.projectId ||
-      previous.review.generation !== selection.generation || previous.review.scope !== next.review.scope ||
+      scope.worktreeRoot !== selection.scope.worktreeRoot ||
+      (!options?.allowAnotherScope && (scope.projectDir !== selection.scope.projectDir || previous.review.generation !== selection.generation)) ||
+      previous.review.head !== fingerprint([selection.head.branch, selection.head.oid]) || previous.review.scope !== next.review.scope ||
       previous[details].head.branch !== next[details].head.branch) return new Map();
   const written = new Map(selection.paths.map((path) => [path.path, path]));
   const byKey = new Map<string, string | null>();

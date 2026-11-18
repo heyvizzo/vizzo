@@ -3,7 +3,7 @@ import type { CommitOwnershipPlan, CommitOwnershipReceipt, PublishedBaseEvidence
 import type { CommitRecoveryCheckpoint, CommitRecoveryResult } from "./commitRecovery.ts";
 import type { CommitJournal, CommitRequest, CommitStart, FrozenCommitSelection } from "./commitTransaction.ts";
 import type { EditBatch } from "./evidence.ts";
-import type { BatchResult, CommitJobKey, CommitJobRecord, CommitJobSummary, LedgerStore, LedgerView } from "./ledger.ts";
+import type { BatchResult, CommitJobKey, CommitJobRecord, CommitJobSummary, LedgerStore, LedgerView, ThreadDeleteHandoff } from "./ledger.ts";
 import { isLedgerLeaseRefused, LedgerLeaseRefusedError } from "./ledgerLease.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
 import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
@@ -17,6 +17,12 @@ type Request =
   | { method: "writerSnapshot"; projectId: string }
   | { method: "trackedPaths"; project: LedgerProject }
   | { method: "queueCommit"; project: LedgerProject; request: CommitRequest }
+  | { method: "threadDeleteContexts"; targets: Parameters<LedgerStore["threadDeleteContexts"]>[0] }
+  | { method: "handoffThreadDeletes"; handoffs: readonly ThreadDeleteHandoff[] }
+  | { method: "pendingThreadDeletes" }
+  | { method: "completeThreadDeletes"; threadIds: readonly string[] }
+  | { method: "closedThreads"; project: LedgerProject }
+  | { method: "carryThreadDeleteCommit"; key: CommitJobKey; expected: CommitRequest; request: CommitRequest }
   | { method: "beginCommit"; project: LedgerProject; start: CommitStart }
   | { method: "pinCommit"; key: CommitJobKey; frozen: FrozenCommitSelection<CommitOwnershipReceipt> }
   | { method: "checkpointCommit"; record: CommitJournal<CommitOwnershipPlan>; proof?: PublishedBaseEvidence }
@@ -27,8 +33,13 @@ type Request =
   | { method: "noteCommitIssue"; key: CommitJobKey; reason: string };
 
 export type LedgerRequest = Request & { id: number };
-export type LedgerResponse = { id: number; result: unknown } | { id: number; error: string; code?: "LEDGER_LEASE_REFUSED" };
+export type LedgerResponse = { id: number; result: unknown } |
+  { id: number; error: string; code?: "LEDGER_LEASE_REFUSED" | "LEDGER_COMMIT_PINNED" };
 export type LedgerNotification = { changedProjectId: string };
+
+export function isLedgerCommitPinned(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "LEDGER_COMMIT_PINNED";
+}
 
 export class LedgerWorkerClient {
   private readonly worker: Worker;
@@ -50,7 +61,7 @@ export class LedgerWorkerClient {
       this.waiting.delete(reply.id);
       if (!this.waiting.size) this.worker.unref();
       if ("error" in reply) callbacks.reject(reply.code === "LEDGER_LEASE_REFUSED"
-        ? new LedgerLeaseRefusedError(reply.error) : new Error(reply.error));
+        ? new LedgerLeaseRefusedError(reply.error) : Object.assign(new Error(reply.error), { code: reply.code }));
       else callbacks.resolve(reply.result);
     });
     const fail = (error: Error) => {
@@ -118,6 +129,30 @@ export class LedgerWorkerClient {
 
   queueCommit(project: LedgerProject, request: CommitRequest): Promise<boolean> {
     return this.request({ method: "queueCommit", project, request });
+  }
+
+  threadDeleteContexts(targets: Parameters<LedgerStore["threadDeleteContexts"]>[0]): Promise<ReturnType<LedgerStore["threadDeleteContexts"]>> {
+    return this.request({ method: "threadDeleteContexts", targets });
+  }
+
+  handoffThreadDeletes(handoffs: readonly ThreadDeleteHandoff[]): Promise<ReturnType<LedgerStore["handoffThreadDeletes"]>> {
+    return this.request({ method: "handoffThreadDeletes", handoffs });
+  }
+
+  pendingThreadDeletes(): Promise<string[]> {
+    return this.request({ method: "pendingThreadDeletes" });
+  }
+
+  completeThreadDeletes(threadIds: readonly string[]): Promise<void> {
+    return this.request({ method: "completeThreadDeletes", threadIds });
+  }
+
+  closedThreads(project: LedgerProject): Promise<ReturnType<LedgerStore["closedThreads"]>> {
+    return this.request({ method: "closedThreads", project });
+  }
+
+  carryThreadDeleteCommit(key: CommitJobKey, expected: CommitRequest, request: CommitRequest): Promise<boolean> {
+    return this.request({ method: "carryThreadDeleteCommit", key, expected, request });
   }
 
   beginCommit(project: LedgerProject, start: CommitStart): Promise<boolean> {

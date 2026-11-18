@@ -1,5 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { LedgerStore } from "./ledger.ts";
+import { LedgerCommitPinnedError, LedgerStore } from "./ledger.ts";
 import { isLedgerLeaseRefused } from "./ledgerLease.ts";
 import { LedgerPersistence } from "./persistence.ts";
 import { discoverLedgerProject } from "./project.ts";
@@ -39,6 +39,7 @@ async function receive(request: LedgerRequest) {
     }
     let result: unknown;
     let changedProject: string | undefined;
+    let changedProjects: string[] = [];
     switch (request.method) {
       case "discover": result = discoverLedgerProject(request.directory); break;
       case "ingest": {
@@ -60,6 +61,19 @@ async function receive(request: LedgerRequest) {
       case "queueCommit":
         result = store.queueCommit(request.project, request.request);
         if (result) changedProject = request.project.id;
+        break;
+      case "threadDeleteContexts": result = store.threadDeleteContexts(request.targets); break;
+      case "handoffThreadDeletes": {
+        const handoff = store.handoffThreadDeletes(request.handoffs);
+        result = handoff;
+        changedProjects = handoff.projectIds;
+        break;
+      }
+      case "pendingThreadDeletes": result = store.pendingThreadDeletes(); break;
+      case "completeThreadDeletes": result = store.completeThreadDeletes(request.threadIds); break;
+      case "closedThreads": result = store.closedThreads(request.project); break;
+      case "carryThreadDeleteCommit":
+        result = store.carryThreadDeleteCommit(request.key, request.expected, request.request);
         break;
       case "beginCommit":
         result = store.beginCommit(request.project, request.start);
@@ -93,10 +107,11 @@ async function receive(request: LedgerRequest) {
     if (request.method !== "discover") scheduleExpiry(store.pending().deadline);
     port.postMessage({ id, result } satisfies LedgerResponse);
     if (changedProject) notify(changedProject);
+    for (const projectId of changedProjects) notify(projectId);
   } catch (error) {
     port.postMessage({
       id, error: error instanceof Error ? error.message : String(error),
-      ...(isLedgerLeaseRefused(error) && { code: error.code }),
+      code: isLedgerLeaseRefused(error) ? error.code : error instanceof LedgerCommitPinnedError ? "LEDGER_COMMIT_PINNED" : undefined,
     } satisfies LedgerResponse);
   }
 }
