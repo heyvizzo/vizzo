@@ -91,7 +91,7 @@ function applyCompletion(store: ThreadStore, receipt: DeleteReceipt): void {
   if (!record) return;
   const incomplete = !!receipt.incompleteReason;
   const sessionId = savedNativeSession(record);
-  const canContinue = !!(receipt.continuesExecutionId && sessionId && (!receipt.continuationSessionId || receipt.continuationSessionId === sessionId));
+  const canContinue = !!(receipt.continuesExecutionId && sessionId && receipt.continuationSessionId === sessionId);
   const { info } = record;
   if (Boolean(info.incomplete) === incomplete && info.incompleteReason === receipt.incompleteReason && Boolean(info.canContinue) === canContinue) return;
   store.update(receipt.threadId, (thread) => {
