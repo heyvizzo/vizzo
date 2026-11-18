@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -139,6 +139,76 @@ describe.each(["files", "reftable"] as const)("Git tree and index with %s refs",
     await expect(prepareIndexBytes({ ...repo, entries: built.entries }))
       .rejects.toThrow('This path has staged changes: "text.txt"');
     expect(readFileSync(repo.indexPath)).toEqual(indexBefore);
+  });
+
+  it("refuses a protected path that update-index silently leaves out", async () => {
+    const repo = repository(format);
+    const base = repo.commitBase();
+    repo.git(["config", "core.protectNTFS", "true"]);
+    const path = ".git ";
+    const body = "tracked-looking bytes\n";
+    repo.file(path, body);
+    expect(repo.git(["status", "--porcelain", "-z"]).toString()).toBe(`?? ${path}\0`);
+    const oid = repo.git(["hash-object", "-w", "--stdin"], body).toString().trim();
+    const indexBefore = readFileSync(repo.indexPath);
+    repo.lock();
+
+    await expect(buildCommitTree({ ...repo, base, entries: [entries(path, body)], message: "Protected path" }))
+      .rejects.toThrow('Git did not apply the selected entry to the commit tree: ".git "');
+    await expect(prepareIndexBytes({ ...repo, entries: [{ path, base: null, next: { mode: "100644", oid } }] }))
+      .rejects.toThrow('Git did not apply the selected entry to the prepared index: ".git "');
+    expect(readFileSync(repo.indexPath)).toEqual(indexBefore);
+    expect(repo.line("rev-parse", "HEAD")).toBe(base);
+  });
+
+  it("keeps a same-size edit visible after installing an index with racy stat information", async () => {
+    vi.stubEnv("GIT_OPTIONAL_LOCKS", "0");
+    const repo = repository(format);
+    repo.git(["config", "core.trustctime", "false"]);
+    repo.git(["config", "core.checkStat", "minimal"]);
+    const t = 1_644_552_000;
+    const changed = join(repo.root, "other.txt");
+    repo.file("other.txt", "old\n");
+    utimesSync(changed, t, t);
+    repo.file("select.txt", "old\n");
+    const base = repo.commitBase();
+    utimesSync(repo.indexPath, t, t);
+    repo.file("other.txt", "new\n");
+    utimesSync(changed, t, t);
+    repo.file("select.txt", "selected\n");
+    expect(repo.git(["status", "--porcelain", "-z"]).toString()).toBe(" M other.txt\0 M select.txt\0");
+    repo.lock();
+
+    const built = await buildCommitTree({ ...repo, base, entries: [entries("select.txt", "selected\n")], message: "Keep other edits" });
+    const prepared = await prepareIndexBytes({ ...repo, entries: built.entries });
+    writeFileSync(repo.lockPath, prepared);
+    repo.git(["update-ref", "HEAD", built.commit, base]);
+    renameSync(repo.lockPath, repo.indexPath);
+    expect(repo.git(["status", "--porcelain", "-z"]).toString()).toBe(" M other.txt\0");
+    expect(repo.blob(built.commit, "other.txt").toString()).toBe("old\n");
+    expect(readFileSync(changed, "utf8")).toBe("new\n");
+  });
+
+  it("keeps skip-worktree on an unselected sparse path recreated in the working tree", async () => {
+    const repo = repository(format);
+    repo.file("hidden/one", "outside cone\n");
+    repo.file("hidden/two", "outside cone\n");
+    repo.file("visible/one", "inside cone\n");
+    const base = repo.commitBase();
+    repo.git(["sparse-checkout", "set", "--cone", "--sparse-index", "visible"]);
+    repo.file("hidden/one", "recreated outside cone\n");
+    const showFlags = ["-c", "core.sparseCheckout=false", "ls-files", "-v"];
+    const flags = "S hidden/one\nS hidden/two\nH visible/one\n";
+    expect(repo.git(showFlags).toString()).toBe(flags);
+    const original = readFileSync(repo.indexPath);
+    repo.lock();
+
+    const built = await buildCommitTree({ ...repo, base, entries: [entries("visible/one", "selected\n")], message: "Inside cone" });
+    const prepared = await prepareIndexBytes({ ...repo, entries: built.entries });
+    expect(repo.staged(prepared, ...showFlags)).toBe(flags);
+    expect(repo.staged(prepared, "show", ":visible/one")).toBe("selected\n");
+    expect(readFileSync(repo.indexPath)).toEqual(original);
+    expect(readFileSync(join(repo.root, "hidden/one"), "utf8")).toBe("recreated outside cone\n");
   });
 
   it("builds an unborn SHA-256 commit and future index without changing any ref", async () => {

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, readFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,7 +35,7 @@ function runGit(root: string, index: string, args: string[], input?: string | Bu
   return new Promise((resolve, reject) => {
     const child = spawn("git", [
       "--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.splitIndex=false",
-      "-c", "core.fsmonitor=false", "-c", "index.skipHash=false", ...args,
+      "-c", "core.fsmonitor=false", "-c", "core.sparseCheckout=false", "-c", "index.skipHash=false", ...args,
     ], { cwd: root, env, stdio: "pipe" });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -67,7 +67,7 @@ async function withTemporaryIndex<T>(use: (index: string) => Promise<T>): Promis
 }
 
 async function fileInfo(path: string) {
-  try { return await lstat(path); }
+  try { return await lstat(path, { bigint: true }); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return null;
@@ -78,7 +78,11 @@ async function copyIndex(source: string, destination: string): Promise<void> {
   const info = await fileInfo(source);
   if (info === null) return;
   if (!info.isFile()) throw new Error("The Git index must be a regular file.");
-  await writeFile(destination, await readFile(source));
+  await copyFile(source, destination);
+  // Git uses the index mtime to detect racy stat information and invalidate it when writing.
+  // Round down so converting the filesystem timestamp cannot make a racy entry appear clean.
+  const mtime = new Date(Number(info.mtimeNs / 1_000_000n) - 1);
+  await utimes(destination, new Date(Number(info.atimeMs)), mtime);
 }
 
 async function assertNoOperation(root: string, index: string): Promise<void> {
@@ -164,13 +168,15 @@ function assertStaging(
   entries: readonly {path: string; base: GitTreeEntry | null}[],
 ): void {
   for (const { path, base } of entries) {
-    const staged = real.get(pathKey(path));
-    if (!base && !staged) continue;
-    const entry = staged?.[0];
-    if (base && staged?.length === 1 && entry?.stage === "0" &&
-        entry.mode === base.mode && entry.oid === base.oid) continue;
-    throw new Error(`This path has staged changes: ${JSON.stringify(path)}`);
+    if (!matchesEntry(real, path, base)) throw new Error(`This path has staged changes: ${JSON.stringify(path)}`);
   }
+}
+
+function matchesEntry(entries: Map<string, ListedEntry[]>, path: string, expected: GitTreeEntry | null): boolean {
+  const actual = entries.get(pathKey(path));
+  if (!expected) return !actual;
+  const entry = actual?.[0];
+  return actual?.length === 1 && entry?.stage === "0" && entry.mode === expected.mode && entry.oid === expected.oid;
 }
 
 // A file/directory transition can evict entries implicitly in update-index. Require every displaced path
@@ -199,6 +205,19 @@ const nonIdentity = (path: string): Error => new Error(
 );
 
 type GitIndexEdit = { path: string; next: GitTreeEntry | null };
+
+function assertAppliedEntries(
+  actual: Map<string, ListedEntry[]>,
+  edits: readonly GitIndexEdit[],
+  target: "commit tree" | "prepared index",
+): void {
+  for (const { path, next } of edits) {
+    // Git may report success from --index-info even when path protection skips an entry.
+    if (!matchesEntry(actual, path, next)) {
+      throw new Error(`Git did not apply the selected entry to the ${target}: ${JSON.stringify(path)}`);
+    }
+  }
+}
 
 async function updateEntries(
   root: string,
@@ -344,6 +363,10 @@ export async function buildCommitTree({ root, indexPath, base, entries, message 
     }
     await updateEntries(root, treeIndex, zero, changes);
     const tree = changes.length ? await writeTree(root, treeIndex) : attributes.tree;
+    const next = new Map([...attributes.entries, ...changes].map((entry) => [entry.path, entry.next]));
+    const applied = startingEntries.map((entry) => ({ ...entry, next: next.get(entry.path) ?? null }));
+    const actualTree = readEntries(await git(root, treeIndex, ["ls-tree", "-rz", "--full-tree", tree]), true);
+    assertAppliedEntries(actualTree, applied, "commit tree");
 
     const signArgs = ["config", "--bool", "--get", "commit.gpgSign"];
     const sign = await runGit(root, treeIndex, signArgs);
@@ -353,15 +376,15 @@ export async function buildCommitTree({ root, indexPath, base, entries, message 
     if (sign.stdout.toString("ascii").trim() === "true") args.push("-S");
     const commit = (await git(root, treeIndex, args, message)).toString("ascii").trim();
 
-    const next = new Map([...attributes.entries, ...changes].map((entry) => [entry.path, entry.next]));
-    return { tree, commit, entries: startingEntries.map((entry) => ({ ...entry, next: next.get(entry.path) ?? null })) };
+    return { tree, commit, entries: applied };
   });
 }
 
 /**
  * Recheck staging against the journalable base entries and return a checksummed index to install later.
  * The caller must hold the real index lock. Git may refresh a shared-index cache timestamp while reading a
- * split index; the returned bytes are self-contained. This never changes the real index or any ref.
+ * split index and read the working tree to verify potentially racy stat records. That check only updates
+ * cached stat information. The returned bytes are self-contained.
  */
 export async function prepareIndexBytes({ root, indexPath, entries }: Repository & {
   entries: readonly GitEntryChange[];
@@ -373,6 +396,8 @@ export async function prepareIndexBytes({ root, indexPath, entries }: Repository
     assertStaging(real, entries);
     assertNoUnselectedCollisions(real, selected, entries.filter(({ next }) => next).map(({ path }) => pathKey(path)));
     await updateEntries(root, index, await zeroOid(root, index), entries, true);
+    const prepared = readEntries(await git(root, index, ["ls-files", "-z", "--stage"]), false);
+    assertAppliedEntries(prepared, entries, "prepared index");
     return readFile(index);
   });
 }
