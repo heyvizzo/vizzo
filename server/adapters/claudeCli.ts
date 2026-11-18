@@ -1,4 +1,5 @@
 import type { ImageBlockParam, TextBlockParam } from "@anthropic-ai/sdk/resources/messages";
+import type { HarnessTurn } from "./harnesses.ts";
 // The stream-json reader for `claude -p` (Claude Code, headless) and Grok's CLI, which prints the same events
 // (--output-format streaming-messages-json). A `claude -p` agent starts with its system prompt, model and
 // effort and waits for one user message on stdin (--input-format stream-json), so it can be spawned ahead
@@ -33,6 +34,7 @@ export interface CliHandlers {
   onText?: (delta: string) => void;
   /** Every event as received. */
   onEvent?: (ev: Record<string, unknown>) => void;
+  turn?: HarnessTurn;
 }
 
 /**
@@ -44,7 +46,7 @@ export const CLAUDE_BASE_ARGS = [
 ];
 
 /** After an interrupt (stop, time limit), how long a kept agent has to end its turn before the process is killed. */
-const INTERRUPT_GRACE_MS = 5000;
+const INTERRUPT_GRACE_MS = 30_000;
 
 /** Where agents run by default: an empty directory, so no project settings or CLAUDE.md are picked up. */
 export const EMPTY_CWD = join(tmpdir(), "vizzo-agents");
@@ -67,6 +69,7 @@ export class CliAgent {
   constructor(readonly role: string, readonly bin: string, args: string[], cwd: string = EMPTY_CWD, env: NodeJS.ProcessEnv = process.env) {
     mkdirSync(cwd, { recursive: true });
     this.proc = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], env });
+    this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (d: string) => this.onData(d));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
@@ -95,7 +98,12 @@ export class CliAgent {
    * out of time is interrupted (it stays, with its conversation); it is only killed if it doesn't stop.
    */
   request(user: string | (ImageBlockParam | TextBlockParam)[] | null, handlers: CliHandlers, timeoutMs: number, warm: boolean, keep = false): Promise<CliResult> {
+    handlers.turn?.checkBeforeSend();
     return new Promise<CliResult>((resolve, reject) => {
+      let settle!: () => void;
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      const force = () => { if (!this.exited) this.proc.kill("SIGKILL"); };
+      handlers.turn?.holdUntil(settled, force);
       let text = "";
       let stopReason: string | null = null;
       let assistant: unknown = null;
@@ -108,16 +116,19 @@ export class CliAgent {
           setTimeout(() => { if (!this.exited) this.proc.kill("SIGTERM"); }, keep ? 0 : 2000).unref();
         }
         fn();
+        settle();
       };
-      const timedOut = (): Error => new Error(`${this.bin} (${this.role}) timed out after ${timeoutMs} ms`);
+      const timedOut = (): Error => Object.assign(
+        new Error(`${this.bin} (${this.role}) timed out after ${timeoutMs} ms`), { name: "TimeoutError" },
+      );
       let overtime = false;
       let grace: NodeJS.Timeout | undefined;
       const timer = setTimeout(() => {
-        if (!keep) { done(() => reject(timedOut()), true); return; }
         overtime = true;
-        this.interrupt();
-        grace = setTimeout(() => done(() => reject(timedOut()), true), INTERRUPT_GRACE_MS);
-        grace.unref();
+        handlers.turn?.stop("timed-out");
+        if (user === null) this.kill(); else this.interrupt();
+        reject(timedOut());
+        if (!handlers.turn) grace = setTimeout(force, INTERRUPT_GRACE_MS).unref();
       }, timeoutMs);
       const listener = (ev: Record<string, unknown>): void => {
         handlers.onEvent?.(ev);
@@ -125,7 +136,7 @@ export class CliAgent {
           const e = ev.event as { type?: string; delta?: { type?: string; text?: string; stop_reason?: string } } | undefined;
           if (e?.type === "content_block_delta" && e.delta?.type === "text_delta" && e.delta.text) {
             text += e.delta.text;
-            handlers.onText?.(e.delta.text);
+            if (!overtime && !handlers.turn?.stopping) handlers.onText?.(e.delta.text);
           } else if (e?.type === "message_delta" && e.delta?.stop_reason) {
             stopReason = e.delta.stop_reason;
           }

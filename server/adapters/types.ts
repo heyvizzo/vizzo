@@ -244,6 +244,8 @@ export interface HarnessThread {
   pid?(): number | undefined;
   /** Stop the in-flight request (its send() rejects with an AbortError-named error). The session stays, with its context. */
   abort(): void;
+  /** The active request's native terminal event or process exit, including in-flight edit notifications. */
+  readonly settled?: Promise<void>;
   /**
    * Stop the session's process for good (thread deleted, new conversation). The harness's saved session stays on
    * disk, so the user can still open it with the harness's own resume command.

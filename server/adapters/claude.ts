@@ -95,7 +95,7 @@ export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: Chat
   const now = agentSpec(role, choice, spec?.persist);
   const used = spec ?? now;
   // The layers as they are now; a session opened under other settings shows the prompt it was given, as one part.
-  const parts = rolePromptParts(role, used.harness, used.toggles);
+  const parts = rolePromptParts(role, used.harness, used.toggles, used.project ?? null);
   const system = parts.map((x) => x.text).join("\n\n") === used.system
     ? parts
     : [{ label: `${ROLE_PROMPT_LABEL[role]} + project note + saved instructions, as fixed when this session was opened`, text: used.system }];
@@ -165,8 +165,9 @@ export function projectNote(harness: LlmProvider, toggles?: HarnessToggles): str
   const has = (id: "shell" | "web"): boolean => isHarness(harness) && toggleOn(harness, toggles, id, "smart");
   return [
     `Your working directory is the project you're answering about. Find the code behind the pointed elements ${claude ? "with Glob, Grep and Read" : "with your file search and read tools"}: start from what identifies the element (its JSX location or data-source when given, else its \`selector\` line, data-testid, classes and text), then read the markup, styles and script that render it. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, ${claude ? "make the change with Edit or Write" : "make the change with your file editing tools"}, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`,
+    `Never stage, commit, stash, reset, check out, switch branches or push, even when asked. Commits are made from Vizzo's Commit button.`,
     has("shell")
-      ? `You have a shell. Use it to look things up when the request needs it (git status, log, blame and diff, the project's own type check or tests). Don't commit, push, switch branches, install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served, and the user decides what gets committed.`
+      ? `You have a shell. Use it to look things up when the request needs it (git status, log, blame and diff, the project's own type check or tests). Don't install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served.`
       : `You have no shell, so you can't run git, builds or tests, and the files under .git/ are compressed: don't read them or hunt for other copies of a file. Use the request's git state block (status, recent commits, uncommitted changes), and say plainly when an answer needs history it doesn't show, or when a change should be checked by running something.`,
     ...(has("web") ? [`You can search and fetch the web: use it for documentation the project doesn't contain, never for what the project's own code answers.`] : []),
   ].join(" ");
@@ -205,7 +206,7 @@ export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: H
     { label: ROLE_PROMPT_LABEL.solver, text: prompts().solver },
     // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
     dir ? { label: "project note (what this harness's switches give it)", text: projectNote(harness, toggles) } : { label: "no-tools note", text: NO_TOOLS_NOTE },
-    ...solverInstructions().map((x) => ({ label: `saved instructions · ${x.label}`, text: `## ${x.label}\n\n${x.text}` })),
+    ...solverInstructions(dir).map((x) => ({ label: `saved instructions · ${x.label}`, text: `## ${x.label}\n\n${x.text}` })),
   ];
 }
 
@@ -619,7 +620,7 @@ export const solveTask: SolveTask = async ({ mark, question, original, pointing,
   const gate = new NarrationGate(onText);
   let res: HarnessResult;
   try {
-    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations, pinned);
+    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations, pinned, execution);
     gate.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));

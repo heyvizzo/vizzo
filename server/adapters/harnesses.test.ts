@@ -7,6 +7,20 @@ const spec = (o: Partial<AgentSpec>): AgentSpec => ({ role: "router", harness: "
 const after = (args: string[], flag: string): string | undefined => args[args.indexOf(flag) + 1];
 
 describe("harness command lines", () => {
+  it("denies Git writes on both native solver shell settings", () => {
+    for (const shell of [true, false]) {
+      const args = claudeArgs({ role: "solver", harness: "claude-code", model: "", system: "prompt", project: "/project", toggles: { shell } });
+      const denied = args.slice(args.indexOf("--disallowedTools") + 1, args.indexOf("--dangerously-skip-permissions"));
+      for (const verb of ["add", "stage", "commit", "stash", "reset", "checkout", "switch", "push"]) {
+        expect(denied).toContain(`Bash(git ${verb}:*)`);
+      }
+      expect(denied).toContain("Read(.env*)");
+      expect(denied).toContain("Edit(.env*)");
+      expect(denied.includes("Bash")).toBe(!shell);
+      expect(denied).not.toContain("Bash(git status:*)");
+    }
+  });
+
   it("Claude Code: yolo, no tools for the router, effort, fast mode through settings", () => {
     const a = claudeArgs(spec({ level: "low" }));
     expect(a).toContain("--dangerously-skip-permissions");
@@ -31,8 +45,11 @@ describe("harness command lines", () => {
     expect(o).not.toContain("--strict-mcp-config");
     expect(o).not.toContain("--disable-slash-commands");
     const denied = o.slice(o.indexOf("--disallowedTools") + 1, o.indexOf("--dangerously-skip-permissions"));
-    // Only what can't work unattended, and the secrets.
-    expect(denied).toEqual(["EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Monitor", "Read(.env*)", "Edit(.env*)"]);
+    expect(denied).toEqual([
+      "EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Monitor", "Read(.env*)", "Edit(.env*)",
+      "Bash(git add:*)", "Bash(git stage:*)", "Bash(git commit:*)", "Bash(git stash:*)",
+      "Bash(git reset:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git push:*)",
+    ]);
     expect(JSON.parse(after(o, "--settings")!)).toEqual({ fastMode: true });
     expect(o).not.toContain("--restricted"); // it refuses bypass mode
   });

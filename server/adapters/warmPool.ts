@@ -10,7 +10,8 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // A fast tier on a model API (llmApi.ts) has nothing to warm: its roles get no pool.
 import { cleanToggles, isHarness, LLM_PROVIDER_LABELS, type HarnessId, type HarnessToggles, type LlmChoice, type LlmTier } from "../../shared/config.ts";
 import type { CliRole } from "./claudeCli.ts";
-import { AGENT_FACTORIES, KEEPS_POOLED, ROLE_TIER, stopSharedServers, type AgentFactory, type AgentSpec, type HarnessResult, type SessionStart, type WarmAgent } from "./harnesses.ts";
+import type { WriterExecution } from "../changes/writers.ts";
+import { AGENT_FACTORIES, HarnessTurn, KEEPS_POOLED, ROLE_TIER, stopSharedServers, type AgentFactory, type AgentSpec, type HarnessResult, type SessionStart, type WarmAgent } from "./harnesses.ts";
 
 /** Agents kept waiting per pool. Codex threads and opencode sessions are cheap; Grok can't be pre-started. */
 export const POOL_SIZE: Record<HarnessId, number> = { "claude-code": 1, codex: 2, grok: 0, opencode: 2, pi: 1, omp: 1 };
@@ -147,7 +148,7 @@ export function configureWarm(selection: Record<LlmTier, LlmChoice>): void {
  * aborted: the agent is killed and this rejects at once.
  */
 export async function harnessRequest(
-  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal, annotations?: readonly DrawingAnnotation[], pinned?: AgentSpec,
+  role: CliRole, choice: LlmChoice, user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal, annotations?: readonly DrawingAnnotation[], pinned?: AgentSpec, execution?: WriterExecution,
 ): Promise<HarnessResult> {
   signal?.throwIfAborted();
   hookExit();
@@ -162,18 +163,27 @@ export async function harnessRequest(
   const h = spec.harness;
   inflight.set(h, (inflight.get(h) ?? 0) + 1);
   let onAbort: (() => void) | null = null;
+  const turn = new HarnessTurn(execution);
   try {
-    const request = agent.request(user, signal ? (d) => { if (!signal.aborted) onText?.(d); } : onText, timeoutMs, annotations);
+    const request = agent.request(user, signal ? (d) => { if (!signal.aborted) onText?.(d); } : onText, timeoutMs, annotations, turn);
     if (!signal) return await request;
     request.catch(() => {}); // aborted: nobody waits for it any more
     const aborted = new Promise<never>((_, reject) => {
-      onAbort = () => { agent.kill(); reject(signal.reason ?? new Error("aborted")); };
-      signal.addEventListener("abort", onAbort, { once: true });
+      onAbort = () => {
+        turn.stop();
+        if (agent.abort) agent.abort();
+        else agent.kill();
+        reject(signal.reason ?? new Error("aborted"));
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
     });
     return await Promise.race([request, aborted]);
   } finally {
     if (onAbort) signal?.removeEventListener("abort", onAbort);
-    inflight.set(h, (inflight.get(h) ?? 1) - 1);
+    const release = () => { inflight.set(h, (inflight.get(h) ?? 1) - 1); };
+    if (turn.settled) void turn.settled.then(release);
+    else release();
   }
 }
 

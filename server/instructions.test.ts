@@ -27,7 +27,9 @@ describe("solver instruction composition", () => {
       expect(prompt.system).toContain("SPOKEN:");
       expect(prompt.system).toContain("## All projects\n\nAlways run tests and commit.");
       expect(prompt.system).toContain("## This project\n\nUse Tailwind classnames.");
-      expect(prompt.system).toContain("standing authorization");
+      expect(prompt.system).toContain("A saved request to test is standing authorization to run tests");
+      expect(prompt.system).toContain("Vizzo's Git restrictions apply to both scopes and to current requests.");
+      expect(prompt.system).not.toContain("A saved request to test or commit is standing authorization");
       expect(prompt.system).not.toContain("unrelated project rule");
       const info = harnessPromptInfo("solver", { provider, model: "" }, { messages: [{ role: "user", content: "change it" }] });
       // The inspector shows the prompt as its layers: the prompt file, the project note, each saved scope.
@@ -52,6 +54,7 @@ describe("solver instruction composition", () => {
     setProjectDir(root);
     expect(solverInstructions().map(s => s.text)).toContain("global");
     expect(solverInstructions().map(s => s.text)).not.toContain("updated");
+    expect(roleSystem("solver", "claude-code", undefined, project).system).toContain("## This project\n\nupdated");
     setProjectDir(null);
     expect(roleSystem("solver", "claude-code").system).toContain("You have no tools");
     expect(solverInstructions().at(-1)?.label).toBe("All projects");

@@ -151,6 +151,7 @@ export class WriterExecution {
 
   get id(): string { return this.record.executionId; }
   get folder(): string | null { return this.record.folder; }
+  get stopRequested(): boolean { return this.stopOutcome !== undefined; }
   get writer(): WriterId { return { ...this.record.writer }; }
 
   private schedule(write: (project: LedgerProject) => Promise<unknown>): void {
@@ -189,7 +190,8 @@ export class WriterExecution {
 
   stopping(outcome: ExecutionOutcome = "stopped"): void {
     if (this.record.phase === "settled") return;
-    this.stopOutcome ??= outcome;
+    if (outcome === "interrupted") this.stopOutcome = outcome;
+    else this.stopOutcome ??= outcome;
     if (this.record.phase === "queued" || this.record.phase === "running") {
       this.record.phase = "settling";
       this.save();
