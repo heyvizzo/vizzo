@@ -498,3 +498,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - A partial entry's new blob must also round-trip to the frozen bytes in working-tree form under the candidate
   attributes. An empty base can hide an active CRLF conversion. New or empty-base files use whole-content
   conversion when all content is selected, while an independent executable-mode hunk remains separate.
+- The ledger takes an exclusive kernel lock on a private sibling file for the ledger worker's lifetime. In a
+  two-voice-process probe, the second process opened the shared ledger and stopped a harness still owned by the
+  first. A competing process shows source control as unavailable and keeps solver dispatch available without ledger
+  attribution. The kernel releases the lock when its owner exits.

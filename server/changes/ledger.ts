@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { combine } from "./annotations.ts";
 import { boundVersions, changeBase, compact, insert, inspect, newChain, observe, place, tip, type Chain, type FileEvidence } from "./chain.ts";
-import { CommitOwnershipError, pinCommitOwnership, settleCommitOwnership, validateCommitOwnershipCandidate,
+import { CommitOwnershipError, pinCommitOwnership, settleCommitOwnership, validateCommitOwnershipCandidate, verifyLateCommitEdit,
   type CommitOwnershipPlan, type CommitOwnershipReceipt,
   type CommitOwnershipSnapshot, type PublishedBaseEvidence } from "./commitOwnership.ts";
 import type { CommitRecoveryCheckpoint, CommitRecoveryResult } from "./commitRecovery.ts";
@@ -11,7 +11,7 @@ import { changeWriterId } from "./components.ts";
 import { bytesFor, sameEntry, storeEntry, type Content, type Entry, type ReadEntry } from "./entries.ts";
 import { batchKey, exactBytes, exactText, MAX_FILE_BYTES, parsePatch, PENDING_MS, TOO_LARGE,
   type EditBatch, type EditChange } from "./evidence.ts";
-import { LedgerPersistence } from "./persistence.ts";
+import { hash, LedgerPersistence } from "./persistence.ts";
 import { evidencePath, pathAcceptsEvidence, readBaseEntry, readLedgerHead, readWorkingEntry, sameHead,
   type LedgerHead, type LedgerProject } from "./project.ts";
 import { stopVerifiedOrphanNativeProcess } from "../adapters/nativeProcess.ts";
@@ -33,7 +33,7 @@ interface Receipt {
   results: Result[];
   pending: { index: number; effects: Unit }[];
   reason?: string;
-  held?: { receivedAt: number; head?: LedgerHead };
+  held?: { receivedAt: number; head?: LedgerHead; observed?: Record<string, Entry> };
 }
 
 type RecoveryOutcome = Exclude<CommitRecoveryResult, { status: "skipped" }>;
@@ -369,10 +369,94 @@ function addReceiptPaths(state: ProjectState, receipt: Receipt, content: Content
   }
 }
 
-function replayHeld(
-  state: ProjectState, project: LedgerProject, before: LedgerHead, settled: LedgerHead, content: Content,
+function matchesReport(entry: Entry, blob: string | null): boolean {
+  return blob === null ? entry.kind === "absent" : entry.kind === "file" && entry.blob === blob;
+}
+
+function observeHeldRollbacks(state: ProjectState, project: LedgerProject, units: Unit[]): Record<string, Entry> {
+  const observed: Record<string, Entry> = {};
+  for (const [effect, next] of units) {
+    const { path, evidence } = effect;
+    if (next || "patch" in evidence) continue;
+    const chain = state.files[fileKey(path)];
+    if (!chain || matchesReport(tip(chain), evidence.from) ||
+        !chain.versions.some(({ entry }) => matchesReport(entry, evidence.from))) continue;
+    let current: ReadEntry;
+    try { current = readWorkingEntry(project, path); }
+    catch { continue; }
+    if (current.kind === "absent" && evidence.to === null) observed[fileKey(path)] = current;
+    if (current.kind === "file" && hash(current.bytes) === evidence.to) {
+      // Normalizing the report already stored and fsynced these exact bytes.
+      observed[fileKey(path)] = { kind: "file", mode: current.mode, blob: evidence.to };
+    }
+  }
+  return observed;
+}
+
+function acceptsHeldPath(state: ProjectState, receipt: Receipt, path: string): boolean {
+  try { return pathAcceptsEvidence(state.executions[executionKey(receipt.executionId)]!, path); }
+  catch { return false; }
+}
+
+function explainFrozenGaps(
+  state: ProjectState, plan: CommitOwnershipPlan, nextHead: LedgerHead, content: Content,
+): CommitOwnershipPlan {
+  const selected = new Set(plan.paths.map(({ path }) => path));
+  for (const [key, receipt] of Object.entries(state.receipts)) {
+    const head = receipt.held?.head;
+    if (!head || (!sameHead(head, state.head) && !sameHead(head, nextHead))) continue;
+    for (const { index, effects: [{ path, evidence }, second] } of receipt.pending) {
+      if (second || !selected.has(path) || !acceptsHeldPath(state, receipt, path)) continue;
+      const chain = structuredClone(state.files[fileKey(path)]!);
+      const placement = place(chain, evidence, content);
+      if (!placement || typeof placement === "string" ||
+          (placement.rejoin === undefined && placement.reconnect === undefined)) continue;
+      insert(chain, placement, { executionId: receipt.executionId, key: JSON.stringify([key, path]) });
+      const verified = verifyLateCommitEdit(plan, path, chain, content);
+      if (!verified) continue;
+      plan = verified;
+      state.files[fileKey(path)] = chain;
+      setPendingResult(receipt, index, "applied");
+    }
+  }
+  return plan;
+}
+
+function reconnectHeldRollbacks(
+  state: ProjectState, key: string, receipt: Receipt, observed: Record<string, Entry>,
+  previous: ReadonlyMap<string, Chain>, content: Content,
 ): void {
-  for (const receipt of Object.values(state.receipts)) {
+  for (const { index, effects: [{ path, evidence }, second] } of receipt.pending) {
+    const endpoint = observed[fileKey(path)];
+    const original = previous.get(path);
+    const current = state.files[fileKey(path)];
+    if (second || "patch" in evidence || !endpoint || !current || !acceptsHeldPath(state, receipt, path)) continue;
+    if (!original) {
+      observe(current, endpoint);
+      continue;
+    }
+    if (!sameEntry(tip(current), tip(original))) continue;
+    const witness = structuredClone(original);
+    observe(witness, endpoint);
+    const placement = place(witness, evidence, content);
+    if (!placement || typeof placement === "string" || placement.reconnect !== witness.versions.length - 1 ||
+        !sameEntry(placement.after, endpoint)) continue;
+    const preimage = witness.versions[placement.from]!.entry;
+    // The intervening return to the historical preimage is an unexplained gap.
+    current.versions.push({ entry: preimage });
+    observe(current, endpoint);
+    insert(current, { from: current.versions.length - 2, after: endpoint, rejoin: current.versions.length - 1 }, {
+      executionId: receipt.executionId, key: JSON.stringify([key, path]),
+    });
+    setPendingResult(receipt, index, "applied");
+  }
+}
+
+function replayHeld(
+  state: ProjectState, project: LedgerProject, before: LedgerHead, settled: LedgerHead,
+  previous: ReadonlyMap<string, Chain>, content: Content,
+): void {
+  for (const [key, receipt] of Object.entries(state.receipts)) {
     const held = receipt.held;
     if (!held) continue;
     expire(state, held.receivedAt);
@@ -388,6 +472,9 @@ function replayHeld(
       state.headMoved = true;
     }
     addReceiptPaths(state, receipt, content);
+    if (held.observed && sameHead(state.head, settled)) {
+      reconnectHeldRollbacks(state, key, receipt, held.observed, previous, content);
+    }
     applyPending(state, content);
     boundAll(state, content);
   }
@@ -479,7 +566,16 @@ export class LedgerStore {
       if (state.pinnedJob !== undefined) {
         if (units.length) {
           receipt.held = { receivedAt: now };
-          try { receipt.held.head = readLedgerHead(wholeWorktree(project)); }
+          try {
+            const scope = wholeWorktree(project);
+            const head = readLedgerHead(scope);
+            receipt.held.head = head;
+            const observed = observeHeldRollbacks(state, project, units);
+            if (Object.keys(observed).length) {
+              if (sameHead(head, readLedgerHead(scope))) receipt.held.observed = observed;
+              else delete receipt.held.head;
+            }
+          }
           catch { /* Preserve exact bytes and the unavailable base in the durable receipt. */ }
         }
       } else {
@@ -671,6 +767,7 @@ export class LedgerStore {
     published?: Omit<Extract<CommitProgress, { phase: "done" }>, "receipt">,
   ): void {
     const before = state.head;
+    const previous = new Map<string, Chain>();
     if (published) {
       if (!job.prepared) throw new Error("The published commit is missing its verified Git base");
       const proof = {
@@ -679,15 +776,20 @@ export class LedgerStore {
             ? { ...working, bytes: bytesFor(working, content) } : working) as ReadEntry,
         })),
       };
-      const updates = settleCommitOwnership(ownershipSnapshot(state, job.project), published, proof, content);
+      const nextHead = { branch: published.head.branch, oid: published.commit };
+      let updates = settleCommitOwnership(ownershipSnapshot(state, job.project), published, proof, content);
+      const ownership = explainFrozenGaps(state, published.ownership, nextHead, content);
+      if (ownership !== published.ownership) {
+        updates = settleCommitOwnership(ownershipSnapshot(state, job.project), { ...published, ownership }, proof, content);
+      }
       for (const { path, chain } of updates) {
+        previous.set(path, state.files[fileKey(path)]!);
         state.files[fileKey(path)] = chain;
         normalizeTip(state, fileKey(path));
       }
-      rebaseState(state, job.project, { branch: published.head.branch, oid: published.commit }, content,
-        new Set(updates.map(({ path }) => path)));
+      rebaseState(state, job.project, nextHead, content, new Set(previous.keys()));
     }
-    replayHeld(state, job.project, before, state.head, content);
+    replayHeld(state, job.project, before, state.head, previous, content);
     delete state.pinnedJob;
     delete job.pin;
     delete job.prepared;

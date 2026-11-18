@@ -801,8 +801,13 @@ class RpcAgent implements WarmAgent {
     let cost = 0;
     let last: unknown = null;
     const t = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    let confirmTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => { confirmTerminal = resolve; });
     const done = new Promise<void>((resolve, reject) => {
-      this.exitWaiters = [(code) => reject(new Error(`${label} exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`))];
+      this.exitWaiters = [(code) => {
+        confirmTerminal();
+        reject(new Error(`${label} exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`));
+      }];
       this.listener = (ev) => {
         for (const f of rpcEditedFiles(ev)) files.add(f);
         const batch = edits?.(ev);
@@ -828,6 +833,7 @@ class RpcAgent implements WarmAgent {
         } else if (ev.type === "response" && ev.id === "prompt" && ev.success === false) {
           reject(new Error(`${label}: ${String(ev.error ?? "prompt rejected")}`));
         } else if (ev.type === "agent_end") {
+          confirmTerminal();
           resolve();
         }
       };
@@ -835,6 +841,8 @@ class RpcAgent implements WarmAgent {
     const cleanup = async () => {
       if (turn.stopping) {
         if (!this.kept) this.proc.stdin.end();
+        // A rejected RPC can finish the request without proving that an interrupted turn ended.
+        await terminal;
         await this.native.waitForStoppedTurn(this.kept);
       } else if (!this.kept) this.kill();
       this.listener = null;

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -356,6 +356,33 @@ describe.each(["files", "reftable"] as const)("%s ref format", (format) => {
     });
     expect(existsSync(repo.lockPath)).toBe(false);
     expect(readFileSync(repo.indexPath)).toEqual(before);
+  });
+
+  it.each(["the branch advances", "HEAD switches branches"] as const)("settles an installed index after %s", async (movement) => {
+    const repo = await fixture(format);
+    const journal = { ...await repo.orphan(repo.prepared), phase: "index-ready" as const, step: "install" as const };
+    repo.publish();
+    renameSync(repo.lockPath, repo.indexPath);
+    const descendant = repo.git(["commit-tree", `${repo.commit}^{tree}`, "-p", repo.commit, "-m", "Descendant"]);
+    const branch = movement === "the branch advances" ? repo.head.branch : "refs/heads/other";
+    repo.git(["update-ref", branch, descendant]);
+    if (branch !== repo.head.branch) repo.git(["symbolic-ref", "HEAD", branch]);
+    const installed = readFileSync(repo.indexPath);
+    const { ino, mtimeMs } = statSync(repo.indexPath);
+    const ports = journalPorts<typeof journal>();
+
+    const result = await recoverCommit(journal, ports);
+
+    expect(result).toEqual({ status: "done", evidence: "published", commit: repo.commit, index: "already-current" });
+    expect(ports.finish).toHaveBeenCalledWith(journal, result);
+    expect(existsSync(repo.lockPath)).toBe(false);
+    expect(readFileSync(repo.indexPath)).toEqual(installed);
+    expect(statSync(repo.indexPath)).toMatchObject({ ino, mtimeMs });
+    expect(repo.git(["symbolic-ref", "HEAD"])).toBe(branch);
+    expect(repo.git(["rev-parse", "HEAD"])).toBe(descendant);
+    expect(repo.git(["rev-parse", repo.head.branch])).toBe(branch === repo.head.branch ? descendant : repo.commit);
+    expect(repo.git(["diff", "--cached", "--name-only"])).toBe("");
+    expect(repo.git(["ls-files", "-v", "assume.txt", "skip.txt"])).toBe("h assume.txt\nS skip.txt");
   });
 
   it.each(["reflog only", "soft reset"] as const)("does not stage an unreachable commit after %s", async (source) => {
