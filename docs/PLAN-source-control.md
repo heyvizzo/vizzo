@@ -547,9 +547,10 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   A stopped or interrupted task needs a matching saved native session for a continuation to clear incomplete work.
 - If startup cannot read or own the ledger, a fallback process keeps the shared threads file read-only and
   defers folder-pinned saved threads. Folderless threads can still run in memory. A competing voice process
-  otherwise restored a thread with a durable pending deletion, even after its folder lost its Git metadata.
+  otherwise restored a thread with a durable pending deletion. Folder-bound history needs the ledger to verify
+  whether a prior handoff exists.
 - The bulk preview carries explicit thread IDs and per-thread modes. Reset checks that set before and after
   preflight, and the renderer asks for confirmation again when new local work turns a Commit choice into Keep.
   An earlier Keep remains the most that can be authorized by that confirmation.
 - A known pinned project can keep and close a thread while its Git scan is blocked by recovery. The ledger
-  retains the closed group and the reason, with any commit held for a later explicit review.
+  retains the closed group and the reason for a later explicit review.
