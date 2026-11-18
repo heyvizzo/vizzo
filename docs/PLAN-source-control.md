@@ -517,3 +517,20 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Recovery settles a proved publication when the existing index already contains the commit's selected entries,
   including after an attached HEAD switch or a reachable branch advance. The branch and exact tip checks still
   apply to index writes. A crash reproduced an indefinitely pinned job after the index was already installed.
+- The product owner approved one final commit for explicitly selected Other-only components when using Commit
+  separately. A selection consisting only of Other makes one commit. Selected mixed components follow the first
+  participating writer in the displayed order.
+- The commit request can carry a scoped thread id as an ordering hint. This reproduces the window order when
+  the scoped thread is displayed first. The reviewed components and explicit ticks still define the selection.
+- The send-queue button still follows the queued turn count after moving behind Changes. The existing app can
+  retain queued turns when Instant is turned back on, and those turns still need their Send action.
+- Changes has a status endpoint for its initial project and generation, plus job status and Fix and Restart
+  routes. A pinned job can need recovery before it can produce a scan generation. The routes use the app's
+  loopback connection, and actions require JSON.
+- Changes subscribes through a read-only WebSocket. An ordinary voice Session connection can become the speaker
+  for thread responses as soon as its window connects.
+- Git 2.54 can emit siblings when `ls-tree` receives both a directory and one of its descendants. The ledger reads
+  only exact ancestor path bytes before interpreting entry types, so a sibling blob or an unsupported sibling
+  pathname cannot obscure the selected file's base.
+- Structural ownership receipts omit absent line ranges and hashes. The serialized journal and in-memory pin
+  must compare identically for file creation and independent executable-mode changes to commit.
