@@ -466,3 +466,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Identity checks use `git check-attr --all` and treat any reported `filter`, `ident`, or `working-tree-encoding`
   as whole-entry conversion, including an explicitly unset attribute. Named queries display `unspecified` for
   both absence and a literal value of that name. An explicit `unset` also collides with a literal driver name.
+- A full before-and-after report can reconnect from a historical version past an explained edit only when an
+  independent disk observation matches its after-version at an unresolved gap. The intervening rollback stays
+  Other. A partial patch cannot establish that rollback, and a report cannot replace an explained endpoint.
