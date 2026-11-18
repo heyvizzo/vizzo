@@ -104,7 +104,6 @@ describe("source-control writer registry", () => {
     await entered.promise;
     execution.stopping("timed-out");
     execution.unconfirmed();
-    await expect(execution.awaitStop()).rejects.toThrow("has not confirmed it stopped");
     response.resolve();
     await run;
     expect((await registry.snapshot(p.id)).executions[0]).toMatchObject({ phase: "unconfirmed", outcome: "timed-out" });
@@ -112,7 +111,6 @@ describe("source-control writer registry", () => {
     execution.edits("s", "tool", [{ path: join(root, "new"), from: null, to: "written after stop" }]);
     barrier.resolve();
     await execution.settled;
-    await expect(execution.awaitStop()).resolves.toBeUndefined();
     await expect.poll(async () => (await registry.snapshot(p.id)).executions[0]?.phase).toBe("settled");
     expect((await client.observe(p, ["new"])).files[0]?.hunks[0]?.ownership.owners).toEqual([execution.id]);
   });

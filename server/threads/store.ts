@@ -24,7 +24,7 @@ export const INTERRUPTED_TEXT = "Vizzo was closed before this finished. What it 
 export interface ThreadRunState {
   /** Stop the current run and drop the queue; close the harness session. */
   stop(): void;
-  stopForDeletion?(): Promise<void>;
+  stopForDeletion?(): void;
   readonly working?: boolean;
 }
 
@@ -59,6 +59,7 @@ export class ThreadStore {
   private resetting = false;
   private closing = false;
   private ledgerAvailable = true;
+  private deferred: SavedThread[] = [];
 
   get conversation(): ChatTurn[] { return getConversation(); }
 
@@ -92,7 +93,6 @@ export class ThreadStore {
 
   get turnsBlocked(): boolean { return this.resetting || this.closing; }
   get sourceControlAvailable(): boolean { return this.ledgerAvailable; }
-  disableSourceControl(): void { this.ledgerAvailable = false; }
   blocksRun(threadId: string): boolean { return this.closing || this.deleting?.has(threadId) === true || this.handedOff.has(threadId); }
 
   beginDeletion(threadIds: readonly string[], reset: boolean): () => void {
@@ -186,7 +186,10 @@ export class ThreadStore {
     if (!threadIds.length) return;
     const removing = new Set(threadIds);
     for (const id of threadIds) this.handedOff.add(id);
-    if (this.file) writeThreads(this.file, [...this.records.values()].filter(({ info }) => !removing.has(info.threadId)).map(savedOf), true);
+    if (this.file) {
+      const survivors = [...this.records.values()].filter(({ info }) => !removing.has(info.threadId));
+      writeThreads(this.file, this.deferred.concat(survivors.map(savedOf)), true);
+    }
     for (const id of threadIds) {
       this.remove(id);
       this.handedOff.delete(id);
@@ -194,8 +197,8 @@ export class ThreadStore {
   }
 
   /** Stop writes without closing the native session before the ledger handoff. */
-  async stopForDeletion(threadId: string): Promise<void> {
-    await this.records.get(threadId)?.run?.stopForDeletion?.();
+  stopForDeletion(threadId: string): void {
+    this.records.get(threadId)?.run?.stopForDeletion?.();
   }
 
   /** "New conversation": every thread (runs stopped) and the central conversation. */
@@ -211,16 +214,23 @@ export class ThreadStore {
    * Save the threads to `file` from now on, after restoring the ones saved there. A thread that was working when the
    * app closed comes back interrupted (its run is gone; its harness kept the session up to that point).
    */
-  persistTo(file: string, pendingRemovals: readonly string[] = []): void {
+  persistTo(file: string, pendingRemovals: readonly string[] = [], deferPinned = false): void {
     const pending = new Set(pendingRemovals);
     const savedThreads = loadThreads(file, pending.size > 0).filter(({ info }) => !pending.has(info.threadId));
     // Finish the threads.json side of a previous handoff before any saved native session can be reopened.
     if (pending.size) writeThreads(file, savedThreads, true);
     this.file = file;
+    this.ledgerAvailable = !deferPinned;
+    this.deferred = [];
     for (const saved of savedThreads) {
       if (this.records.has(saved.info.threadId)) continue;
-      const info = restoredInfo(saved, this.now());
       const projectFolder = saved.projectFolder !== undefined ? saved.projectFolder : saved.resume?.spec.project ?? null;
+      if (deferPinned && projectFolder) {
+        // A folder can lose its .git marker after a handoff, so today's Git discovery cannot prove it safe to reopen.
+        this.deferred.push(saved);
+        continue;
+      }
+      const info = restoredInfo(saved, this.now());
       this.records.set(info.threadId, {
         info, handle: null, run: null, projectFolder, resume: saved.resume,
         ...(info.interrupted && saved.activeRequest ? { activeRequest: saved.activeRequest } : {}),
@@ -235,7 +245,7 @@ export class ThreadStore {
   flush(): void {
     if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
     if (!this.file) return;
-    try { writeThreads(this.file, [...this.records.values()].map(savedOf)); }
+    try { writeThreads(this.file, this.deferred.concat([...this.records.values()].map(savedOf))); }
     catch (e) { console.warn("[threads] save failed", e); }
   }
 

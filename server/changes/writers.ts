@@ -154,7 +154,6 @@ export class WriterExecution {
   private stopOutcome?: ExecutionOutcome;
   private readonly cancelled = deferred();
   private readonly settledSignal = deferred();
-  private readonly unconfirmedSignal = deferred();
   private started = false;
   private finishing = false;
 
@@ -170,14 +169,6 @@ export class WriterExecution {
   get stopRequested(): boolean { return this.stopOutcome !== undefined; }
   get writer(): WriterId { return { ...this.record.writer }; }
   get settled(): Promise<void> { return this.settledSignal.ready; }
-
-  async awaitStop(): Promise<void> {
-    if (this.record.phase === "settled") return this.settled;
-    await Promise.race([this.settled, this.unconfirmedSignal.ready.then(() => {
-      if (this.record.phase !== "settled") throw new Error(this.record.reason ?? "The harness has not confirmed it stopped");
-      return this.settled;
-    })]);
-  }
 
   private schedule(write: (project: LedgerProject) => Promise<unknown>): void {
     if (!this.discovery) return;
@@ -247,7 +238,6 @@ export class WriterExecution {
     this.record.phase = "unconfirmed";
     this.record.reason = reason;
     this.save();
-    this.unconfirmedSignal.release();
   }
 
   cancelQueued(): void {

@@ -47,10 +47,18 @@ export async function previewThreadDeletes(
   return threadIds.map((threadId) => byId.get(threadId) ?? { threadId, state: "none", defaultMode: "keep" });
 }
 
-export async function deleteThreads(store: ThreadStore, choices: readonly ThreadDeleteChoice[], reset: boolean, changes?: DeleteService): Promise<void> {
+export async function deleteThreads(store: ThreadStore, choices: readonly ThreadDeleteChoice[] | undefined, reset: boolean, changes?: DeleteService): Promise<void> {
   if (!store.sourceControlAvailable) changes = undefined;
-  const modes = new Map(choices.map(({ threadId, mode }) => [threadId, mode]));
-  const ids = reset ? store.list().map(({ threadId }) => threadId) : [...modes.keys()];
+  const modes = new Map(choices?.map(({ threadId, mode }) => [threadId, mode]));
+  const ids = reset && choices === undefined ? store.list().map(({ threadId }) => threadId) : [...modes.keys()];
+  const expected = new Set(ids);
+  const verifyReset = () => {
+    const current = store.list();
+    if (current.length !== expected.size || current.some(({ threadId }) => !expected.has(threadId))) {
+      throw new Error("The thread list changed. Review it before starting a new conversation.");
+    }
+  };
+  if (reset) verifyReset();
   const targets = ids.flatMap((threadId) => {
     const record = store.get(threadId);
     return record ? [threadDeleteTarget(record, modes.get(threadId))] : [];
@@ -58,10 +66,7 @@ export async function deleteThreads(store: ThreadStore, choices: readonly Thread
   const release = store.beginDeletion(targets.map(({ threadId }) => threadId), reset);
   const prepare = () => {
     if (!reset) return;
-    const current = store.list();
-    if (current.length !== ids.length || current.some(({ threadId }, index) => threadId !== ids[index])) {
-      throw new Error("The thread list changed. Review it before starting a new conversation.");
-    }
+    verifyReset();
     store.prepareReset();
   };
   try {
@@ -74,7 +79,7 @@ export async function deleteThreads(store: ThreadStore, choices: readonly Thread
     } else {
       const receipts = legacyPreflight(targets);
       prepare();
-      await Promise.all(receipts.filter(({ state }) => state === "working").map(({ threadId }) => store.stopForDeletion(threadId)));
+      for (const { threadId, state } of receipts) if (state === "working") store.stopForDeletion(threadId);
       store.removeDurably(targets.map(({ threadId }) => threadId));
     }
     if (reset) store.clearConversation();
@@ -143,8 +148,7 @@ export async function restoreThreadLifecycle(file: string, service: RecoveryServ
     pending = await service.pendingThreadDeletes();
   } catch (error) {
     console.warn("[changes] source control was unavailable at startup", error);
-    store.disableSourceControl();
-    store.persistTo(file);
+    store.persistTo(file, [], true);
     return;
   }
   // Once the ledger reports a pending removal, a failed write must never fall back to restoring that thread.
