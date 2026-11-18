@@ -493,3 +493,8 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   An identity Vizzo cannot verify remains unconfirmed, with a reason shown to the user.
 - Index repair also checks user-facing flags on selected paths. Repair refuses when replacing a base entry would
   clear assume-unchanged, skip-worktree, or intent-to-add state that the journal cannot account for.
+- OpenCode can start a detached Bash process that survives its native server and Vizzo's private group. When
+  Vizzo cannot confirm that the tools settled, the writer remains unavailable even after verified native shutdown.
+- A partial entry's new blob must also round-trip to the frozen bytes in working-tree form under the candidate
+  attributes. An empty base can hide an active CRLF conversion. New or empty-base files use whole-content
+  conversion when all content is selected, while an independent executable-mode hunk remains separate.
