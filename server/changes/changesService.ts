@@ -5,6 +5,7 @@ import { recoverCommit, type CommitRecoveryJournal, type CommitRecoveryPorts, ty
 import { runCommitTransaction, type CommitContext, type CommitJournal, type CommitRequest, type CommitResult,
   type FrozenCommitSelection } from "./commitTransaction.ts";
 import { changeWriterId } from "./components.ts";
+import { ThreadDeletes, type DeleteLedger, type ThreadDeletePorts, type ThreadDeleteTarget } from "./deleteFlows.ts";
 import { ABSENT, type ReadEntry } from "./entries.ts";
 import { MAX_FILE_BYTES } from "./evidence.ts";
 import { GitPublicationError } from "./gitPublication.ts";
@@ -16,13 +17,14 @@ import { REVIEW_AGAIN, ScanRuntime, type ScanLedgerSource, type ScanWriterSource
 import { writerRegistry, type WriterId, type WriterRegistry } from "./writers.ts";
 
 export type CommitScan = (context: CommitContext) => Promise<FrozenCommitSelection<CommitOwnershipReceipt> | null>;
+export type { ThreadDeletePorts, ThreadDeletePreview, ThreadDeleteTarget } from "./deleteFlows.ts";
 export type ChangesUpdate =
   | { kind: "ledger"; projectId: string }
   | { kind: "scan"; projectId: string; generation: number; changedFiles: number };
 
-type ServiceLedger = ScanLedgerSource & Pick<LedgerWorkerClient, "pending" | "queueCommit" | "beginCommit" | "pinCommit" |
+type ServiceLedger = ScanLedgerSource & DeleteLedger & Pick<LedgerWorkerClient, "pending" | "queueCommit" | "beginCommit" | "pinCommit" |
   "checkpointCommit" | "commitJob" | "commitJobs" | "checkpointRecovery" | "finishRecovery" | "noteCommitIssue" | "onChanged">;
-type ServiceWriters = ScanWriterSource & Pick<WriterRegistry, "restore" | "reserve" | "flush">;
+type ServiceWriters = Pick<WriterRegistry, "restore" | "reserve" | "flush" | "snapshot">;
 type RecoveryJournal = CommitRecoveryJournal & { project: LedgerProject };
 
 const execGit = promisify(execFile);
@@ -110,12 +112,19 @@ async function prepareBase(
 export class ChangesService {
   private startup?: Promise<void>;
   private readonly listeners = new Set<(update: ChangesUpdate) => void>();
+  private readonly threadDeletes: ThreadDeletes;
   readonly scanner: ScanRuntime;
 
   constructor(private readonly ledger: ServiceLedger = changesLedger(), private readonly writers: ServiceWriters = writerRegistry()) {
     this.scanner = new ScanRuntime({
       ledger, writers,
+      groupState: (project) => this.threadDeletes.groupState(project),
       updated: ({ project, generation, changedFiles }) => this.publish({ kind: "scan", projectId: project, generation, changedFiles }),
+    });
+    this.threadDeletes = new ThreadDeletes({
+      ledger, writers, scanner: this.scanner,
+      inRepository: serial,
+      commit: (project, request, scanAndFreeze) => this.commitInRepository(project, request, scanAndFreeze),
     });
     ledger.onChanged((projectId) => {
       this.scanner.ledgerChanged(projectId);
@@ -222,38 +231,61 @@ export class ChangesService {
 
   async commit(project: LedgerProject, request: CommitRequest, scanAndFreeze: CommitScan, isCurrent?: () => boolean): Promise<CommitResult> {
     await this.restore();
+    return serial(project, () => this.commitInRepository(project, request, scanAndFreeze, isCurrent));
+  }
+
+  private async commitInRepository(project: LedgerProject, request: CommitRequest, scanAndFreeze: CommitScan,
+    isCurrent?: () => boolean): Promise<CommitResult> {
     const key = { projectId: project.id, jobId: request.jobId };
-    return serial(project, async () => {
-      if (isCurrent && !isCurrent()) return { status: "refused", code: "stale", reason: REVIEW_AGAIN };
-      const pinned = await this.verifyProject(project);
-      const blocker = (await this.ledger.commitJobs()).find((job) =>
-        job.project.commonDir === pinned.commonDir && job.phase !== "queued" && !isTerminal(job.phase));
-      if (blocker) return {
-        status: "refused", code: blocker.project.id === project.id && blocker.jobId === request.jobId
-          ? "duplicate-job" : "recovery-needed",
-        reason: blocker.reason ?? "Vizzo must recover an unfinished source-control commit first",
-      };
-      return runCommitTransaction<CommitOwnershipPlan>(pinned, request, {
-        begin: (start) => this.ledger.beginCommit(pinned, start),
-        journal: async (record) => {
-          const proof = record.phase === "publishing" && record.step === "prepare-ref"
-            ? await prepareBase(pinned, record) : undefined;
-          await this.ledger.checkpointCommit(record, proof);
-        },
-        reserveWriters: async () => this.writers.reserve(pinned.id, request.writerIds.map(writerId)),
-        scanAndFreeze: async (context) => {
-          const frozen = await scanAndFreeze(context);
-          if (!frozen) return null;
-          const ownership = await this.ledger.pinCommit(key, frozen);
-          return { ...frozen, ownership };
-        },
-        assertPublicationContext: assertCurrentScope(isCurrent),
-        settle: (record) => this.ledger.checkpointCommit(record),
-      }).catch(async (error) => {
-        await this.reportIssue(key, `Vizzo could not finish the commit. ${message(error)}`);
-        throw error;
-      });
+    if (isCurrent && !isCurrent()) return { status: "refused", code: "stale", reason: REVIEW_AGAIN };
+    const pinned = await this.verifyProject(project);
+    const blocker = (await this.ledger.commitJobs()).find((job) =>
+      job.project.commonDir === pinned.commonDir && job.phase !== "queued" && !isTerminal(job.phase));
+    if (blocker) return {
+      status: "refused", code: blocker.project.id === project.id && blocker.jobId === request.jobId
+        ? "duplicate-job" : "recovery-needed",
+      reason: blocker.reason ?? "Vizzo must recover an unfinished source-control commit first",
+    };
+    return runCommitTransaction<CommitOwnershipPlan>(pinned, request, {
+      begin: (start) => this.ledger.beginCommit(pinned, start),
+      journal: async (record) => {
+        const proof = record.phase === "publishing" && record.step === "prepare-ref"
+          ? await prepareBase(pinned, record) : undefined;
+        await this.ledger.checkpointCommit(record, proof);
+      },
+      reserveWriters: async () => this.writers.reserve(pinned.id, request.writerIds.map(writerId)),
+      scanAndFreeze: async (context) => {
+        const frozen = await scanAndFreeze(context);
+        if (!frozen) return null;
+        const ownership = await this.ledger.pinCommit(key, frozen);
+        return { ...frozen, ownership };
+      },
+      assertPublicationContext: assertCurrentScope(isCurrent),
+      settle: (record) => this.ledger.checkpointCommit(record),
+    }).catch(async (error) => {
+      await this.reportIssue(key, `Vizzo could not finish the commit. ${message(error)}`);
+      throw error;
     });
+  }
+
+  async previewThreadDeletes(targets: readonly ThreadDeleteTarget[]) {
+    await this.restore();
+    return this.threadDeletes.preview(targets);
+  }
+
+  async deleteThreads(targets: readonly ThreadDeleteTarget[], ports: ThreadDeletePorts) {
+    await this.restore();
+    return this.threadDeletes.delete(targets, ports);
+  }
+
+  async pendingThreadDeletes(): Promise<string[]> {
+    await this.restore();
+    return this.ledger.pendingThreadDeletes();
+  }
+
+  async completeThreadDeletes(threadIds: readonly string[]): Promise<void> {
+    await this.restore();
+    await this.ledger.completeThreadDeletes(threadIds);
   }
 
   /** Available independently of the scanner, including after restart or while Git needs repair. */
