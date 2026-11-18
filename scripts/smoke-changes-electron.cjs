@@ -186,6 +186,7 @@ async function run() {
   assert.equal(await evaluate("typeof window.shell"), "undefined", "Changes has no shell credentials or IPC");
   assert.equal(await evaluate("window.open('/untrusted')"), null, "Changes cannot create a popup");
   await until(() => focusCount() > 0, "scanner focus");
+  await until(() => visible().at(-1) === true, "scanner visibility");
   assert.deepEqual(visible(), [true]);
 
   page.debugger.attach("1.3");
