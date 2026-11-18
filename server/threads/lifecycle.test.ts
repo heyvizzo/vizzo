@@ -155,8 +155,9 @@ describe("deleting and restoring threads", () => {
     await deleteThreads(store, [saved, untracked].map(({ threadId }) => ({ threadId, mode: "commit" })), false, service);
     expect(service.previewThreadDeletes).not.toHaveBeenCalled();
     expect(service.deleteThreads).not.toHaveBeenCalled();
-    expect(loadThreads(file)).toEqual([]);
     store.flush();
+    expect(store.list()).toEqual([]);
+    expect(loadThreads(file).map(({ info }) => info.threadId)).toEqual([saved.threadId]);
   });
 
   it("keeps the quit handshake open until the source-control flush completes", async () => {

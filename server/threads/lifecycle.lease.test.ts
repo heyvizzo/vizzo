@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -55,16 +55,23 @@ it.each(["files", "reftable"] as const)("keeps a pending delete out of a competi
     await restoreThreadLifecycle(file, contender.service, store);
     expect(store.list().map(({ threadId }) => threadId)).toEqual([legacy.info.threadId]);
     await deleteThreads(store, [{ threadId: legacy.info.threadId, mode: "keep" }], false);
+    store.flush();
+    expect(loadThreads(file)).toEqual([pending, legacy]);
+
+    // The lease owner updates threads.json, then stops before acknowledging the durable removal in the ledger.
+    const updated = { ...legacy, info: { ...legacy.info, title: "Updated by the lease owner" } };
+    writeThreads(file, [updated], true);
+    const ownerBytes = readFileSync(file);
     await flushThreadLifecycle({ flush: async () => {} }, store);
-    expect(loadThreads(file)).toEqual([pending]);
+    expect(readFileSync(file)).toEqual(ownerBytes);
 
     await holder.ledger.close();
     clients.delete(holder.ledger);
     const recovered = connect();
     const saved = new ThreadStore();
     await restoreThreadLifecycle(file, recovered.service, saved);
-    expect(saved.list()).toEqual([]);
-    expect(loadThreads(file)).toEqual([]);
+    expect(saved.list()).toEqual([updated.info]);
+    expect(loadThreads(file)).toEqual([updated]);
     expect(await recovered.ledger.pendingThreadDeletes()).toEqual([]);
   } finally {
     await Promise.allSettled([...clients].map((client) => client.close()));

@@ -59,7 +59,6 @@ export class ThreadStore {
   private resetting = false;
   private closing = false;
   private ledgerAvailable = true;
-  private deferred: SavedThread[] = [];
 
   get conversation(): ChatTurn[] { return getConversation(); }
 
@@ -188,7 +187,7 @@ export class ThreadStore {
     for (const id of threadIds) this.handedOff.add(id);
     if (this.file) {
       const survivors = [...this.records.values()].filter(({ info }) => !removing.has(info.threadId));
-      writeThreads(this.file, this.deferred.concat(survivors.map(savedOf)), true);
+      writeThreads(this.file, survivors.map(savedOf), true);
     }
     for (const id of threadIds) {
       this.remove(id);
@@ -219,15 +218,14 @@ export class ThreadStore {
     const savedThreads = loadThreads(file, pending.size > 0).filter(({ info }) => !pending.has(info.threadId));
     // Finish the threads.json side of a previous handoff before any saved native session can be reopened.
     if (pending.size) writeThreads(file, savedThreads, true);
-    this.file = file;
+    // Without the ledger, another voice may own and be updating the shared file. Read only.
+    this.file = deferPinned ? null : file;
     this.ledgerAvailable = !deferPinned;
-    this.deferred = [];
     for (const saved of savedThreads) {
       if (this.records.has(saved.info.threadId)) continue;
       const projectFolder = saved.projectFolder !== undefined ? saved.projectFolder : saved.resume?.spec.project ?? null;
       if (deferPinned && projectFolder) {
         // A folder can lose its .git marker after a handoff, so today's Git discovery cannot prove it safe to reopen.
-        this.deferred.push(saved);
         continue;
       }
       const info = restoredInfo(saved, this.now());
@@ -245,7 +243,7 @@ export class ThreadStore {
   flush(): void {
     if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
     if (!this.file) return;
-    try { writeThreads(this.file, this.deferred.concat([...this.records.values()].map(savedOf))); }
+    try { writeThreads(this.file, [...this.records.values()].map(savedOf)); }
     catch (e) { console.warn("[threads] save failed", e); }
   }
 
