@@ -502,3 +502,10 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   two-voice-process probe, the second process opened the shared ledger and stopped a harness still owned by the
   first. A competing process shows source control as unavailable and keeps solver dispatch available without ledger
   attribution. The kernel releases the lock when its owner exits.
+- A stopped or timed-out private harness needs process-group confirmation after its terminal event. A Claude
+  stream mock returned its stop result while a same-group child could still write. Kept sessions settle when
+  only the authenticated supervisor and native client remain alive in the group. One-shot sessions settle on
+  verified group exit. RPC prompt rejection does not replace the agent terminal event.
+- Automatic orphan shutdown also requires the native supervisor to confirm loss of its owning voice connection.
+  A ledger worker can exit and release the kernel lock while its voice process is still live. A previous group
+  whose owner cannot be verified stays unconfirmed unless Vizzo can verify the group has already exited.
