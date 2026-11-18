@@ -460,3 +460,6 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Preparing the replacement index disables Git fsmonitor and resets its validity cache. Git otherwise invoked a
   configured fsmonitor hook while updating a copied index. User-facing index flags such as assume-unchanged and
   skip-worktree are preserved.
+- The 5 MB budget and gitlink exclusion apply to Vizzo's content readers and ledger. Git's porcelain status
+  may itself read a larger tracked file or inspect a submodule to determine whether the entry is dirty. Vizzo
+  keeps no content from those reads and reports unsupported entries as Other.
