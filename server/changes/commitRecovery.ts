@@ -235,18 +235,18 @@ async function repairIndex(
   const root = job.project.root;
   const indexPath = index.indexPath;
   const owner = { ...index.identity, pid: process.pid };
+  const real = await readIndex(root, indexPath).catch((error: unknown) => reasonText(error));
+  const validEntries = job.entries.length > 0 && new Set(job.entries.map(({ path }) => path)).size === job.entries.length;
+  // The index may have been installed before HEAD moved and the journal settled.
+  if (typeof real !== "string" && validEntries && matchesEntries(real, job.entries, "next")) {
+    return { status: "done", evidence: "published", commit: job.commit, index: "already-current" };
+  }
+
   if (head.branch !== job.head.branch) return repairNeeded(job, "branch-switched", false, "HEAD points to a different branch.");
   if (head.oid !== job.commit) return repairNeeded(job, "branch-tip-changed", false, "The original branch tip changed.");
-
-  let real: IndexSnapshot;
-  try { real = await readIndex(root, indexPath); }
-  catch (error) { return repairNeeded(job, "index-error", true, reasonText(error)); }
-
-  if (!job.entries.length || new Set(job.entries.map(({ path }) => path)).size !== job.entries.length) {
+  if (typeof real === "string") return repairNeeded(job, "index-error", true, real);
+  if (!validEntries) {
     return repairNeeded(job, "index-error", false, "The commit journal has invalid selected entries.");
-  }
-  if (matchesEntries(real, job.entries, "next")) {
-    return { status: "done", evidence: "published", commit: job.commit, index: "already-current" };
   }
   if (!matchesEntries(real, job.entries, "base") || job.entries.some(({ path }) => real.get(pathKey(path))?.[0]?.flags)) {
     return repairNeeded(job, "index-changed", false, "The selected paths have staged changes or user flags.");
