@@ -8,16 +8,20 @@ import { changeWriterId } from "./components.ts";
 import { ABSENT, type ReadEntry } from "./entries.ts";
 import { MAX_FILE_BYTES } from "./evidence.ts";
 import type { GitEntryChange } from "./gitTree.ts";
-import type { CommitJobRecord, CommitJobSummary } from "./ledger.ts";
+import type { CommitJobKey, CommitJobRecord, CommitJobSummary } from "./ledger.ts";
 import { changesLedger, type LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import type { LedgerProject } from "./project.ts";
+import { ScanRuntime, type ScanLedgerSource, type ScanWriterSource } from "./scanRuntime.ts";
 import { writerRegistry, type WriterId, type WriterRegistry } from "./writers.ts";
 
 export type CommitScan = (context: CommitContext) => Promise<FrozenCommitSelection<CommitOwnershipReceipt> | null>;
+export type ChangesUpdate =
+  | { kind: "ledger"; projectId: string }
+  | { kind: "scan"; projectId: string; generation: number; changedFiles: number };
 
-type ServiceLedger = Pick<LedgerWorkerClient, "discover" | "pending" | "queueCommit" | "beginCommit" | "pinCommit" |
-  "checkpointCommit" | "commitJob" | "commitJobs" | "checkpointRecovery" | "finishRecovery">;
-type ServiceWriters = Pick<WriterRegistry, "restore" | "reserve" | "flush">;
+type ServiceLedger = ScanLedgerSource & Pick<LedgerWorkerClient, "pending" | "queueCommit" | "beginCommit" | "pinCommit" |
+  "checkpointCommit" | "commitJob" | "commitJobs" | "checkpointRecovery" | "finishRecovery" | "noteCommitIssue" | "onChanged">;
+type ServiceWriters = ScanWriterSource & Pick<WriterRegistry, "restore" | "reserve" | "flush">;
 type RecoveryJournal = CommitRecoveryJournal & { project: LedgerProject };
 
 const execGit = promisify(execFile);
@@ -26,7 +30,7 @@ const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
-function isTerminal(phase: CommitJobRecord["journal"]["phase"]): boolean {
+function isTerminal(phase: CommitJobRecord["journal"]["phase"]): phase is "done" | "refused" | "not-published" {
   return phase === "done" || phase === "refused" || phase === "not-published";
 }
 
@@ -98,8 +102,31 @@ async function prepareBase(
 /** Server-internal commit and recovery API. Scans are supplied by the scoped review that owns the generation. */
 export class ChangesService {
   private startup?: Promise<void>;
+  private readonly listeners = new Set<(update: ChangesUpdate) => void>();
+  readonly scanner: ScanRuntime;
 
-  constructor(private readonly ledger: ServiceLedger = changesLedger(), private readonly writers: ServiceWriters = writerRegistry()) {}
+  constructor(private readonly ledger: ServiceLedger = changesLedger(), private readonly writers: ServiceWriters = writerRegistry()) {
+    this.scanner = new ScanRuntime({
+      ledger, writers,
+      updated: ({ project, generation, changedFiles }) => this.publish({ kind: "scan", projectId: project, generation, changedFiles }),
+    });
+    ledger.onChanged((projectId) => {
+      this.scanner.ledgerChanged(projectId);
+      this.publish({ kind: "ledger", projectId });
+    });
+  }
+
+  subscribe(listener: (update: ChangesUpdate) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private publish(update: ChangesUpdate): void {
+    for (const listener of this.listeners) {
+      try { listener(update); }
+      catch (error) { console.warn("[changes] source-control listener failed", error); }
+    }
+  }
 
   restore(): Promise<void> {
     return this.startup ??= this.restoreJobs();
@@ -117,12 +144,21 @@ export class ChangesService {
     }
   }
 
+  private async reportIssue(key: CommitJobKey, reason: string): Promise<void> {
+    try {
+      if (await this.ledger.commitJob(key)) await this.ledger.noteCommitIssue(key, reason);
+    } catch (error) {
+      console.warn(`[changes] could not update commit ${key.jobId}`, error);
+    }
+  }
+
   private restoreJob(summary: CommitJobSummary): Promise<CommitRecoveryResult> {
     const { project, jobId } = summary;
     const key = { projectId: project.id, jobId };
     return serial(project, async () => {
       const job = await this.ledger.commitJob(key);
       if (!job) return { status: "skipped", reason: "missing-job" };
+      if (isTerminal(job.journal.phase)) return { status: "skipped", phase: job.journal.phase };
       if (job.journal.phase === "queued") {
         const result = {
           status: "refused", evidence: "not-attempted",
@@ -145,9 +181,14 @@ export class ChangesService {
           finished = true;
         },
       };
-      const result = await recoverCommit({ project: job.project, request: job.journal.request }, ports);
-      if (!finished && result.status === "blocked" && !isTerminal(job.journal.phase)) await this.ledger.finishRecovery(key, result);
-      return result;
+      try {
+        const result = await recoverCommit({ project: job.project, request: job.journal.request }, ports);
+        if (!finished && result.status === "blocked") await this.ledger.finishRecovery(key, result);
+        return result;
+      } catch (error) {
+        await this.reportIssue(key, `Vizzo could not finish commit recovery. ${message(error)}`);
+        throw error;
+      }
     });
   }
 
@@ -194,6 +235,9 @@ export class ChangesService {
           return { ...frozen, ownership };
         },
         settle: (record) => this.ledger.checkpointCommit(record),
+      }).catch(async (error) => {
+        await this.reportIssue(key, `Vizzo could not finish the commit. ${message(error)}`);
+        throw error;
       });
     });
   }

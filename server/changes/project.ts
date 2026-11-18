@@ -36,7 +36,7 @@ function runGit(cwd: string, args: string[], maxBuffer = MAX_FILE_BYTES + 1) {
   env.GIT_NO_LAZY_FETCH = "1";
   env.LC_ALL = "C";
   return spawnSync("git", ["--no-optional-locks", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-    "--literal-pathspecs", ...args], { cwd, env, input: Buffer.alloc(0), maxBuffer });
+    "--literal-pathspecs", ...args], { cwd, env, input: Buffer.alloc(0), maxBuffer, timeout: 10_000 });
 }
 
 function runProjectGit(project: LedgerProject, args: string[]) {

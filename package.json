@@ -38,6 +38,7 @@
     "smoke:session-badges": "npm run build:electron && electron scripts/smoke-session-badges.cjs",
     "smoke:thread-stop": "npm run build:electron && electron scripts/smoke-thread-stop.cjs",
     "smoke:thread-resume": "npm run build:electron && electron scripts/smoke-thread-resume.cjs",
+    "smoke:source-control": "tsx scripts/smoke-source-control.ts",
     "smoke:reset-confirm": "npm run build:electron && electron scripts/smoke-reset-confirm.cjs",
     "bench:harness": "tsx scripts/bench-harness.ts",
     "bench:tts": "tsx scripts/bench-tts.ts",

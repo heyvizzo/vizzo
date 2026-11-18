@@ -19,6 +19,7 @@ import { changesService } from "../server/changes/changesService.ts";
 
 function useProject(dir: string | null) {
   setProjectDir(dir);
+  void changesService().scanner.setProject(projectDir());
   // The solver's agents start in the project folder: re-warm (the old ones are killed).
   warmSaved();
   console.log(`[server] project folder: ${projectDir() ?? "(none)"}`);

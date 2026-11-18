@@ -2,7 +2,8 @@ import { relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { combine } from "./annotations.ts";
 import { boundVersions, changeBase, compact, insert, inspect, newChain, observe, place, tip, type Chain, type FileEvidence } from "./chain.ts";
-import { pinCommitOwnership, settleCommitOwnership, validateCommitOwnershipCandidate, type CommitOwnershipPlan, type CommitOwnershipReceipt,
+import { CommitOwnershipError, pinCommitOwnership, settleCommitOwnership, validateCommitOwnershipCandidate,
+  type CommitOwnershipPlan, type CommitOwnershipReceipt,
   type CommitOwnershipSnapshot, type PublishedBaseEvidence } from "./commitOwnership.ts";
 import type { CommitRecoveryCheckpoint, CommitRecoveryResult } from "./commitRecovery.ts";
 import type { CommitJournal, CommitProject, CommitRequest, CommitStart, FrozenCommitSelection } from "./commitTransaction.ts";
@@ -13,7 +14,7 @@ import { batchKey, exactBytes, exactText, MAX_FILE_BYTES, parsePatch, PENDING_MS
 import { LedgerPersistence } from "./persistence.ts";
 import { evidencePath, pathAcceptsEvidence, readBaseEntry, readLedgerHead, readWorkingEntry, sameHead,
   type LedgerHead, type LedgerProject } from "./project.ts";
-import { stopVerifiedNativeProcess } from "../adapters/nativeProcess.ts";
+import { stopVerifiedOrphanNativeProcess } from "../adapters/nativeProcess.ts";
 import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
 interface Effect {
@@ -55,6 +56,7 @@ export interface CommitJobRecord {
   prepared?: StoredBaseEvidence;
   recovery?: CommitRecoveryCheckpoint | null;
   outcome?: RecoveryOutcome;
+  issue?: string;
 }
 
 export interface CommitJobKey {
@@ -304,7 +306,8 @@ function currentJob(state: ProjectState | undefined, key: string): CommitJobReco
   return record;
 }
 
-function jobReason({ journal, outcome }: CommitJobRecord): string | undefined {
+function jobReason({ journal, outcome, issue }: CommitJobRecord): string | undefined {
+  if (issue) return issue;
   if (outcome) return "message" in outcome ? outcome.message : "refusal" in outcome ? outcome.refusal.reason : undefined;
   if ("reason" in journal) return journal.reason;
   if ("refusal" in journal) return journal.refusal?.reason;
@@ -316,9 +319,10 @@ function summarizeJob(job: CommitJobRecord): CommitJobSummary {
   const status = outcome?.status ?? (repair ? "repair-needed" :
     journal.phase === "index-ready" || journal.phase === "publishing" || journal.phase === "locking" ? "committing" : journal.phase);
   return {
-    version, project, jobId: journal.request.jobId, phase: journal.phase, status, outcome, reason: jobReason(job),
+    version, project, jobId: journal.request.jobId, phase: journal.phase, status: job.issue ? "blocked" : status,
+    outcome, reason: jobReason(job),
     commit: "commit" in journal ? journal.commit : outcome && "commit" in outcome ? outcome.commit : undefined,
-    canFix: outcome ? "canFix" in outcome && outcome.canFix : repair,
+    canFix: !!job.issue || (outcome ? "canFix" in outcome && outcome.canFix : repair),
   };
 }
 
@@ -393,9 +397,11 @@ function replayHeld(
 /** Owned exclusively by the ledger worker. Each synchronous operation replaces the journal at most once. */
 export class LedgerStore {
   private readonly persistence: LedgerPersistence<ProjectState>;
+  private readonly onExpired?: (projectId: string) => void;
 
-  constructor(persistence = new LedgerPersistence<ProjectState>()) {
+  constructor(persistence = new LedgerPersistence<ProjectState>(), onExpired?: (projectId: string) => void) {
     this.persistence = persistence;
+    this.onExpired = onExpired;
   }
 
   private loadProject(project: LedgerProject) {
@@ -617,7 +623,12 @@ export class LedgerStore {
           const record = executionId === null ? undefined : records[executionKey(executionId)];
           return executionId !== null && (!record || !owners.has(changeWriterId(record.writer)));
         })))) throw new Error("Changed meanwhile: review again. A selected writer changed.");
-    const plan = pinCommitOwnership(ownershipSnapshot(state, job.project), frozen, content);
+    let plan: CommitOwnershipPlan;
+    try { plan = pinCommitOwnership(ownershipSnapshot(state, job.project), frozen, content); }
+    catch (error) {
+      if (error instanceof CommitOwnershipError) throw new Error(`Changed meanwhile: review again. ${error.message}`);
+      throw error;
+    }
     job.pin = plan;
     state.pinnedJob = id;
     save();
@@ -720,7 +731,16 @@ export class LedgerStore {
       job.recovery = null;
     }
     job.outcome = outcome;
+    delete job.issue;
     save();
+  }
+
+  noteCommitIssue(key: CommitJobKey, reason: string): void {
+    const { job, save } = this.loadCommit(key);
+    if (!isTerminal(job.journal)) {
+      job.issue = reason;
+      save();
+    }
   }
 
   saveWriter(project: LedgerProject, execution: WriterExecutionRecord): void {
@@ -750,7 +770,7 @@ export class LedgerStore {
       let stopped = writer.phase === "queued" || writer.nativeDispatched === false;
       if (previous) {
         const key = JSON.stringify(previous);
-        const stopping = attempts.get(key) ?? stopVerifiedNativeProcess(previous, true);
+        const stopping = attempts.get(key) ?? stopVerifiedOrphanNativeProcess(previous);
         attempts.set(key, stopping);
         stopped = await stopping.catch(() => false);
       }
@@ -780,20 +800,23 @@ export class LedgerStore {
 
   pending(now = Date.now()): { executionIds: string[]; deadline?: number } {
     const all = this.persistence.load();
-    let changed = false;
+    const changed: string[] = [];
     const ids = new Set<string>();
     let deadline = Infinity;
-    for (const state of Object.values(all)) {
-      if (state.pinnedJob === undefined) changed = expire(state, now) || changed;
+    for (const [projectId, state] of Object.entries(all)) {
+      if (state.pinnedJob === undefined && expire(state, now)) changed.push(projectId);
       for (const receipt of Object.values(state.receipts)) {
         if (!receipt.pending.length) continue;
         ids.add(receipt.executionId);
         if (state.pinnedJob === undefined) deadline = Math.min(deadline, receipt.expiresAt);
       }
     }
-    if (changed) {
+    if (changed.length) {
       this.persistence.save(all);
-      for (const [projectId, state] of Object.entries(all)) this.persistence.content(projectId).prune(blobIds(state));
+      for (const projectId of changed) {
+        this.persistence.content(projectId).prune(blobIds(all[projectId]!));
+        this.onExpired?.(projectId);
+      }
     }
     return { executionIds: [...ids], deadline: Number.isFinite(deadline) ? deadline : undefined };
   }

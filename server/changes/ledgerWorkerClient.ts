@@ -4,6 +4,7 @@ import type { CommitRecoveryCheckpoint, CommitRecoveryResult } from "./commitRec
 import type { CommitJournal, CommitRequest, CommitStart, FrozenCommitSelection } from "./commitTransaction.ts";
 import type { EditBatch } from "./evidence.ts";
 import type { BatchResult, CommitJobKey, CommitJobRecord, CommitJobSummary, LedgerStore, LedgerView } from "./ledger.ts";
+import { isLedgerLeaseRefused, LedgerLeaseRefusedError } from "./ledgerLease.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
 import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
@@ -22,26 +23,34 @@ type Request =
   | { method: "commitJob"; key: CommitJobKey }
   | { method: "commitJobs"; projectId?: string }
   | { method: "checkpointRecovery"; key: CommitJobKey; checkpoint: CommitRecoveryCheckpoint }
-  | { method: "finishRecovery"; key: CommitJobKey; outcome: Exclude<CommitRecoveryResult, { status: "skipped" }> };
+  | { method: "finishRecovery"; key: CommitJobKey; outcome: Exclude<CommitRecoveryResult, { status: "skipped" }> }
+  | { method: "noteCommitIssue"; key: CommitJobKey; reason: string };
 
 export type LedgerRequest = Request & { id: number };
-export type LedgerResponse = { id: number; result: unknown } | { id: number; error: string };
+export type LedgerResponse = { id: number; result: unknown } | { id: number; error: string; code?: "LEDGER_LEASE_REFUSED" };
+export type LedgerNotification = { changedProjectId: string };
 
 export class LedgerWorkerClient {
   private readonly worker: Worker;
   private readonly waiting = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private readonly listeners = new Set<(projectId: string) => void>();
   private sequence = 0;
   private failure?: Error;
 
   constructor(file?: string) {
     const source = import.meta.url.endsWith(".ts") ? "./ledgerWorker.ts" : "./ledgerWorker.mjs";
     this.worker = new Worker(new URL(source, import.meta.url), { workerData: { file } });
-    this.worker.on("message", (reply: LedgerResponse) => {
+    this.worker.on("message", (reply: LedgerResponse | LedgerNotification) => {
+      if ("changedProjectId" in reply) {
+        for (const listener of this.listeners) listener(reply.changedProjectId);
+        return;
+      }
       const callbacks = this.waiting.get(reply.id);
       if (!callbacks) return;
       this.waiting.delete(reply.id);
       if (!this.waiting.size) this.worker.unref();
-      if ("error" in reply) callbacks.reject(new Error(reply.error));
+      if ("error" in reply) callbacks.reject(reply.code === "LEDGER_LEASE_REFUSED"
+        ? new LedgerLeaseRefusedError(reply.error) : new Error(reply.error));
       else callbacks.resolve(reply.result);
     });
     const fail = (error: Error) => {
@@ -72,6 +81,11 @@ export class LedgerWorkerClient {
 
   discover(directory: string): Promise<ProjectDiscovery> {
     return this.request({ method: "discover", directory });
+  }
+
+  onChanged(listener: (projectId: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   ingest(project: LedgerProject, batch: EditBatch): Promise<BatchResult> {
@@ -134,6 +148,10 @@ export class LedgerWorkerClient {
     return this.request({ method: "finishRecovery", key, outcome });
   }
 
+  noteCommitIssue(key: CommitJobKey, reason: string): Promise<void> {
+    return this.request({ method: "noteCommitIssue", key, reason });
+  }
+
   /** Also serves as a flush barrier for earlier requests, which are acknowledged after fsync. */
   pending(): Promise<ReturnType<LedgerStore["pending"]>> {
     return this.request({ method: "pending" });
@@ -141,6 +159,7 @@ export class LedgerWorkerClient {
 
   async close(): Promise<void> {
     try { await this.pending(); }
+    catch (error) { if (!isLedgerLeaseRefused(error)) throw error; }
     finally { await this.worker.terminate(); }
   }
 }
