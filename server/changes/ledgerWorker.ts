@@ -36,6 +36,15 @@ async function receive(request: LedgerRequest) {
       case "saveWriter": result = store.saveWriter(request.project, request.execution); break;
       case "restoreWriters": result = await store.restoreWriters(); break;
       case "writerSnapshot": result = store.writerSnapshot(request.projectId); break;
+      case "trackedPaths": result = store.trackedPaths(request.project); break;
+      case "queueCommit": result = store.queueCommit(request.project, request.request); break;
+      case "beginCommit": result = store.beginCommit(request.project, request.start); break;
+      case "pinCommit": result = store.pinCommit(request.key, request.frozen); break;
+      case "checkpointCommit": result = store.checkpointCommit(request.record, request.proof); break;
+      case "commitJob": result = store.commitJob(request.key); break;
+      case "commitJobs": result = store.commitJobs(request.projectId); break;
+      case "checkpointRecovery": result = store.checkpointRecovery(request.key, request.checkpoint); break;
+      case "finishRecovery": result = store.finishRecovery(request.key, request.outcome); break;
     }
     if (request.method !== "discover") scheduleExpiry(store.pending().deadline);
     port.postMessage({ id, result } satisfies LedgerResponse);

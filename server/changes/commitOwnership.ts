@@ -392,15 +392,17 @@ function publishedEntry(
   return { entry, bytes };
 }
 
-/** Return selected-path updates only. Apply all updates and the done journal record atomically. */
-export function settleCommitOwnership(
-  snapshot: CommitOwnershipSnapshot, record: CommitSettlement<CommitOwnershipPlan>, proof: PublishedBaseEvidence, content: Content,
+type CandidateOwnership = Omit<CommitSettlement<CommitOwnershipPlan>, "phase" | "evidence" | "receipt">;
+
+function ownershipUpdates(
+  snapshot: CommitOwnershipSnapshot, record: CandidateOwnership,
+  proof: PublishedBaseEvidence, content: Content,
 ): CommitOwnershipUpdate[] {
-  const { ownership: plan, head, request, project, evidence, commit } = record;
+  const { ownership: plan, head, request, project, commit } = record;
   const { receipt, paths } = plan;
   requireProof(plan.version === 1 && plan.sha256 === digest([receipt, paths]), "the pinned receipt changed");
   checkSnapshot(snapshot, receipt);
-  requireProof(evidence === "published" && proof.commit === commit && sameHead(head, receipt.head) &&
+  requireProof(proof.commit === commit && sameHead(head, receipt.head) &&
     project.id === receipt.projectId && project.root === receipt.scope.worktreeRoot && request.projectId === project.id &&
     request.generation === receipt.generation && sameMembers(request.componentIds, receipt.componentIds), "publication does not match the pinned selection");
   const verified = uniqueIndex(proof.paths, ({ path }) => path);
@@ -430,4 +432,20 @@ export function settleCommitOwnership(
     }
     return { path, baseBytes: bytes, chain: structuredClone({ base: entry, anchor, versions: [{ entry: current }] }) };
   });
+}
+
+/** Verify the exact candidate while it is still safe to refuse publication. */
+export function validateCommitOwnershipCandidate(
+  snapshot: CommitOwnershipSnapshot, record: CandidateOwnership, proof: PublishedBaseEvidence, content: Content,
+): void {
+  ownershipUpdates(snapshot, record, proof, content);
+}
+
+/** Return selected-path updates only. Apply all updates and the done journal record atomically. */
+export function settleCommitOwnership(
+  snapshot: CommitOwnershipSnapshot, record: Omit<CommitSettlement<CommitOwnershipPlan>, "receipt">,
+  proof: PublishedBaseEvidence, content: Content,
+): CommitOwnershipUpdate[] {
+  requireProof(record.evidence === "published", "publication does not match the pinned selection");
+  return ownershipUpdates(snapshot, record, proof, content);
 }

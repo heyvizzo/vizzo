@@ -27,13 +27,15 @@ export interface LedgerHead {
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const GIT_ENV = [
   "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_ATTR_SOURCE", "GIT_PREFIX",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_ATTR_SOURCE", "GIT_PREFIX", "GIT_QUARANTINE_PATH",
 ];
 
 function runGit(cwd: string, args: string[], maxBuffer = MAX_FILE_BYTES + 1) {
   const env = { ...process.env };
   for (const key of GIT_ENV) delete env[key];
-  return spawnSync("git", ["--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+  env.GIT_NO_LAZY_FETCH = "1";
+  env.LC_ALL = "C";
+  return spawnSync("git", ["--no-optional-locks", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
     "--literal-pathspecs", ...args], { cwd, env, input: Buffer.alloc(0), maxBuffer });
 }
 
@@ -100,6 +102,14 @@ export function discoverLedgerProject(directory: string): ProjectDiscovery {
     if (!exactText(directory) || directory.includes("\0")) return { reason: "Malformed project directory" };
     const servedDir = resolve(directory);
     const scope = realpathSync(servedDir);
+    const worktree = runGit(scope, ["rev-parse", "--is-inside-work-tree"]);
+    if (worktree.error) throw worktree.error;
+    const inside = worktree.status === 0 ? line(worktree.stdout) : undefined;
+    const failure = worktree.stderr.toString().trim();
+    if (inside === "false" || failure.startsWith("fatal: not a git repository (or any of the parent directories)")) {
+      return { reason: "The project folder is not in a Git worktree" };
+    }
+    if (inside !== "true") throw new Error(failure || "Could not identify the Git worktree");
     const version = runGit(scope, ["--version"]);
     const [, major, minor] = /^git version (\d+)\.(\d+)/.exec(utf8(version.stdout ?? Buffer.alloc(0))) ?? [];
     if (version.status !== 0 || Number(major) < 2 || (Number(major) === 2 && Number(minor) < 41) || !major) {
@@ -107,7 +117,7 @@ export function discoverLedgerProject(directory: string): ProjectDiscovery {
     }
     const resolveGitPath = (flag: string): string => {
       const result = runGit(scope, ["rev-parse", "--path-format=absolute", flag]);
-      if (result.status !== 0) throw new Error("The project folder is not in a Git worktree");
+      if (result.status !== 0) throw new Error(result.stderr.toString().trim() || "Could not read the Git worktree paths");
       return realpathSync(line(result.stdout));
     };
     const root = resolveGitPath("--show-toplevel");

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LlmProvider } from "../../shared/config.ts";
 import type { NativeProcessIdentity } from "../adapters/nativeProcess.ts";
 import type { EditChange } from "./evidence.ts";
-import { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
+import { changesLedger, type LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
 
 export interface WriterId {
@@ -65,7 +65,7 @@ export class WriterRegistry {
   constructor(worker?: WriterLedger) { this.worker = worker; }
 
   private ledger(): WriterLedger {
-    return this.worker ??= new LedgerWorkerClient();
+    return this.worker ??= changesLedger();
   }
 
   /** Recover registered executions from the previous voice process before taking new ones. */
