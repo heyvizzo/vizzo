@@ -714,7 +714,10 @@ describe("request shaping", () => {
 describe("projectNote: what the solver is told about its harness's switches", () => {
   it("Shell on (the solver's default): it can look things up, and doesn't commit; Shell off: no git, use the git state block", () => {
     expect(projectNote("claude-code")).toContain("You have a shell");
-    expect(projectNote("claude-code")).toContain("Don't commit");
+    for (const shell of [true, false]) {
+      expect(projectNote("claude-code", { shell })).toContain("Never stage, commit, stash, reset, check out, switch branches or push, even when asked.");
+      expect(projectNote("claude-code", { shell })).toContain("Commits are made from Vizzo's Commit button.");
+    }
     expect(projectNote("claude-code")).not.toContain("git state block");
     expect(projectNote("claude-code", { shell: false })).toContain("You have no shell");
     expect(projectNote("codex")).toContain("You have a shell");

@@ -184,12 +184,20 @@ describe("underestimated foreground work", () => {
   it("the next central turn runs independently while the promoted solver keeps working", async () => {
     const s = setup();
     const t = s.start();
-    await vi.advanceTimersByTimeAsync(25_100);
+    await vi.advanceTimersByTimeAsync(100);
+    const execution = s.solver.mock.calls[0]![0].execution!;
+    expect(execution.writer).toEqual({ kind: "central", id: s.ctx.turnId });
+    const originalId = execution.id;
+    await vi.advanceTimersByTimeAsync(25_000);
     await t.done;
+    expect(execution.writer).toEqual({ kind: "job", id: s.jobs()[0]!.jobId });
+    expect(execution.id).toBe(originalId);
+    expect(s.solver).toHaveBeenCalledOnce();
     const runningId = s.d.log.threadSends[0]!.threadId;
     const next = s.start({ ...s.ctx, turnId: "next-turn", typedText: "What else can we change?" });
     await vi.advanceTimersByTimeAsync(100);
     expect(s.d.log.threadSends).toHaveLength(2);
+    expect(s.solver.mock.calls[1]![0].execution?.id).not.toBe(originalId);
     expect(s.d.log.threadSends[1]).toMatchObject({ fork: runningId });
     expect(s.d.log.threadSends[1]!.threadId).not.toBe(runningId);
     expect(s.jobs().at(-1)!.state).toBe("running");

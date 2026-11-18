@@ -6,6 +6,8 @@ import { batchKey, exactBytes, exactText, MAX_FILE_BYTES, parsePatch, PENDING_MS
 import { LedgerPersistence } from "./persistence.ts";
 import { evidencePath, pathAcceptsEvidence, readBaseEntry, readLedgerHead, readWorkingEntry, sameHead,
   type LedgerHead, type LedgerProject } from "./project.ts";
+import { stopVerifiedNativeProcess } from "../adapters/nativeProcess.ts";
+import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
 interface Effect {
   path: string;
@@ -33,6 +35,7 @@ interface ProjectState {
   executions: Record<string, LedgerProject>;
   moves: Record<string, readonly [string, string]>;
   notices: Record<string, string>;
+  writerRecords?: Record<string, WriterExecutionRecord>;
 }
 
 export interface BatchResult {
@@ -381,6 +384,61 @@ export class LedgerStore {
       if (chain && !pending.has(path)) compact(chain, content);
     }
     save();
+  }
+
+  saveWriter(project: LedgerProject, execution: WriterExecutionRecord): void {
+    this.persistence.assertExternal(project.id, [project.root, project.gitDir, project.commonDir]);
+    const all = this.persistence.load();
+    const state = all[project.id] ?? newState(readLedgerHead(project));
+    const id = executionKey(execution.executionId);
+    for (const candidate of [state, ...Object.values(all)]) {
+      const pinned = candidate.executions[id];
+      if (pinned && (pinned.id !== project.id || pinned.gitDir !== project.gitDir ||
+          pinned.scope !== project.scope || pinned.servedDir !== project.servedDir)) throw new Error("Execution project scope changed");
+    }
+    if (execution.folder !== project.servedDir) throw new Error("Writer execution folder differs from the pinned scope");
+    state.executions[id] = project;
+    (state.writerRecords ??= {})[id] = execution;
+    all[project.id] = state;
+    this.persistence.save(all);
+  }
+
+  async restoreWriters(): Promise<void> {
+    const all = this.persistence.load();
+    const attempts = new Map<string, Promise<boolean>>();
+    const unresolved = Object.values(all).flatMap((state) =>
+      Object.values(state.writerRecords ?? {}).filter((writer) => writer.phase !== "settled"));
+    await Promise.all(unresolved.map(async (writer) => {
+      const previous = writer.nativeProcess;
+      let stopped = writer.phase === "queued" || writer.nativeDispatched === false;
+      if (previous) {
+        const key = JSON.stringify(previous);
+        const stopping = attempts.get(key) ?? stopVerifiedNativeProcess(previous, true);
+        attempts.set(key, stopping);
+        stopped = await stopping.catch(() => false);
+      }
+      writer.outcome = "interrupted";
+      const escaped = writer.nativeDispatched !== false && writer.requiresNativeConfirmation;
+      writer.phase = stopped && !escaped ? "settled" : "unconfirmed";
+      if (stopped) delete writer.nativeProcess;
+      if (escaped) writer.reason = "OpenCode may have left a detached shell running without confirming it stopped";
+      else if (!stopped) writer.reason = "Vizzo could not verify that the previous harness and its tools stopped";
+      else delete writer.reason;
+    }));
+    if (unresolved.length) this.persistence.save(all);
+  }
+
+  writerSnapshot(projectId: string, now = Date.now()): ProjectWriterSnapshot {
+    this.persistence.content(projectId); // Validate the journal key.
+    this.pending(now);
+    const state = this.persistence.load()[projectId];
+    const pending = new Set(Object.values(state?.receipts ?? {}).flatMap((receipt) =>
+      receipt.pending.length ? [receipt.executionId] : []));
+    return {
+      projectId, executions: Object.values(state?.writerRecords ?? {}).map(({ nativeProcess: _privateIdentity, ...record }) => ({
+        ...record, projectId, pending: pending.has(record.executionId),
+      })),
+    };
   }
 
   pending(now = Date.now()): { executionIds: string[]; deadline?: number } {

@@ -95,7 +95,7 @@ export function harnessPromptInfo(role: CliRole, choice: LlmChoice, params: Chat
   const now = agentSpec(role, choice, spec?.persist);
   const used = spec ?? now;
   // The layers as they are now; a session opened under other settings shows the prompt it was given, as one part.
-  const parts = rolePromptParts(role, used.harness, used.toggles);
+  const parts = rolePromptParts(role, used.harness, used.toggles, used.project ?? null);
   const system = parts.map((x) => x.text).join("\n\n") === used.system
     ? parts
     : [{ label: `${ROLE_PROMPT_LABEL[role]} + project note + saved instructions, as fixed when this session was opened`, text: used.system }];
@@ -165,8 +165,9 @@ export function projectNote(harness: LlmProvider, toggles?: HarnessToggles): str
   const has = (id: "shell" | "web"): boolean => isHarness(harness) && toggleOn(harness, toggles, id, "smart");
   return [
     `Your working directory is the project you're answering about. Find the code behind the pointed elements ${claude ? "with Glob, Grep and Read" : "with your file search and read tools"}: start from what identifies the element (its JSX location or data-source when given, else its \`selector\` line, data-testid, classes and text), then read the markup, styles and script that render it. Read and edit only inside the working directory, and don't describe a file you haven't read. For a change request, ${claude ? "make the change with Edit or Write" : "make the change with your file editing tools"}, keep it to what was asked, and read the file back to check it. Never read or edit .env files.`,
+    `Never stage, commit, stash, reset, check out, switch branches or push, even when asked. Commits are made from Vizzo's Commit button.`,
     has("shell")
-      ? `You have a shell. Use it to look things up when the request needs it (git status, log, blame and diff, the project's own type check or tests). Don't commit, push, switch branches, install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served, and the user decides what gets committed.`
+      ? `You have a shell. Use it to look things up when the request needs it (git status, log, blame and diff, the project's own type check or tests). Don't install packages or start long-running processes (a dev server, a watcher) unless the user asks in their current request or saved instructions: the page is already being served.`
       : `You have no shell, so you can't run git, builds or tests, and the files under .git/ are compressed: don't read them or hunt for other copies of a file. Use the request's git state block (status, recent commits, uncommitted changes), and say plainly when an answer needs history it doesn't show, or when a change should be checked by running something.`,
     ...(has("web") ? [`You can search and fetch the web: use it for documentation the project doesn't contain, never for what the project's own code answers.`] : []),
   ].join(" ");
@@ -198,23 +199,21 @@ function prompts(): { router: string; routerThreads: string; solver: string; fil
  * file; for the solver, the project note (what its harness's switches give it) and the saved instructions, each scope
  * its own layer.
  */
-export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { label: string; text: string }[] {
+export function rolePromptParts(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles, dir = projectDir()): { label: string; text: string }[] {
   if (role === "router") return [{ label: ROLE_PROMPT_LABEL.router, text: routerSystem() + ROUTER_FORMAT }];
   if (role === "fillers") return [{ label: ROLE_PROMPT_LABEL.fillers, text: prompts().fillers + FILLERS_FORMAT }];
-  const dir = projectDir();
   return [
     { label: ROLE_PROMPT_LABEL.solver, text: prompts().solver },
     // Without tools, say so: otherwise models write a tool call as text (the solver in Claude Code then stalls on it).
     dir ? { label: "project note (what this harness's switches give it)", text: projectNote(harness, toggles) } : { label: "no-tools note", text: NO_TOOLS_NOTE },
-    ...solverInstructions().map((x) => ({ label: `saved instructions · ${x.label}`, text: `## ${x.label}\n\n${x.text}` })),
+    ...solverInstructions(dir).map((x) => ({ label: `saved instructions · ${x.label}`, text: `## ${x.label}\n\n${x.text}` })),
   ];
 }
 
 /** Each role's system prompt on a harness; the solver works in the project folder when there is one. */
-export function roleSystem(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles): { system: string; project?: string } {
-  const system = rolePromptParts(role, harness, toggles).map((x) => x.text).join("\n\n");
-  const dir = role === "solver" ? projectDir() : undefined;
-  return dir ? { system, project: dir } : { system };
+export function roleSystem(role: CliRole, harness: LlmProvider, toggles?: HarnessToggles, dir = projectDir()): { system: string; project?: string } {
+  const system = rolePromptParts(role, harness, toggles, dir).map((x) => x.text).join("\n\n");
+  return role === "solver" && dir ? { system, project: dir } : { system };
 }
 registerRoleSpecs(roleSystem);
 
@@ -583,14 +582,14 @@ export function buildSolverParams(
 }
 
 /** Only solvers without a shell need a snapshot; an existing session's pinned switches take precedence. */
-async function solverGitContext(choice: LlmChoice | undefined, spec?: AgentSpec): Promise<string> {
+async function solverGitContext(choice: LlmChoice | undefined, spec?: AgentSpec, folder = projectDir()): Promise<string> {
   const harness = spec?.harness ?? choice?.provider;
   const toggles = spec ? spec.toggles : choice?.toggles;
   if (harness && isHarness(harness) && toggleOn(harness, toggles, "shell", "smart")) return "";
-  return gitContext(projectDir());
+  return gitContext(spec ? spec.project ?? null : folder);
 }
 
-export const solveTask: SolveTask = async ({ mark, question, original, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation }) => {
+export const solveTask: SolveTask = async ({ mark, question, original, pointing, history, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, llm, signal, timeoutMs, annotation, execution }) => {
   const t0 = performance.now();
   const choice = choiceFor(llm, "solver");
   let text = "";
@@ -602,9 +601,10 @@ export const solveTask: SolveTask = async ({ mark, question, original, pointing,
     onSpokenLine(line);
   });
   const params = attachDrawing(buildSolverParams(question, pointing, history, intent, pageContext, language, voiceCues, original), annotation, history);
-  const git = await solverGitContext(choice);
+  const pinned = execution ? agentSpec("solver", choice, false, execution.folder) : undefined;
+  const git = await solverGitContext(choice, pinned);
   if (git) params.messages.at(-1)!.content += `\n\n${git}`;
-  onPrompt?.(harnessPromptInfo("solver", choice, params));
+  onPrompt?.(harnessPromptInfo("solver", choice, params, pinned));
   mark("solver.request", {
     model: choice.model, backend: choice.provider, fast: choice.speed === "fast",
     ...(choice.level ? { level: choice.level } : {}), ...(intent === "task" ? { intent } : {}),
@@ -620,7 +620,7 @@ export const solveTask: SolveTask = async ({ mark, question, original, pointing,
   const gate = new NarrationGate(onText);
   let res: HarnessResult;
   try {
-    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations);
+    res = await harnessRequest("solver", choice, flattenMessages(params), (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, signal, params.annotations, pinned, execution);
     gate.end();
   } catch (err) {
     onResponse?.(errorResponseInfo("solver", t0, err));
@@ -680,7 +680,7 @@ export function threadUserMessage(
 const threadChoice = (thread: { choice?: LlmChoice }): LlmChoice | undefined => thread.choice;
 
 export const solveInThread: SolveInThread = async ({
-  thread, kind, mark, question, original, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation,
+  thread, kind, mark, question, original, pointing, intent, onSpokenLine, onDelta, pageContext, onPrompt, onResponse, language, voiceCues, timeoutMs, annotation, execution,
 }) => {
   const t0 = performance.now();
   const choice = threadChoice(thread);
@@ -692,7 +692,7 @@ export const solveInThread: SolveInThread = async ({
     mark("solver.spokenReady", { viaPrefix });
     onSpokenLine(line);
   });
-  const git = await solverGitContext(choice, thread.spec);
+  const git = await solverGitContext(choice, thread.spec, execution ? execution.folder : thread.projectFolder);
   const user = threadUserMessage(kind, question, pointing, intent, pageContext, language, voiceCues, original) + (annotation ? `\n\n${drawingContext(annotation)}` : "") + (git ? `\n\n${git}` : "");
   const params: ChatParams = { messages: [{ role: "user", content: user }], ...(annotation ? { annotations: [annotation] } : {}) };
   // The prompt goes to the debug view as it is dispatched: with the history or notes the session added, and how the
@@ -728,7 +728,7 @@ export const solveInThread: SolveInThread = async ({
   const gate = new NarrationGate(onText);
   let res: Awaited<ReturnType<typeof thread.send>>;
   try {
-    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations, showPrompt);
+    res = await thread.send(user, (d) => gate.feed(d), timeoutMs ?? ROLE_TIMEOUT_MS.solver, params.annotations, showPrompt, execution);
     showPrompt();
     gate.end();
   } catch (err) {

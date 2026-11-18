@@ -18,8 +18,9 @@ import { anthropicContent, codexInput, rpcImages, opencodeParts, assertDrawingVi
 // itself: its own prompt with ours appended, and its own tools. The tier's toggles (shared/config.ts
 // HARNESS_TOGGLES; all on for the solver unless switched off) decide what else loads: shell, web, subagents, MCP
 // servers, skills, hooks, plugins, instruction files; each harness below maps them to its flags, config or environment.
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { NativeHarnessProcess } from "./nativeProcess.ts";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
@@ -27,6 +28,12 @@ import { isAbsolute, join, normalize, relative } from "node:path";
 import { HARNESS_TOGGLES, LLM_PROVIDER_LABELS, toggleOn, type HarnessId, type HarnessToggleId, type HarnessToggles, type LlmSpeed, type LlmTier } from "../../shared/config.ts";
 import { priceOf, tokenCost } from "../prices.ts";
 import { CLAUDE_BASE_ARGS, CliAgent, EMPTY_CWD, type CliRole } from "./claudeCli.ts";
+import type { EditChange } from "../changes/evidence.ts";
+import type { ExecutionOutcome, WriterExecution } from "../changes/writers.ts";
+import { ClaudeEditEvents } from "./claudeEditEvents.ts";
+import { parseCodexEditEvent } from "./codexEditEvents.ts";
+import { opencodeEditEvent } from "./opencodeEditEvents.ts";
+import { createRpcEditEventParser } from "./rpcEditEvents.ts";
 
 /** Token usage in the Anthropic shape (input excludes cache reads), plus what the call cost and who pays. */
 export interface LlmUsage {
@@ -90,12 +97,83 @@ export class SessionUnavailableError extends Error {
   constructor(message: string) { super(message); this.name = "SessionUnavailableError"; }
 }
 
+export const STOP_CONFIRM_MS = 30_000;
+
+/** One native request owns its event sink until its protocol confirms the writer cannot write again. */
+export class HarnessTurn {
+  private readonly execution?: WriterExecution;
+  readonly reportsEdits: boolean;
+  private timeout?: ReturnType<typeof setTimeout>;
+  private forceStop?: () => boolean | void | Promise<boolean | void>;
+  private barrier?: Promise<void>;
+  private confirmed = false;
+  private reason?: ExecutionOutcome;
+
+  constructor(execution?: WriterExecution) {
+    this.execution = execution;
+    this.reportsEdits = !!execution?.folder;
+  }
+
+  get stopping(): boolean { return this.reason !== undefined || !!this.execution?.stopRequested; }
+  get settled(): Promise<void> | undefined { return this.barrier; }
+
+  holdUntil(terminal: Promise<unknown>, forceStop?: () => boolean | void | Promise<boolean | void>): void {
+    this.forceStop = forceStop;
+    const confirm = () => {
+      this.confirmed = true;
+      clearTimeout(this.timeout);
+    };
+    this.barrier = terminal.then(confirm, confirm);
+    this.execution?.waitForSettlement(this.barrier);
+    this.arm();
+  }
+
+  stop(reason: ExecutionOutcome = "stopped"): void {
+    if (this.confirmed) return;
+    this.reason ??= reason;
+    this.execution?.stopping(reason);
+    this.arm();
+  }
+
+  expectConfirmation(): void { this.arm(true); }
+
+  uncertain(reason: string): void {
+    clearTimeout(this.timeout);
+    this.execution?.unconfirmed(reason);
+  }
+
+  private arm(expected = false): void {
+    if (this.confirmed || (!this.stopping && !expected) || !this.barrier || this.timeout) return;
+    this.timeout = setTimeout(() => {
+      if (this.forceStop) {
+        void Promise.resolve().then(this.forceStop).then((stopped) => {
+          if (stopped === false && !this.confirmed) this.execution?.unconfirmed("Vizzo could not verify that the harness process group stopped");
+        }, () => this.execution?.unconfirmed("Vizzo could not verify that the harness process group stopped"));
+      } else this.execution?.unconfirmed();
+    }, STOP_CONFIRM_MS).unref();
+  }
+
+  async prepare(native: NativeHarnessProcess, requiresNativeConfirmation = false): Promise<void> {
+    this.checkBeforeSend();
+    await native.prepare(this.execution ? (identity) => this.execution!.bindNative(identity, requiresNativeConfirmation) : undefined);
+    this.checkBeforeSend();
+  }
+
+  checkBeforeSend(): void {
+    if (this.stopping) throw Object.assign(new Error("Solver request stopped before dispatch"), { name: "AbortError" });
+  }
+
+  edits(batch: { sessionId: string; toolCallId: string; changes: EditChange[] }): void {
+    if (!this.confirmed) this.execution?.edits(batch.sessionId, batch.toolCallId, batch.changes);
+  }
+}
+
 export interface WarmAgent {
   /** False once used, killed or crashed: the pool drops it. */
   alive(): boolean;
   /** Start-up finished: a request now doesn't wait for it. */
   ready(): boolean;
-  request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult>;
+  request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], turn?: HarnessTurn): Promise<HarnessResult>;
   kill(): void;
   /** Finish releasing a saved session's native connection before a terminal can attach. */
   release?(): Promise<void>;
@@ -180,7 +258,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string, onTimeout: () 
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     p.finally(() => clearTimeout(timer)),
-    new Promise<T>((_, reject) => { timer = setTimeout(() => { onTimeout(); reject(new Error(`${label} timed out after ${ms} ms`)); }, ms); }),
+    new Promise<T>((_, reject) => { timer = setTimeout(() => { onTimeout(); reject(Object.assign(new Error(`${label} timed out after ${ms} ms`), { name: "TimeoutError" })); }, ms); }),
   ]);
 }
 
@@ -272,6 +350,7 @@ export function rpcEditedFiles(ev: Record<string, unknown>): string[] {
 /** The solver's tools in the project folder when it has no shell, and the secrets it may never touch. */
 const CLAUDE_FILE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"];
 const CLAUDE_DENY = ["Read(.env*)", "Edit(.env*)"];
+const CLAUDE_GIT_DENY = ["add", "stage", "commit", "stash", "reset", "checkout", "switch", "push"].map((command) => `Bash(git ${command}:*)`);
 /** The built-in tools each toggle switches (`Agent` is the subagent tool's older name). */
 const CLAUDE_TOGGLE_TOOLS: Partial<Record<HarnessToggleId, string[]>> = {
   shell: ["Bash"], web: ["WebSearch", "WebFetch"], subagents: ["Task", "Agent", "ListAgents", "SendMessage", "TaskStop", "Workflow"], skills: ["Skill"],
@@ -317,7 +396,7 @@ export function claudeArgs(spec: AgentSpec, plugins: () => string[] = claudePlug
   const denied = [
     ...CLAUDE_NEVER,
     ...Object.entries(CLAUDE_TOGGLE_TOOLS).flatMap(([id, t]) => (on(spec, id as HarnessToggleId) ? [] : t)),
-    ...CLAUDE_DENY,
+    ...CLAUDE_DENY, ...CLAUDE_GIT_DENY,
   ];
   // Nothing of the setup on: --safe-mode drops all of it (CLAUDE.md, skills, plugins, hooks, MCP and the rest).
   // Some of it on: it all loads, and each part that's off is turned off on its own.
@@ -378,14 +457,18 @@ class ClaudeAgent implements WarmAgent {
     const id = this.cli.sessionId ?? this.sessionId;
     return this.saved && id && (this.used || this.start?.kind === "resume") ? { id } : undefined;
   }
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], turn = new HarnessTurn()): Promise<HarnessResult> {
     this.used = true;
     const warm = this.ready();
     const files = new FilesTouched(this.spec.project);
-    const onEvent = (ev: Record<string, unknown>): void => { for (const f of claudeEditedFiles(ev)) files.add(f); };
+    const edits = turn.reportsEdits ? new ClaudeEditEvents() : undefined;
+    const onEvent = (ev: Record<string, unknown>): void => {
+      for (const f of claudeEditedFiles(ev)) files.add(f);
+      for (const batch of edits?.accept(ev) ?? []) turn.edits(batch);
+    };
     let r;
     try {
-      r = await this.cli.request(anthropicContent(user, annotations), { onText, onEvent }, timeoutMs, warm, this.kept);
+      r = await this.cli.request(anthropicContent(user, annotations), { onText, onEvent, turn }, timeoutMs, warm, this.kept);
     } catch (e) {
       throw unavailable(this.start, this.cli.attached, e);
     }
@@ -394,7 +477,7 @@ class ClaudeAgent implements WarmAgent {
       raw: { ...r.raw, cliCostUsd: r.cliCostUsd, cliDurationMs: r.durationMs }, filesTouched: files.list,
     };
   }
-  pid(): number | undefined { return this.cli.exited ? undefined : this.cli.proc.pid; }
+  pid(): number | undefined { return this.cli.exited ? undefined : this.cli.pid; }
   /** Stops the turn; the process and its conversation stay (CliAgent.interrupt). */
   abort(): void { this.cli.interrupt(); }
   kill(): void { this.cli.kill(); }
@@ -527,20 +610,21 @@ class GrokAgent implements WarmAgent {
   alive(): boolean { return this.start ? !this.killed : !this.used; }
   ready(): boolean { return false; }
   session(): SessionRef | undefined { return this.start && this.started && this.sessionId ? { id: this.sessionId } : undefined; }
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], turn = new HarnessTurn()): Promise<HarnessResult> {
+    turn.checkBeforeSend();
     this.used = true;
     if (annotations?.length) throw new Error("Grok CLI does not support drawing attachments. Select Codex, Claude Code, pi, omp or OpenCode for this tier.");
     let apiKeySource = "";
     const mode = !this.start ? null : this.started ? "resume" as const : this.start.kind === "fork" ? "fork" as const : "new" as const;
     const cli = new CliAgent(
       `grok ${this.spec.role}`, binOrThrow("grok"), grokArgs(this.spec, user, mode && this.sessionId ? { id: this.sessionId, mode } : undefined),
-      cwdOf(this.spec), prepareGrokHome(this.spec, grokEnv(this.spec)),
+      cwdOf(this.spec), prepareGrokHome(this.spec, grokEnv(this.spec)), true,
     );
     this.cli = cli;
     let res;
     try {
       res = await cli.request(null, {
-        onText,
+        onText, turn,
         onEvent: (ev) => { if (ev.type === "system" && ev.subtype === "init") apiKeySource = String(ev.apiKeySource ?? ""); },
       }, timeoutMs, false);
     } catch (e) {
@@ -565,7 +649,7 @@ class GrokAgent implements WarmAgent {
     };
   }
   /** Stops the request's process; the saved session stays and the next request resumes it. */
-  abort(): void { this.cli?.kill(); }
+  abort(): void { this.cli?.interruptProcess(); }
   kill(): void { this.killed = true; this.cli?.kill(); }
 }
 
@@ -626,6 +710,7 @@ interface RpcState { model?: { input?: string[] }; sessionId?: string; sessionFi
 const RPC_DIALOGS = new Set(["select", "confirm", "input", "editor"]);
 
 class RpcAgent implements WarmAgent {
+  private native: NativeHarnessProcess;
   private proc: ChildProcessWithoutNullStreams;
   private exited = false;
   private used = false;
@@ -649,7 +734,9 @@ class RpcAgent implements WarmAgent {
     if (start && start.kind !== "new" && start.ref.file && !existsSync(start.ref.file)) {
       throw new SessionUnavailableError(`couldn't ${start.kind} session ${start.ref.id}: ${start.ref.file} is gone`);
     }
-    this.proc = spawn(binOrThrow(spec.harness), rpcArgs(spec, start), { cwd: cwdOf(spec), stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    this.native = new NativeHarnessProcess(binOrThrow(spec.harness), rpcArgs(spec, start), cwdOf(spec));
+    this.proc = this.native.proc;
+    this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     jsonLines(this.proc, (ev) => {
       if (ev.type === "response" && ev.id === "boot") {
         this.booted = true;
@@ -665,7 +752,7 @@ class RpcAgent implements WarmAgent {
       this.listener?.(ev);
     });
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
-    this.proc.on("close", (code) => { this.exited = true; this.resolveBoot(null); for (const w of this.exitWaiters) w(code); });
+    void this.native.closed.then((code) => { this.exited = true; this.resolveBoot(null); for (const w of this.exitWaiters) w(code); });
     this.proc.on("error", (e) => { this.exited = true; this.resolveBoot(null); this.stderr += String(e); });
     // Answered once the agent has loaded its models and tools: that's "booted".
     this.proc.stdin.write(JSON.stringify({ id: "boot", type: "get_state" }) + "\n");
@@ -675,7 +762,7 @@ class RpcAgent implements WarmAgent {
   ready(): boolean { return this.booted; }
   keep(): boolean { if (this.used || !this.saved) return false; this.kept = true; return true; }
   abort(): void { if (!this.exited) this.proc.stdin.write(JSON.stringify({ id: "abort", type: "abort" }) + "\n"); }
-  pid(): number | undefined { return this.exited ? undefined : this.proc.pid; }
+  pid(): number | undefined { return this.exited ? undefined : this.native.nativePid; }
   /** From the boot state; the file is written with the first message. */
   session(): SessionRef | undefined {
     const id = this.state?.sessionId;
@@ -683,7 +770,7 @@ class RpcAgent implements WarmAgent {
     return { id, ...(this.state?.sessionFile ? { file: this.state.sessionFile } : {}) };
   }
 
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], turn = new HarnessTurn()): Promise<HarnessResult> {
     const first = !this.used;
     this.used = true;
     const warm = this.booted;
@@ -702,7 +789,9 @@ class RpcAgent implements WarmAgent {
         assertDrawingVision(state?.model?.input?.includes("image"), this.spec.harness, this.spec.model);
       } catch (err) { this.kill(); throw err; }
     }
+    await turn.prepare(this.native);
     const files = new FilesTouched(this.spec.project);
+    const edits = turn.reportsEdits && this.spec.harness === "omp" ? createRpcEditEventParser("omp") : undefined;
     const label = `${this.spec.harness} (${this.spec.role})`;
     let text = "";
     let model = this.spec.model;
@@ -716,10 +805,13 @@ class RpcAgent implements WarmAgent {
       this.exitWaiters = [(code) => reject(new Error(`${label} exited (${code}) before answering: ${this.stderr.trim().slice(-300)}`))];
       this.listener = (ev) => {
         for (const f of rpcEditedFiles(ev)) files.add(f);
+        const batch = edits?.(ev);
+        const sessionId = this.state?.sessionId;
+        if (batch && sessionId) turn.edits({ ...batch, sessionId });
         const ame = ev.assistantMessageEvent as { type?: string; delta?: string } | undefined;
         if (ev.type === "message_update" && ame?.type === "text_delta" && ame.delta) {
           text += ame.delta;
-          onText?.(ame.delta);
+          if (!turn.stopping) onText?.(ame.delta);
         } else if (ev.type === "message_end") {
           const m = ev.message as { role?: string; usage?: Record<string, unknown>; stopReason?: string; errorMessage?: string; model?: string; provider?: string } | undefined;
           if (m?.role !== "assistant") return;
@@ -733,21 +825,21 @@ class RpcAgent implements WarmAgent {
           if (m.stopReason === "error" || m.stopReason === "aborted") failure = m.errorMessage ?? m.stopReason;
         } else if (ev.type === "response" && ev.id === "abort") {
           // Answered by agent_end (stopReason aborted).
-        } else if (ev.type === "response" && ev.success === false) {
+        } else if (ev.type === "response" && ev.id === "prompt" && ev.success === false) {
           reject(new Error(`${label}: ${String(ev.error ?? "prompt rejected")}`));
         } else if (ev.type === "agent_end") {
           resolve();
         }
       };
     });
-    this.proc.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: user, ...(annotations?.length ? { images: rpcImages(annotations) } : {}) }) + "\n");
-    try {
-      await withTimeout(done, timeoutMs, label, () => this.kill());
-    } finally {
+    const cleanup = () => {
       this.listener = null;
       this.exitWaiters = [];
       if (!this.kept) this.kill();
-    }
+    };
+    turn.holdUntil(done.then(cleanup, cleanup), () => this.native.stop(true));
+    this.proc.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: user, ...(annotations?.length ? { images: rpcImages(annotations) } : {}) }) + "\n");
+    await withTimeout(done, timeoutMs, label, () => { turn.stop("timed-out"); this.abort(); });
     if (failure) throw new Error(`${label} failed: ${failure}`);
     // The ChatGPT login (openai-codex) is a subscription; other providers bill the keys pi/omp were given.
     const billing = provider === "openai-codex" ? "subscription" as const : "api" as const;
@@ -759,7 +851,7 @@ class RpcAgent implements WarmAgent {
     };
   }
 
-  kill(): void { if (!this.exited) this.proc.kill("SIGTERM"); }
+  kill(): void { if (!this.exited) void this.native.stop(); }
 }
 
 // ── Codex (shared app-server, one thread per request) ────────────────────────
@@ -769,12 +861,25 @@ type Notify = (method: string, params: Record<string, unknown>) => void;
 /** One `codex app-server` (JSON-RPC over stdio) shared by every Codex agent. */
 class CodexServer {
   private static current: CodexServer | null = null;
+  private static retiring = new Set<CodexServer>();
   static get(): CodexServer {
     if (!CodexServer.current || CodexServer.current.exited) CodexServer.current = new CodexServer();
     return CodexServer.current;
   }
-  static stop(): void { CodexServer.current?.proc.kill("SIGTERM"); CodexServer.current = null; }
+  static async stop(force = false): Promise<void> {
+    if (CodexServer.current) CodexServer.retiring.add(CodexServer.current);
+    CodexServer.current = null;
+    await Promise.all([...CodexServer.retiring].map(async (server) => {
+      if (!await server.native.stop(force)) {
+        if (force) throw new Error("Vizzo could not verify that the Codex process group stopped");
+        return;
+      }
+      await server.closed;
+      CodexServer.retiring.delete(server);
+    }));
+  }
 
+  readonly native: NativeHarnessProcess;
   private proc: ChildProcessWithoutNullStreams;
   private id = 0;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -783,16 +888,19 @@ class CodexServer {
   private stderr = "";
   exited = false;
   readonly ready: Promise<void>;
+  readonly closed: Promise<void>;
   /** The MCP servers in the user's config: a thread with MCP off turns each one off (an empty table merges). */
   readonly mcpServers: Promise<string[]>;
 
   private constructor() {
     mkdirSync(EMPTY_CWD, { recursive: true });
     // What a thread loads is set per thread (codexConfig): the server starts with the user's config.
-    this.proc = spawn(binOrThrow("codex"), ["app-server"], { cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    this.native = new NativeHarnessProcess(binOrThrow("codex"), ["app-server"], EMPTY_CWD);
+    this.proc = this.native.proc;
+    this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     jsonLines(this.proc, (m) => this.onMessage(m));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
-    this.proc.on("close", (code) => {
+    this.closed = this.native.closed.then((code) => {
       this.exited = true;
       const err = new Error(`codex app-server exited (${code}): ${this.stderr.trim().slice(-300)}`);
       for (const p of this.pending.values()) p.reject(err);
@@ -895,6 +1003,7 @@ class CodexAgent implements WarmAgent {
   private used = false;
   private failed = false;
   private turnId: string | null = null;
+  private active?: Promise<void>;
   private releasing: Promise<void> | null = null;
 
   private readonly kept: boolean;
@@ -933,7 +1042,7 @@ class CodexAgent implements WarmAgent {
     if (this.threadId && this.turnId) void this.server.call("turn/interrupt", { threadId: this.threadId, turnId: this.turnId }).catch(() => {});
   }
 
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], turn = new HarnessTurn()): Promise<HarnessResult> {
     this.used = true;
     const warm = this.threadId !== null;
     const label = `codex (${this.spec.role})`;
@@ -943,50 +1052,91 @@ class CodexAgent implements WarmAgent {
       if (start && start.kind !== "new" && !this.server.exited) throw new SessionUnavailableError(`couldn't ${start.kind} session ${start.ref.id}: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     });
+    await turn.prepare(this.server.native);
     const files = new FilesTouched(this.spec.project);
     let text = "";
     let usage: Record<string, unknown> = {};
-    let turn: unknown = null;
-    const done = new Promise<void>((resolve, reject) => {
-      this.server.listen(threadId, (method, params) => {
-        if (method === "item/agentMessage/delta" && typeof params.delta === "string") {
-          text += params.delta;
-          onText?.(params.delta);
-        } else if (method === "item/completed") {
-          for (const f of codexEditedFiles(params.item)) files.add(f);
-        } else if (method === "thread/tokenUsage/updated") {
-          usage = ((params.tokenUsage as Record<string, unknown> | undefined)?.last ?? {}) as Record<string, unknown>;
-        } else if (method === "turn/completed") {
-          turn = params.turn;
-          const t = params.turn as { status?: string; error?: { message?: string } | null } | undefined;
-          if (t?.status === "completed") resolve();
-          else reject(new Error(`${label} turn ${t?.status ?? "failed"}: ${t?.error?.message ?? ""}`));
-        } else if (method === "server/exited") {
-          reject(new Error(String(params.message)));
-        } else if (method === "error" && !params.willRetry) {
-          reject(new Error(`${label}: ${String((params.error as { message?: string } | undefined)?.message ?? "error")}`));
-        }
-      });
-    });
+    let finalTurn: unknown = null;
+    let respond!: () => void;
+    let fail!: (error: Error) => void;
+    let settle!: () => void;
+    const done = new Promise<void>((resolve, reject) => { respond = resolve; fail = reject; });
     done.catch(() => {});
-    try {
-      const started = await this.server.call("turn/start", {
-        threadId, input: codexInput(user, annotations),
-        ...(this.spec.level ? { effort: this.spec.level } : {}),
-      });
-      this.turnId = (started as { turn?: { id?: string } } | null)?.turn?.id ?? null;
-      await withTimeout(done, timeoutMs, label, () => this.interrupt());
-    } finally {
+    const terminal = new Promise<void>((resolve) => { settle = resolve; });
+    const early: { method: string; params: Record<string, unknown> }[] = [];
+    let matchingTurn: string | null = null;
+    const receive: Notify = (method, params) => {
+      if (method === "server/exited") {
+        turn.stop("interrupted");
+        settle();
+        fail(new Error(String(params.message)));
+        return;
+      }
+      if (!matchingTurn) {
+        if (early.length < 256) early.push({ method, params });
+        return;
+      }
+      const nativeTurn = params.turn as { id?: string; status?: string; error?: { message?: string } | null } | undefined;
+      const notificationTurn = params.turnId ?? nativeTurn?.id;
+      if (notificationTurn !== undefined && notificationTurn !== matchingTurn) return;
+      if (method === "item/agentMessage/delta" && typeof params.delta === "string") {
+        text += params.delta;
+        if (!turn.stopping) onText?.(params.delta);
+      } else if (method === "item/completed") {
+        for (const f of codexEditedFiles(params.item)) files.add(f);
+        const batch = turn.reportsEdits && notificationTurn === matchingTurn ? parseCodexEditEvent(method, params) : null;
+        if (batch?.sessionId === threadId) turn.edits(batch);
+      } else if (method === "thread/tokenUsage/updated") {
+        usage = ((params.tokenUsage as Record<string, unknown> | undefined)?.last ?? {}) as Record<string, unknown>;
+      } else if (method === "turn/completed" && notificationTurn === matchingTurn) {
+        finalTurn = nativeTurn;
+        settle();
+        if (nativeTurn?.status === "completed") respond();
+        else fail(new Error(`${label} turn ${nativeTurn?.status ?? "failed"}: ${nativeTurn?.error?.message ?? ""}`));
+      } else if (method === "error" && !params.willRetry) {
+        turn.stop("failed");
+        this.interrupt();
+        fail(new Error(`${label}: ${String((params.error as { message?: string } | undefined)?.message ?? "error")}`));
+      }
+    };
+    this.server.listen(threadId, receive);
+    turn.holdUntil(terminal.then(() => {
       this.server.listen(threadId, null);
       this.turnId = null;
-    }
+      this.active = undefined;
+    }));
+    this.active = turn.settled;
+    const request = async () => {
+      let started: unknown;
+      try {
+        started = await this.server.call("turn/start", {
+          threadId, input: codexInput(user, annotations),
+          ...(this.spec.level ? { effort: this.spec.level } : {}),
+        });
+      } catch (error) {
+        // A protocol rejection of this call means there is no turn. A server exit is also terminal.
+        settle();
+        throw error;
+      }
+      const id = (started as { turn?: { id?: unknown } } | null)?.turn?.id;
+      if (typeof id !== "string" || !id) {
+        turn.stop("failed");
+        throw new Error(`${label} returned no native turn ID`);
+      }
+      this.turnId = matchingTurn = id;
+      for (const note of early) receive(note.method, note.params);
+      early.length = 0;
+      if (turn.stopping) this.interrupt();
+      await done;
+    };
+    await withTimeout(request(), timeoutMs, label, () => { turn.stop("timed-out"); this.interrupt(); });
     // OpenAI counts cached tokens inside input.
     const cached = num(usage.cachedInputTokens);
     const t = { input: Math.max(0, num(usage.inputTokens) - cached), output: num(usage.outputTokens), cacheRead: cached };
     const model = this.spec.model || "codex default";
     const price = priceOf("codex", model);
     return {
-      text, stopReason: "end_turn", model, warm, raw: { turn, usage }, filesTouched: files.list,
+      text, stopReason: "end_turn", model, warm, raw: { turn: finalTurn, usage }, filesTouched: files.list,
       // Priced at the standard rate (the Fast tier spends the subscription's allowance faster, not money).
       usage: llmUsage(t, { usd: price ? tokenCost(price, t) : null, billing: "subscription" }),
     };
@@ -1003,7 +1153,7 @@ class CodexAgent implements WarmAgent {
 
   release(): Promise<void> {
     this.failed = true;
-    return this.releasing ??= this.thread.then((id) => this.server.releaseThread(id)).catch((e: unknown) => {
+    return this.releasing ??= Promise.resolve(this.active).then(() => this.thread).then((id) => this.server.releaseThread(id)).catch((e: unknown) => {
       this.releasing = null;
       throw e;
     });
@@ -1040,46 +1190,94 @@ const OPENCODE_CONFIG = JSON.stringify({
 
 type SessionListener = (type: string, props: Record<string, unknown>) => void;
 
+class OpencodeResponseError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 class OpencodeServer {
   private static servers = new Map<string, OpencodeServer>();
+  private static retiring = new Set<OpencodeServer>();
   static get(setup: OpencodeSetup): OpencodeServer {
     const key = JSON.stringify(setup);
     let s = OpencodeServer.servers.get(key);
     if (!s || s.exited) OpencodeServer.servers.set(key, (s = new OpencodeServer(setup)));
     return s;
   }
-  static stop(): void {
-    for (const s of OpencodeServer.servers.values()) {
-      for (const a of s.streams.values()) a.abort();
-      s.proc?.kill("SIGTERM");
-    }
+  static async stop(force = false): Promise<void> {
+    for (const current of OpencodeServer.servers.values()) OpencodeServer.retiring.add(current);
     OpencodeServer.servers.clear();
+    await Promise.all([...OpencodeServer.retiring].map(async (server) => {
+      // OpenCode may have started a shell in a separate group. Ask it to stop its own tools
+      // before tearing down the authenticated server, and accept only its native idle event.
+      if (server.sessions.size && await server.native?.verify()) {
+        await withTimeout(Promise.all([...server.sessions.values()].map((session) => session.beforeRestart())),
+          3_000, "Waiting for OpenCode tools to stop", () => {}).catch(() => {});
+      }
+      server.stopping = true;
+      if (server.native && !await server.native.stop(force)) {
+        if (force) throw new Error("Vizzo could not verify that the OpenCode process group stopped");
+        return;
+      }
+      await server.closed;
+      OpencodeServer.retiring.delete(server);
+    }));
   }
 
-  private proc: ChildProcessWithoutNullStreams | null = null;
+  private native: NativeHarnessProcess | null = null;
+  private readonly password = randomBytes(24).toString("hex");
+  private readonly authorization = `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`;
   private stderr = "";
+  private stopping = false;
   exited = false;
   readonly url: Promise<string>;
+  private finishExit!: () => void;
+  private readonly closed = new Promise<void>((resolve) => { this.finishExit = resolve; });
   private streams = new Map<string, AbortController>();
-  private sessions = new Map<string, SessionListener>();
+  private readers = new Set<Promise<void>>();
+  private sessions = new Map<string, { directory: string; receive: SessionListener; beforeRestart: () => Promise<void> }>();
 
   private constructor(setup: OpencodeSetup) {
     mkdirSync(EMPTY_CWD, { recursive: true });
     this.url = freePort().then((port) => new Promise<string>((resolve, reject) => {
-      const proc = spawn(binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port), ...(setup.pure ? ["--pure"] : [])], {
-        cwd: EMPTY_CWD, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG },
-      });
-      this.proc = proc;
+      if (this.stopping) {
+        this.exited = true;
+        this.finishExit();
+        reject(new Error("OpenCode server was stopped before starting"));
+        return;
+      }
+      const native = this.native = new NativeHarnessProcess(
+        binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port), ...(setup.pure ? ["--pure"] : [])],
+        EMPTY_CWD, { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG,
+          OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: this.password },
+      );
+      const { proc } = native;
       const onOut = (d: Buffer) => {
         const m = /listening on (http:\/\/\S+)/.exec(d.toString());
         if (m) resolve(m[1]!.replace(/\/$/, ""));
       };
       proc.stdout.on("data", onOut);
       proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); onOut(d); });
-      proc.on("close", (code) => { this.exited = true; reject(new Error(`opencode serve exited (${code}): ${this.stderr.trim().slice(-300)}`)); });
+      void native.closed.then(async (code) => {
+        this.exited = true;
+        const message = `opencode serve exited (${code}): ${this.stderr.trim().slice(-300)}`;
+        reject(new Error(message));
+        // The process group is gone. Drain accepted SSE frames before interrupting the writers.
+        await Promise.all([...this.readers]);
+        for (const { receive } of this.sessions.values()) receive("server/exited", { message });
+        this.sessions.clear();
+        for (const controller of this.streams.values()) controller.abort();
+        this.finishExit();
+      });
       proc.on("error", (e) => { this.exited = true; reject(e); });
     }));
-    this.url.catch(() => {});
+    this.url.catch(() => {
+      if (!this.native) { this.exited = true; this.finishExit(); }
+    });
+  }
+
+  async prepare(turn: HarnessTurn, requiresNativeConfirmation: boolean): Promise<void> {
+    await this.url;
+    await turn.prepare(this.native!, requiresNativeConfirmation);
   }
 
   /** Subscribe to the event stream of `dir` (opencode scopes sessions and events by directory), once. */
@@ -1087,10 +1285,16 @@ class OpencodeServer {
     if (this.streams.has(dir)) return;
     const ctl = new AbortController();
     this.streams.set(dir, ctl);
-    const res = await fetch(`${await this.url}/event?directory=${encodeURIComponent(dir)}`, { signal: ctl.signal });
-    if (!res.ok || !res.body) { this.streams.delete(dir); throw new Error(`opencode /event ${res.status}`); }
-    const body = res.body as unknown as AsyncIterable<Uint8Array>;
-    void (async () => {
+    let body: AsyncIterable<Uint8Array>;
+    try {
+      const res = await fetch(`${await this.url}/event?directory=${encodeURIComponent(dir)}`, { signal: ctl.signal, headers: { authorization: this.authorization } });
+      if (!res.ok || !res.body) throw new Error(`opencode /event ${res.status}`);
+      body = res.body as unknown as AsyncIterable<Uint8Array>;
+    } catch (error) {
+      this.streams.delete(dir);
+      throw error;
+    }
+    const reader = (async () => {
       const decoder = new TextDecoder();
       let buf = "";
       try {
@@ -1106,21 +1310,38 @@ class OpencodeServer {
             try { ev = JSON.parse(data.slice(5)); } catch { continue; }
             const props = ev.properties ?? {};
             const sid = (props.sessionID ?? (props.part as { sessionID?: string } | undefined)?.sessionID) as string | undefined;
-            if (sid) this.sessions.get(sid)?.(ev.type ?? "", props);
+            if (sid) {
+              const listener = this.sessions.get(sid);
+              if (listener?.directory === dir) listener.receive(ev.type ?? "", props);
+            }
           }
         }
-      } catch { /* aborted */ }
+      } catch { /* reconnect below while this directory still has an active turn */ }
       this.streams.delete(dir);
+      this.reconnect(dir);
     })();
+    this.readers.add(reader);
+    void reader.then(() => this.readers.delete(reader));
   }
 
-  listen(sessionId: string, fn: SessionListener | null): void { if (fn) this.sessions.set(sessionId, fn); else this.sessions.delete(sessionId); }
+  private reconnect(directory: string): void {
+    if (this.exited || this.stopping || ![...this.sessions.values()].some((session) => session.directory === directory)) return;
+    setTimeout(() => {
+      if (this.exited || this.stopping) return;
+      void this.watch(directory).catch(() => this.reconnect(directory));
+    }, 250).unref();
+  }
+
+  listen(sessionId: string, fn: SessionListener | null, directory = "", beforeRestart = async () => {}): void {
+    if (fn) this.sessions.set(sessionId, { directory, receive: fn, beforeRestart });
+    else this.sessions.delete(sessionId);
+  }
 
   async api(path: string, dir: string, init: { method: string; body?: unknown }): Promise<unknown> {
     const res = await fetch(`${await this.url}${path}?directory=${encodeURIComponent(dir)}`, {
-      method: init.method, headers: { "content-type": "application/json" }, ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+      method: init.method, headers: { "content-type": "application/json", authorization: this.authorization }, ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });
-    if (!res.ok) throw new Error(`opencode ${init.method} ${path} ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+    if (!res.ok) throw new OpencodeResponseError(`opencode ${init.method} ${path} ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`, res.status);
     const text = await res.text();
     return text ? JSON.parse(text) : null;
   }
@@ -1132,6 +1353,18 @@ function freePort(): Promise<number> {
     s.once("error", reject);
     s.listen(0, "127.0.0.1", () => { const a = s.address(); s.close(() => resolve(typeof a === "object" && a ? a.port : 0)); });
   });
+}
+
+let lastOpencodeTime = 0;
+let opencodeSequence = 0;
+
+/** OpenCode sorts ascending message IDs by their timestamp and counter bytes. */
+function opencodeMessageId(): string {
+  const now = Date.now();
+  opencodeSequence = now === lastOpencodeTime ? (opencodeSequence + 1) % 4096 : 1;
+  lastOpencodeTime = now;
+  const prefix = ((BigInt(now) * 4096n + BigInt(opencodeSequence)) & 0xffffffffffffn).toString(16).padStart(12, "0");
+  return `msg_${prefix}${randomUUID().replaceAll("-", "").slice(0, 14)}`;
 }
 
 class OpencodeAgent implements WarmAgent {
@@ -1169,7 +1402,7 @@ class OpencodeAgent implements WarmAgent {
   keep(): boolean { if (this.used) return false; this.kept = true; return true; }
   abort(): void { if (this.sessionId) void this.server.api(`/session/${this.sessionId}/abort`, this.dir, { method: "POST" }).catch(() => {}); }
 
-  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[]): Promise<HarnessResult> {
+  async request(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], turn = new HarnessTurn()): Promise<HarnessResult> {
     this.used = true;
     const warm = this.sessionId !== null;
     const start = this.start;
@@ -1193,16 +1426,57 @@ class OpencodeAgent implements WarmAgent {
         throw err;
       }
     }
-    // Text parts stream as deltas keyed by part id; reasoning parts are skipped. A delta that comes before
-    // its part's type is known is held until then.
+    await this.server.watch(this.dir);
+    const needsNativeIdle = on(this.spec, "shell");
+    await this.server.prepare(turn, needsNativeIdle);
+    const messageId = opencodeMessageId();
+    const ownMessages = new Set<string>();
+    let sawRequest = false;
+    let sawIdle = false;
+    let responseFinished = false;
+    let settle!: () => void;
+    let rejectOnExit!: (error: Error) => void;
+    const terminal = new Promise<void>((resolve) => { settle = resolve; });
+    const exited = new Promise<never>((_, reject) => { rejectOnExit = reject; });
     const partType = new Map<string, string>();
     const held = new Map<string, string[]>();
+    const unverifiedParts = new Map<string, Exclude<ReturnType<typeof opencodeEditEvent>, undefined>[]>();
     let streamed = "";
-    const emit = (d: string): void => { streamed += d; onText?.(d); };
+    const emit = (d: string): void => { streamed += d; if (!turn.stopping) onText?.(d); };
+    const acceptMessage = (id: unknown, parentId: unknown) => {
+      if (id === messageId) sawRequest = true;
+      if (typeof id !== "string" || parentId !== messageId) return;
+      sawRequest = true;
+      ownMessages.add(id);
+      for (const batch of unverifiedParts.get(id) ?? []) turn.edits(batch);
+      unverifiedParts.delete(id);
+    };
     this.server.listen(sid, (type, props) => {
-      if (type === "message.part.updated") {
-        const part = props.part as { id?: string; type?: string } | undefined;
+      if (type === "server/exited") {
+        turn.stop("interrupted");
+        if (!needsNativeIdle || sawIdle) settle();
+        else turn.uncertain("OpenCode may have left a detached shell running without confirming it stopped");
+        rejectOnExit(new Error(String(props.message)));
+      } else if (type === "session.idle" && sawRequest) {
+        sawIdle = true;
+        if (turn.stopping || responseFinished) settle();
+      } else if (type === "message.updated") {
+        const info = props.info as { id?: unknown; parentID?: unknown } | undefined;
+        acceptMessage(info?.id, info?.parentID);
+      } else if (type === "message.part.updated") {
+        const part = props.part as { id?: string; type?: string; messageID?: string } | undefined;
         for (const f of opencodeEditedFiles(part)) files.add(f);
+        const batch = turn.reportsEdits && opencodeEditEvent({ type, properties: props });
+        if (batch && part?.messageID && batch.sessionId === sid) {
+          if (ownMessages.has(part.messageID)) turn.edits(batch);
+          else {
+            const buffered = unverifiedParts.get(part.messageID) ?? [];
+            if (unverifiedParts.size < 32 && buffered.length < 32) {
+              buffered.push(batch);
+              unverifiedParts.set(part.messageID, buffered);
+            }
+          }
+        }
         if (!part?.id || !part.type || partType.has(part.id)) return;
         partType.set(part.id, part.type);
         const h = held.get(part.id);
@@ -1214,40 +1488,71 @@ class OpencodeAgent implements WarmAgent {
         if (known === "text") emit(props.delta);
         else if (!known) held.set(id, [...(held.get(id) ?? []), props.delta]);
       }
+    }, this.dir, async () => {
+      turn.stop("interrupted");
+      if (sawIdle) settle();
+      else this.abort();
+      await terminal;
     });
-    try {
-      const res = await withTimeout(this.server.api(`/session/${sid}/message`, this.dir, {
-        method: "POST",
-        body: {
-          ...(slash > 0 ? { model: { providerID: this.spec.model.slice(0, slash), modelID: this.spec.model.slice(slash + 1) } } : {}),
-          ...(this.spec.level ? { variant: this.spec.level } : {}),
-          system: this.spec.system,
-          tools: Object.fromEntries(OPENCODE_TOOLS.map((t) => [t, allowed.includes(t)])),
-          parts: opencodeParts(user, annotations),
-        },
-      }), timeoutMs, `opencode (${this.spec.role})`, () => { void this.server.api(`/session/${sid}/abort`, this.dir, { method: "POST" }).catch(() => {}); });
-      const r = res as {
-        info?: { error?: { name?: string; data?: { message?: string } }; tokens?: Record<string, unknown>; cost?: number; modelID?: string; providerID?: string };
-        parts?: { type?: string; text?: string }[];
-      };
-      if (r.info?.error) throw new Error(`opencode (${this.spec.role}) failed: ${r.info.error.data?.message ?? r.info.error.name ?? "error"}`);
-      const text = (r.parts ?? []).filter((p) => p.type === "text").map((p) => p.text ?? "").join("\n\n");
-      // Nothing streamed (events missed): hand over the whole text now.
-      if (!streamed && text) onText?.(text);
-      const tk = r.info?.tokens ?? {};
-      const cache = (tk.cache ?? {}) as Record<string, unknown>;
-      const t = { input: num(tk.input), output: num(tk.output) + num(tk.reasoning), cacheRead: num(cache.read), cacheWrite: num(cache.write) };
-      return {
-        text, stopReason: "end_turn", warm, raw: r.info,
-        model: r.info?.providerID && r.info.modelID ? `${r.info.providerID}/${r.info.modelID}` : this.spec.model || "opencode default",
-        // opencode prices the call itself (its provider keys are billed; 0 for free or subscription models).
-        usage: llmUsage(t, { usd: num(r.info?.cost), billing: "api" }),
-        filesTouched: files.list,
-      };
-    } finally {
+    turn.holdUntil(terminal.then(() => {
       this.server.listen(sid, null);
       if (!this.kept) void this.server.api(`/session/${sid}`, this.dir, { method: "DELETE" }).catch(() => {});
+    }));
+    const response = this.server.api(`/session/${sid}/message`, this.dir, {
+      method: "POST",
+      body: {
+        messageID: messageId,
+        ...(slash > 0 ? { model: { providerID: this.spec.model.slice(0, slash), modelID: this.spec.model.slice(slash + 1) } } : {}),
+        ...(this.spec.level ? { variant: this.spec.level } : {}),
+        system: this.spec.system,
+        tools: Object.fromEntries(OPENCODE_TOOLS.map((t) => [t, allowed.includes(t)])),
+        parts: opencodeParts(user, annotations),
+      },
+    }).then((result) => {
+      const native = result as { info?: { id?: unknown; parentID?: unknown }; parts?: unknown[] };
+      acceptMessage(native.info?.id, native.info?.parentID);
+      if (turn.reportsEdits && typeof native.info?.id === "string" && ownMessages.has(native.info.id)) {
+        for (const part of native.parts ?? []) {
+          const batch = opencodeEditEvent(part);
+          if (batch?.sessionId === sid) turn.edits(batch);
+        }
+      }
+      responseFinished = true;
+      if (sawIdle || (!turn.stopping && !turn.reportsEdits)) settle();
+      return result;
+    }, (error) => {
+      if (error instanceof OpencodeResponseError && error.status >= 400 && error.status < 500 && !sawRequest) settle();
+      else if (!turn.stopping) { turn.stop("failed"); this.abort(); }
+      throw error;
+    });
+    const res = await withTimeout(Promise.race([response, exited]), timeoutMs, `opencode (${this.spec.role})`, () => {
+      turn.stop("timed-out");
+      if (sawIdle) settle();
+      else this.abort();
+    });
+    if (!turn.stopping && responseFinished && !sawIdle) {
+      // Successful HTTP completion proves the solver stopped. The idle event drains the SSE stream.
+      // If a disconnected stream never confirms it, keep the tracked writer blocked for restart.
+      if (turn.reportsEdits) turn.expectConfirmation();
     }
+    const r = res as {
+      info?: { error?: { name?: string; data?: { message?: string } }; tokens?: Record<string, unknown>; cost?: number; modelID?: string; providerID?: string };
+      parts?: { type?: string; text?: string }[];
+    };
+    if (r.info?.error) throw new Error(`opencode (${this.spec.role}) failed: ${r.info.error.data?.message ?? r.info.error.name ?? "error"}`);
+    const text = (r.parts ?? []).filter((p) => p.type === "text").map((p) => p.text ?? "").join("\n\n");
+    // Nothing streamed (events missed): hand over the whole text now.
+    if (!streamed && text) onText?.(text);
+    const tk = r.info?.tokens ?? {};
+    const cache = (tk.cache ?? {}) as Record<string, unknown>;
+    const t = { input: num(tk.input), output: num(tk.output) + num(tk.reasoning), cacheRead: num(cache.read), cacheWrite: num(cache.write) };
+    return {
+      text, stopReason: "end_turn", warm, raw: r.info,
+      model: r.info?.providerID && r.info.modelID ? `${r.info.providerID}/${r.info.modelID}` : this.spec.model || "opencode default",
+      // opencode prices the call itself (its provider keys are billed; 0 for free or subscription models).
+      usage: llmUsage(t, { usd: num(r.info?.cost), billing: "api" }),
+      filesTouched: files.list,
+    };
   }
 
   // A session's agent leaves its session saved (`opencode -s <id>`); a pooled one that was never used is removed.
@@ -1279,8 +1584,13 @@ export const KEEPS_POOLED: ReadonlySet<HarnessId> = new Set<HarnessId>(["claude-
 
 /** Stop the shared Codex / opencode servers when no pool or request uses them any more. */
 export function stopSharedServers(inUse: Set<HarnessId>): void {
-  if (!inUse.has("codex")) CodexServer.stop();
-  if (!inUse.has("opencode")) OpencodeServer.stop();
+  if (!inUse.has("codex")) void CodexServer.stop();
+  if (!inUse.has("opencode")) void OpencodeServer.stop();
+}
+
+/** Restart one shared harness and wait for its processes to stop writing. */
+export function restartSharedHarness(harness: "codex" | "opencode"): Promise<void> {
+  return harness === "codex" ? CodexServer.stop(true) : OpencodeServer.stop(true);
 }
 
 /** The variables `env` sets on top of the server's own (prompt inspector). */

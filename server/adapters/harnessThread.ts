@@ -13,7 +13,9 @@ import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // when it's needed again). `close()` stops a session for good; its saved session stays on disk for the user.
 import type { LlmChoice } from "../../shared/config.ts";
 import { MAX_LIVE_THREAD_SESSIONS } from "../../shared/threads.ts";
-import { SessionUnavailableError, type AgentSpec, type SessionRef, type SessionStart, type WarmAgent } from "./harnesses.ts";
+import { projectDir } from "../project.ts";
+import type { WriterExecution } from "../changes/writers.ts";
+import { HarnessTurn, SessionUnavailableError, type AgentSpec, type SessionRef, type SessionStart, type WarmAgent } from "./harnesses.ts";
 import type { HarnessThread, OpenHarnessThread, OpenHarnessThreadOpts, SessionDispatch, SessionMode } from "./types.ts";
 import { agentSpec, releaseSessionAgent, releaseSessionAgentForResume, takeSessionAgent } from "./warmPool.ts";
 
@@ -46,12 +48,16 @@ class Thread implements HarnessThread {
   /** Requests run one after another: each waits for this. */
   private tail: Promise<void> = Promise.resolve();
   private stop: (() => void) | null = null;
+  private activeSettled?: Promise<void>;
   private closed = false;
   private sessionKey = "";
+  readonly projectFolder: string | null;
   busy = false;
   lastUsed = 0;
 
   constructor(private opts: OpenHarnessThreadOpts) {
+    this.projectFolder = opts.restore ? opts.restore.spec.project ?? null
+      : opts.projectFolder !== undefined ? opts.projectFolder : projectDir();
     if (opts.restore) {
       this.pinned = opts.restore.spec;
       this.ref = opts.restore.ref;
@@ -62,6 +68,7 @@ class Thread implements HarnessThread {
   get spec(): AgentSpec | undefined { return this.pinned ?? undefined; }
 
   get live(): boolean { return !!this.agent?.alive(); }
+  get settled(): Promise<void> { return this.activeSettled ?? Promise.resolve(); }
 
   pid(): number | undefined { return this.live ? this.agent!.pid?.() : undefined; }
 
@@ -74,10 +81,10 @@ class Thread implements HarnessThread {
     this.opts.onSession?.();
   }
 
-  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void): Promise<ThreadResult> {
+  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void, execution?: WriterExecution): Promise<ThreadResult> {
     if (this.closed) return Promise.reject(closedError());
     return new Promise<ThreadResult>((resolve, reject) => {
-      this.tail = this.tail.then(() => this.run(user, onText, timeoutMs, resolve, reject, annotations, onDispatch));
+      this.tail = this.tail.then(() => this.run(user, onText, timeoutMs, resolve, reject, annotations, onDispatch, execution));
     });
   }
 
@@ -94,7 +101,8 @@ class Thread implements HarnessThread {
     if (this.closed) return;
     this.closed = true;
     this.abort();
-    this.drop();
+    if (this.activeSettled) void this.activeSettled.then(() => this.drop());
+    else this.drop();
   }
 
   release(): Promise<void> {
@@ -160,19 +168,26 @@ class Thread implements HarnessThread {
   private async run(
     user: string, onText: ((d: string) => void) | undefined, timeoutMs: number,
     resolve: (r: ThreadResult) => void, reject: (e: unknown) => void, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void,
+    execution?: WriterExecution,
   ): Promise<void> {
     if (this.closed) { reject(closedError()); return; }
+    if (execution?.stopRequested) { reject(abortError()); return; }
     this.busy = true;
+    let settled!: () => void;
+    this.activeSettled = new Promise<void>((resolve) => { settled = resolve; });
     this.lastUsed = ++useSeq;
     let aborted = false;
-    const stopped = new Promise<never>((_, rej) => { this.stop = () => { aborted = true; rej(abortError()); }; });
+    let turn: HarnessTurn | undefined;
+    const stopped = new Promise<never>((_, rej) => {
+      this.stop = () => { aborted = true; turn?.stop(); rej(abortError()); };
+    });
     stopped.catch(() => {});
     let agent: WarmAgent | null = null;
-    let settled: Promise<boolean> = Promise.resolve(true);
+    let legacySettled: Promise<boolean> = Promise.resolve(true);
     let fallback: string | undefined;
     try {
       // What the session runs with is read once: a later change in Settings is for sessions opened after it.
-      this.pinned ??= agentSpec(this.opts.role, this.opts.choice, true);
+      this.pinned ??= agentSpec(this.opts.role, this.opts.choice, true, this.projectFolder);
       for (let attempt = 0; ; attempt++) {
         let at: ReturnType<Thread["attach"]>;
         try {
@@ -189,15 +204,17 @@ class Thread implements HarnessThread {
         const known = agent.session?.() ?? (mode === "resumed" ? this.ref : undefined);
         onDispatch?.({ mode, message, ...(known ? { sessionId: known.id } : {}), ...(fallback ? { fallback } : {}) });
         const a = agent;
+        const nativeTurn = turn = new HarnessTurn(execution);
         const inner = Promise.resolve().then(() => {
+          if (aborted) throw abortError();
           const request = a.request(message, (d) => {
             this.notifySession();
             if (!aborted) onText?.(d);
-          }, timeoutMs, images);
+          }, timeoutMs, images, nativeTurn);
           this.notifySession(); // Some harnesses allocate their id synchronously when the request starts.
           return request;
         });
-        settled = inner.then(() => true, () => true);
+        legacySettled = inner.then(() => true, () => true);
         try {
           const r = await Promise.race([inner, stopped]);
           this.begun = true;
@@ -209,7 +226,11 @@ class Thread implements HarnessThread {
           break;
         } catch (e) {
           // The resume (or fork) didn't take and nothing reached a session: once more on a new one, told the history.
-          if (e instanceof SessionUnavailableError && !aborted && attempt === 0) { fallback = e.message; continue; }
+          if (e instanceof SessionUnavailableError && !aborted && attempt === 0) {
+            await nativeTurn.settled;
+            fallback = e.message;
+            continue;
+          }
           if (!(e instanceof SessionUnavailableError)) { this.begun = true; this.ref = a.session?.() ?? this.ref; }
           throw e;
         }
@@ -219,16 +240,23 @@ class Thread implements HarnessThread {
     } finally {
       this.stop = null;
     }
-    if (aborted && agent) {
-      const wound = await Promise.race([settled, new Promise<boolean>((r) => setTimeout(() => r(false), ABORT_SETTLE_MS).unref())]);
-      if (!wound && this.agent === agent) this.drop();
+    try {
+      if (turn?.settled) await turn.settled;
+      else if (aborted && agent) {
+        // Legacy test agents have no protocol barrier. Production adapters always register one once dispatched.
+        const wound = await Promise.race([legacySettled, new Promise<boolean>((r) => setTimeout(() => r(false), ABORT_SETTLE_MS).unref())]);
+        if (!wound && this.agent === agent) this.drop();
+      }
+      // Crashed, killed or timed out: the next request resumes the saved session in a new process.
+      if (agent && this.agent === agent && !agent.alive()) this.drop();
+    } finally {
+      this.busy = false;
+      this.lastUsed = ++useSeq;
+      this.activeSettled = undefined;
+      settled();
+      this.notifySession();
+      enforceCap(MAX_LIVE_THREAD_SESSIONS);
     }
-    this.busy = false;
-    this.lastUsed = ++useSeq;
-    // Crashed, killed or timed out: the next request resumes the saved session in a new process.
-    if (agent && this.agent === agent && !agent.alive()) this.drop();
-    this.notifySession();
-    enforceCap(MAX_LIVE_THREAD_SESSIONS);
   }
 }
 

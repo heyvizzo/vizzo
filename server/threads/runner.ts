@@ -1,3 +1,5 @@
+import { writerRegistry, type WriterExecution } from "../changes/writers.ts";
+import { projectDir } from "../project.ts";
 import { drawingContext } from "../adapters/drawing.ts";
 import type { DrawingAnnotation } from "../../shared/annotations.ts";
 // Element threads: one run queue per thread (docs/PLAN-threads.md, "Follow-up to a running thread", "Concurrent
@@ -105,7 +107,7 @@ export interface RunResult { text: string; spoken: string; usage: unknown; files
 /** One run's time window, for reconcile. */
 export interface RunWindow { threadId: string; start: number; end: number | null; files: string[]; kind: RunKind }
 
-interface Queued { spec: RunSpec; resolve: (r: RunResult | null) => void; reject: (e: unknown) => void }
+interface Queued { spec: RunSpec; execution: WriterExecution; resolve: (r: RunResult | null) => void; reject: (e: unknown) => void }
 
 class ThreadRunner implements ThreadRunState {
   private queue: Queued[] = [];
@@ -121,7 +123,16 @@ class ThreadRunner implements ThreadRunState {
 
   enqueue(spec: RunSpec, front = false): Promise<RunResult | null> {
     return new Promise((resolve, reject) => {
-      const q = { spec, resolve, reject };
+      const handle = this.rec.handle;
+      const folder = handle?.projectFolder !== undefined ? handle.projectFolder : handle?.spec ? handle.spec.project ?? null
+        : this.rec.resume ? this.rec.resume.spec.project ?? null
+        : this.rec.projectFolder !== undefined ? this.rec.projectFolder : projectDir();
+      this.rec.projectFolder = folder;
+      const execution = writerRegistry().queue({
+        writer: { kind: "thread", id: this.threadId }, title: this.rec.info.title, request: spec.original ?? spec.question,
+        folder, purpose: spec.kind, harness: (handle?.choice ?? this.rec.resume?.choice ?? spec.config.llm.smart).provider,
+      });
+      const q = { spec, execution, resolve, reject };
       if (front) this.queue.unshift(q); else this.queue.push(q);
       if (spec.kind !== "reconcile") this.store.update(this.threadId, (t) => { t.state = "running"; t.intent = spec.intent; delete t.interrupted; });
       this.next();
@@ -133,6 +144,7 @@ class ThreadRunner implements ThreadRunState {
     const cur = this.current;
     if (cur && cur.q.spec.kind !== "reconcile") {
       cur.abortedBy = "correction";
+      cur.q.execution.stopping();
       spec = { ...spec, question: `${spec.question}\n\n(This corrects the request you were working on, which was stopped: ${JSON.stringify(cur.q.spec.question)}. Do the corrected version.)` };
       this.rec.handle?.abort();
     }
@@ -148,9 +160,10 @@ class ThreadRunner implements ThreadRunState {
     const dropped = this.queue.filter((q) => q.spec.kind !== "reconcile");
     if (!dropped.length && (!cur || cur.abortedBy || cur.q.spec.kind === "reconcile")) return false;
     this.queue = this.queue.filter((q) => !dropped.includes(q));
-    for (const q of dropped) q.resolve(null);
+    for (const q of dropped) { q.execution.cancelQueued(); q.resolve(null); }
     if (cur && !cur.abortedBy) {
       cur.abortedBy = "user";
+      cur.q.execution.stopping();
       try { this.rec.handle?.abort(); } catch { /* ignore */ }
     }
     this.store.addMessage(this.threadId, { turnId: null, role: "system", kind: "stopped", text: "Stopped by you before it finished. What it already changed stays." }, (t) => {
@@ -162,8 +175,11 @@ class ThreadRunner implements ThreadRunState {
 
   stop(): void {
     this.stopped = true;
-    for (const q of this.queue.splice(0)) q.resolve(null);
-    if (this.current) this.current.abortedBy = "stop";
+    for (const q of this.queue.splice(0)) { q.execution.cancelQueued(); q.resolve(null); }
+    if (this.current) {
+      this.current.abortedBy = "stop";
+      this.current.q.execution.stopping();
+    }
     const h = this.rec.handle; // the record may already be gone from the store (delete)
     try { h?.abort(); } catch { /* ignore */ }
     try { h?.close(); } catch { /* ignore */ }
@@ -185,10 +201,10 @@ class ThreadRunner implements ThreadRunState {
   }
 
   private async exec(q: Queued): Promise<void> {
-    const { spec } = q;
+    const { spec, execution } = q;
     const store = this.store;
     const rec = store.get(this.threadId);
-    if (!rec) return q.resolve(null);
+    if (!rec) { execution.cancelQueued(); return q.resolve(null); }
     this.replayCut = spec.messageId ?? null;
     // The thread's session keeps the harness, model and prompt it was opened with: a change of the smart tier (or of
     // the saved instructions) in Settings applies to threads started after it.
@@ -198,7 +214,7 @@ class ThreadRunner implements ThreadRunState {
     };
     // Restored from disk (server/threads/persist.ts): the session it had, on the harness and model it was opened with.
     rec.handle ??= this.deps.openThread!({
-      role: "solver", choice: rec.resume?.choice ?? spec.config.llm.smart,
+      role: "solver", choice: rec.resume?.choice ?? spec.config.llm.smart, projectFolder: execution.folder,
       replay: () => replayText(store.info(this.threadId), this.replayCut),
       replayAnnotations: () => replayAnnotations(store.info(this.threadId), this.replayCut),
       onSession: publishSession,
@@ -216,14 +232,14 @@ class ThreadRunner implements ThreadRunState {
     // Costs are counted for the model the session runs on, which may no longer be the one Settings names.
     const config: RunConfig = rec.handle.choice ? { ...spec.config, llm: { ...spec.config.llm, smart: rec.handle.choice } } : spec.config;
     try {
-      const r = await this.deps.solveInThread!({
-        thread: rec.handle, kind, mark: spec.inline?.mark ?? noMark, question: spec.question, original: spec.original, pointing: spec.pointing ?? [],
+      const r = await execution.run(() => this.deps.solveInThread!({
+        thread: rec.handle!, execution, kind, mark: spec.inline?.mark ?? noMark, question: spec.question, original: spec.original, pointing: spec.pointing ?? [],
         annotation: spec.annotation, pageContext: spec.pageContext, language: spec.language, intent: spec.intent, timeoutMs: taskTimeoutMs(spec.config),
         voiceCues: useVoiceCues(spec.config.ttsModel, spec.language),
         ...trace(),
         onSpokenLine: (l) => { spoken = l.trim(); spec.inline?.onSpokenLine(l); },
         onDelta: (d) => { text += d; spec.inline?.onDelta(d); },
-      });
+      }));
       win.end = store.now();
       win.files = r.filesTouched ?? [];
       if (this.current?.abortedBy || this.stopped) return q.resolve(null);

@@ -2,12 +2,15 @@ import { Worker } from "node:worker_threads";
 import type { EditBatch } from "./evidence.ts";
 import type { BatchResult, LedgerStore, LedgerView } from "./ledger.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
+import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
 type Request =
   | { method: "discover"; directory: string }
   | { method: "ingest"; project: LedgerProject; batch: EditBatch }
   | { method: "observe" | "compact"; project: LedgerProject; paths: readonly string[] }
-  | { method: "pending" };
+  | { method: "pending" | "restoreWriters" }
+  | { method: "saveWriter"; project: LedgerProject; execution: WriterExecutionRecord }
+  | { method: "writerSnapshot"; projectId: string };
 
 export type LedgerRequest = Request & { id: number };
 export type LedgerResponse = { id: number; result: unknown } | { id: number; error: string };
@@ -69,6 +72,18 @@ export class LedgerWorkerClient {
 
   compact(project: LedgerProject, paths: readonly string[]): Promise<void> {
     return this.request({ method: "compact", project, paths });
+  }
+
+  saveWriter(project: LedgerProject, execution: WriterExecutionRecord): Promise<void> {
+    return this.request({ method: "saveWriter", project, execution });
+  }
+
+  restoreWriters(): Promise<void> {
+    return this.request({ method: "restoreWriters" });
+  }
+
+  writerSnapshot(projectId: string): Promise<ProjectWriterSnapshot> {
+    return this.request({ method: "writerSnapshot", projectId });
   }
 
   /** Also serves as a flush barrier for earlier requests, which are acknowledged after fsync. */

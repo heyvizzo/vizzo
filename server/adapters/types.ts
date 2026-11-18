@@ -6,6 +6,7 @@ import type { Intent, LlmPrompt, LlmResponse, PointingTarget, RouteIntent, Word 
 import type { LlmChoice, RouterMode, SttModel, TtsModel, TtsStyle } from "../../shared/config.ts";
 import type { ThreadState } from "../../shared/threads.ts";
 import type { AgentSpec, HarnessResult, SessionRef } from "./harnesses.ts";
+import type { WriterExecution } from "../changes/writers.ts";
 
 export type { Mark };
 
@@ -155,6 +156,8 @@ export type GenerateFillers = (opts: {
 }) => Promise<{ lines: string[]; cutIn?: string; usage: unknown }>;
 
 export interface SolveTaskOpts {
+  /** The immutable Vizzo execution, fixed before handing the request to its native harness. */
+  execution?: WriterExecution;
   annotation?: DrawingAnnotation;
   mark: Mark; question: string; pointing: PointingTarget[]; fast: boolean;
   /**
@@ -222,13 +225,14 @@ export interface HarnessThread {
   readonly choice?: LlmChoice;
   /** What its agents start with, fixed at its first request (absent before; test fakes leave it out). */
   readonly spec?: AgentSpec;
+  readonly projectFolder?: string | null;
   /**
    * Send the next user message and stream the reply. Requests on one session are serialized (a second send waits).
    * Without a live process (first use, evicted, crashed) one is started on the harness's saved session; only when
    * there is none to continue is `replay()` sent first in the same message. `onDispatch`: called with the message
    * as it goes out.
    */
-  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void): Promise<HarnessResult & {
+  send(user: string, onText: ((d: string) => void) | undefined, timeoutMs: number, annotations?: readonly DrawingAnnotation[], onDispatch?: (d: SessionDispatch) => void, execution?: WriterExecution): Promise<HarnessResult & {
     /** Project-relative paths of files the run edited (best effort from the harness's tool events). */
     filesTouched: string[];
     /** The history was replayed as text into a new session for this request (mode "replayed"). */
@@ -240,6 +244,8 @@ export interface HarnessThread {
   pid?(): number | undefined;
   /** Stop the in-flight request (its send() rejects with an AbortError-named error). The session stays, with its context. */
   abort(): void;
+  /** The active request's native terminal event or process exit, including in-flight edit notifications. */
+  readonly settled?: Promise<void>;
   /**
    * Stop the session's process for good (thread deleted, new conversation). The harness's saved session stays on
    * disk, so the user can still open it with the harness's own resume command.
@@ -254,6 +260,8 @@ export interface HarnessThread {
 }
 
 export interface OpenHarnessThreadOpts {
+  /** Explicit null keeps the session in its empty project. */
+  projectFolder?: string | null;
   role: "solver";
   choice: LlmChoice;
   /** Native session metadata may have changed (starting, first output, completion or fallback). */

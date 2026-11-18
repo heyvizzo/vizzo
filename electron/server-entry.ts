@@ -15,6 +15,7 @@ import "../server/adapters/claude.ts"; // registers the roles' prompts
 import { threadStore } from "../server/threads/store.ts";
 import { threadsFile } from "../server/threads/persist.ts";
 import { onActivity, runningTasks } from "../server/activity.ts";
+import { writerRegistry } from "../server/changes/writers.ts";
 
 function useProject(dir: string | null) {
   setProjectDir(dir);
@@ -25,6 +26,7 @@ function useProject(dir: string | null) {
 
 // The thread list comes back from the last run, and every change is saved (server/threads/persist.ts).
 threadStore().persistTo(threadsFile());
+await writerRegistry().restore().catch((error) => console.warn("[changes] could not restore writers", error));
 const running = await startServer(Number(process.env.PORT ?? 0), { host: "127.0.0.1" });
 process.parentPort.postMessage({ type: "ready", port: running.port });
 // What's working, for the quit prompt and finishing in the background (electron/main.ts, "quitting").
@@ -36,7 +38,8 @@ process.parentPort.on("message", (e: { data: { type: string; dir?: string | null
   // The app is about to stop this process: what changed in the last moments goes to disk first.
   if (e.data.type === "flush") {
     threadStore().flush();
-    process.parentPort.postMessage({ type: "flushed" });
+    void writerRegistry().flush().catch((error) => console.warn("[changes] could not flush writers", error))
+      .finally(() => process.parentPort.postMessage({ type: "flushed" }));
   }
   if (e.data.type === "instructions") {
     // Saving text is immediate; wait for a typing pause before replacing idle warm agents.
