@@ -487,3 +487,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   change would create a commit while dropping ownership of bytes that were still uncommitted.
 - `server/instructions.ts` also needs the solver's commit rule. Its built-in text previously treated a saved
   request as standing authorization to commit. Project-scoped instructions now use the execution's pinned folder.
+- The product owner approved stopping verified Vizzo-launched harnesses left running after a hard crash.
+  An isolated OpenCode run wrote again after the voice process was killed. Vizzo durably records the native
+  process identity before dispatch and keeps affected writers unavailable until the native work has settled.
+  An identity Vizzo cannot verify remains unconfirmed, with a reason shown to the user.
