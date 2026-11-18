@@ -67,6 +67,8 @@ export interface ChangesSelectionRequest {
 export interface ChangesCommitRequest extends ChangesSelectionRequest {
   readonly message: string;
   readonly separately: boolean;
+  /** The first displayed writer group, when the user opens the window from a thread. */
+  readonly scopeThreadId?: string;
 }
 
 export type ChangesMessageResult = { readonly message: string };

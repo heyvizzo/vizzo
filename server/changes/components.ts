@@ -5,6 +5,7 @@ import type {
 import type { CommitRequest, FrozenCommitSelection } from "./commitTransaction.ts";
 import type { GitScanEntry, GitScanHead, GitScanResult, GitScanScope } from "./gitScan.ts";
 import type { FrozenGitEntry } from "./gitTree.ts";
+import type { LlmProvider } from "../../shared/config.ts";
 
 type FileMode = "100644" | "100755";
 type Mode = FileMode | "120000";
@@ -37,6 +38,9 @@ interface WriterRecord {
   readonly executionId: string;
   readonly writer: ChangeWriter;
   readonly title: string;
+  readonly request?: string;
+  readonly folder?: string | null;
+  readonly harness?: LlmProvider;
   readonly phase: "queued" | "running" | "settling" | "unconfirmed" | "settled";
   readonly pending: boolean;
   readonly outcome?: "completed" | "stopped" | "failed" | "timed-out" | "interrupted";
@@ -60,6 +64,7 @@ export interface ChangeComponentInput {
   readonly continuedExecutionIds?: readonly string[];
   readonly closedWriters?: readonly ChangeWriter[];
   readonly notices?: readonly string[];
+  readonly grokInScope?: boolean;
 }
 
 export interface ReviewedChanges {
@@ -647,6 +652,9 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
 
   const notices = [...input.notices ?? []];
   if (!sameHead || input.ledger.headMoved) notices.push("HEAD moved: some changes are now marked Other");
+  if (input.grokInScope && [...components.values()].some(({ presentation }) => presentation.other)) {
+    notices.push("Grok doesn't report file edits. Grok changes appear under Other.");
+  }
   const view = deepFreeze<ChangesView>({
     generation, branch: head.branch, base: head.oid, groups: [...groups.values()],
     components: [...components.values()].map(({ presentation }) => presentation), notices: [...new Set(notices)], changedFiles: entries.length,
@@ -659,14 +667,15 @@ export function buildChangeComponents(input: ChangeComponentInput): ChangeCompon
   } });
 }
 
-export function getComponentDiff(graph: ChangeComponentGraph, componentId: string, path: string): ChangeDiff | null {
+export function getComponentDiff(graph: ChangeComponentGraph, componentId: string, path: string,
+  limit?: { hunks: number; bytes: number }): ChangeDiff | null {
   const component = graph[details].components.get(componentId);
   const members = component?.members.filter(({ entry }) => entry.display === path);
   if (!component || !members?.length) return null;
   const writerById = new Map(component.presentation.writers.map((writer) => [changeWriterId(writer), writer]));
   return deepFreeze<ChangeDiff>({
     generation: graph.view.generation, component: componentId, path,
-    hunks: members.map(({ entry, hunk }) => {
+    hunks: (limit ? members.slice(0, limit.hunks) : members).map(({ entry, hunk }) => {
       const writers = unique(hunk.executionIds.flatMap((id) => {
         const writer = id === null ? undefined : graph[details].executionWriters.get(id);
         return writer ? [writer] : [];
@@ -677,8 +686,10 @@ export function getComponentDiff(graph: ChangeComponentGraph, componentId: strin
         const beforeBytes = slice(entry.base?.working ?? NO_BYTES, hunk.oldBytes);
         const afterBytes = slice(entry.current?.bytes ?? NO_BYTES, hunk.newBytes);
         if (!beforeBytes.includes(0) && !afterBytes.includes(0)) {
-          before = beforeBytes.toString("utf8");
-          after = afterBytes.toString("utf8");
+          const text = (bytes: Buffer) => limit && bytes.length > limit.bytes
+            ? `${bytes.subarray(0, limit.bytes).toString("utf8")}…` : bytes.toString("utf8");
+          before = text(beforeBytes);
+          after = text(afterBytes);
         }
       } else if (hunk.kind === "mode" || hunk.kind === "type" || hunk.kind === "presence") {
         before = entry.base?.mode;
@@ -785,9 +796,10 @@ export function freezeChangeSelection(
       hunks: hunks.map((hunk) => {
         const { kind, range, executionIds, ties, oldBytes, newBytes } = hunk;
         return {
-          componentId: selectedHunks.get(hunk)!, kind, range, executionIds: [...executionIds], ties: [...ties],
-          beforeSha256: oldBytes && hash(slice(base?.working ?? NO_BYTES, oldBytes)),
-          afterSha256: newBytes && hash(slice(current?.bytes ?? NO_BYTES, newBytes)),
+          componentId: selectedHunks.get(hunk)!, kind, executionIds: [...executionIds], ties: [...ties],
+          ...(range && { range }),
+          ...(oldBytes && { beforeSha256: hash(slice(base?.working ?? NO_BYTES, oldBytes)) }),
+          ...(newBytes && { afterSha256: hash(slice(current?.bytes ?? NO_BYTES, newBytes)) }),
         };
       }),
     });
@@ -806,4 +818,73 @@ export function freezeChangeSelection(
       scope: { ...graph.scope }, head: { ...graph.head }, componentIds: [...wanted].sort(), paths,
     }),
   };
+}
+
+type CommittedPath = ChangeOwnershipReceipt["paths"][number];
+
+/** A Vizzo commit leaves the working coordinates alone and shifts the base by its selected hunks. */
+function afterPublishedHunks(range: ChangeRange, committed: CommittedPath): ChangeRange | null {
+  let delta = 0;
+  for (const { range: earlier } of committed.hunks) {
+    if (!earlier) continue;
+    if (earlier.oldStart + earlier.oldCount <= range.oldStart && earlier.oldStart < range.oldStart) {
+      delta += earlier.newCount - earlier.oldCount;
+    } else if (range.oldStart + range.oldCount > earlier.oldStart || range.oldStart === earlier.oldStart) {
+      return null;
+    }
+  }
+  return { ...range, oldStart: range.oldStart + delta };
+}
+
+function sameAnchor(left: EntryAnchor | null, right: EntryAnchor | null): boolean {
+  return left?.mode === right?.mode && left?.sha256 === right?.sha256;
+}
+
+function afterPublicationKey(component: ComponentDetails, graph: ChangeComponentGraph,
+  written: ReadonlyMap<string, CommittedPath>, before: boolean): string | undefined {
+  const { other, selectable, reason, incomplete } = component.presentation;
+  const members = [];
+  for (const member of component.members) {
+    const { entry, hunk } = member;
+    const moved = graph[details].movedPaths.has(entry.key);
+    const committed = entry.path && written.get(entry.path);
+    if (!committed) {
+      members.push(memberFingerprint(member, moved));
+      continue;
+    }
+    if (entry.whole || moved || !committed.frozen ||
+        (hunk.kind !== "content" && hunk.kind !== "mode")) return undefined;
+    if (!before && (!sameAnchor(entry.base, committed.frozen) || entry.base?.rawSha256 !== committed.frozen.sha256)) return undefined;
+    const range = hunk.range && (before ? afterPublishedHunks(hunk.range, committed) : hunk.range);
+    if (range === null) return undefined;
+    members.push([
+      entry.key, hunk.kind, range && [range.oldStart, range.oldCount, range.newCount], hunk.executionIds, hunk.ties, hunk.reason,
+      hunk.oldBytes && hash(slice(entry.base?.working ?? NO_BYTES, hunk.oldBytes)),
+      hunk.newBytes && hash(slice(entry.current?.bytes ?? NO_BYTES, hunk.newBytes)),
+      hunk.kind === "mode" ? entry.current?.mode : undefined,
+    ]);
+  }
+  return fingerprint([other, selectable, reason, incomplete, component.writerIds, members]);
+}
+
+/** Match the same reviewed components after a prior job, without selecting new or enlarged components. */
+export function carryChangesAfterPublication(previous: ChangeComponentGraph, next: ChangeComponentGraph,
+  selection: ChangeOwnershipReceipt, ids: readonly string[]): Map<string, string> {
+  if (previous.review.projectId !== selection.projectId || selection.projectId !== next.review.projectId ||
+      previous.review.generation !== selection.generation || previous.review.scope !== next.review.scope ||
+      previous[details].head.branch !== next[details].head.branch) return new Map();
+  const written = new Map(selection.paths.map((path) => [path.path, path]));
+  const byKey = new Map<string, string | null>();
+  for (const [id, component] of next[details].components) {
+    const key = afterPublicationKey(component, next, written, false);
+    if (key !== undefined) byKey.set(key, byKey.has(key) ? null : id);
+  }
+  const result = new Map<string, string>();
+  for (const id of ids) {
+    const component = previous[details].components.get(id);
+    const key = component && afterPublicationKey(component, previous, written, true);
+    const mapped = key && byKey.get(key);
+    if (mapped) result.set(id, mapped);
+  }
+  return result;
 }

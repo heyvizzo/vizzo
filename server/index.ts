@@ -1,10 +1,13 @@
 import { createServer } from "node:http";
 import type { ServerResponse } from "node:http";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import { Session } from "./session.ts";
 import { warmStatus } from "./adapters/warmPool.ts";
 import type { Orchestrator } from "./orchestrators/types.ts";
 import type { RunConfig } from "../shared/config.ts";
+import type { ServerMsg } from "../shared/protocol.ts";
+import { changesService } from "./changes/changesService.ts";
+import { changeRoutes, isLocalChangesRequest, subscribeChangesStatus, type ChangesHttpOptions } from "./changes/http.ts";
 import { projectFile, watchProject } from "./project.ts";
 import { watchMemory } from "./memory.ts";
 
@@ -16,6 +19,8 @@ export interface StartServerOpts {
   quiet?: boolean;
   /** Interface to listen on (default: all). The Electron shell uses 127.0.0.1. */
   host?: string;
+  /** Source-control service and native provider overrides used by the HTTP integration tests. */
+  changes?: ChangesHttpOptions;
 }
 
 export interface RunningServer { port: number; close(): Promise<void> }
@@ -23,6 +28,8 @@ export interface RunningServer { port: number; close(): Promise<void> }
 /** Start the HTTP + /ws server. Port 0 picks a free port. */
 export function startServer(port: number, opts: StartServerOpts = {}): Promise<RunningServer> {
   const log = opts.quiet ? () => {} : (...a: unknown[]) => console.log(...a);
+  const changes = opts.changes?.service ?? changesService();
+  const handleChanges = changeRoutes(changes, opts.changes);
   // Open event streams (one per browser tab) that get a line whenever a demo file is saved.
   const streams = new Set<ServerResponse>();
   const stopWatch = watchProject((file) => {
@@ -30,6 +37,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
   });
   const http = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/api/changes" || url.pathname.startsWith("/api/changes/")) return handleChanges(req, res, url);
     if (req.method === "POST" && (url.pathname === "/api/sessions/release" || url.pathname === "/api/sessions/continue")) {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -210,17 +218,35 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
   });
 
   const wss = new WebSocketServer({ server: http, path: "/ws" });
+  const changesClients = new Set<WebSocket>();
+  const unsubscribeChanges = subscribeChangesStatus(changes, (status) => {
+    const event: ServerMsg = status.kind === "ready"
+      ? { type: "changes.updated", project: status.project, generation: status.generation }
+      : { type: "changes.status", status };
+    const message = JSON.stringify(event);
+    for (const client of changesClients) if (client.readyState === client.OPEN) client.send(message);
+  });
   // ws re-emits the HTTP server's errors (e.g. EADDRINUSE); startServer's promise reports them instead.
   wss.on("error", () => {});
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
     log("[ws] connected");
-    new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist });
-    ws.on("close", () => log("[ws] closed"));
+    const watcher = new URL(req.url ?? "/", "http://localhost").searchParams.get("view") === "changes";
+    const local = isLocalChangesRequest(req);
+    if (watcher && !local) { ws.close(1008, "Source control requires the local Vizzo window"); return; }
+    if (!watcher) new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist });
+    if (local) changesClients.add(ws);
+    ws.on("close", () => { changesClients.delete(ws); log("[ws] closed"); });
   });
 
   return new Promise((resolve, reject) => {
-    http.once("error", reject);
+    const onError = (error: Error) => {
+      unsubscribeChanges();
+      stopWatch();
+      reject(error);
+    };
+    http.once("error", onError);
     http.listen(port, opts.host, () => {
+      http.off("error", onError);
       const addr = http.address();
       const actual = typeof addr === "object" && addr ? addr.port : port;
       log(`[server] http://localhost:${actual}  ws://localhost:${actual}/ws`);
@@ -231,6 +257,7 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
           for (const c of wss.clients) c.terminate();
           for (const r of streams) r.end();
           stopWatch();
+          unsubscribeChanges();
           wss.close();
           http.close(() => res());
         }),
