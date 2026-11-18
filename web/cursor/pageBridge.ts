@@ -4,7 +4,7 @@
 // and each side converts to and from its own clock.
 import { isDrawingAnnotation, type DrawingAnnotation } from "../../shared/annotations.ts";
 import type { CursorRest, CursorSample, ElementDetails, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
-import type { ThreadAnchor, ThreadInfo, ThreadSay } from "../../shared/threads.ts";
+import type { ThreadAnchor, ThreadDeleteMode, ThreadDeletePreview, ThreadInfo, ThreadSay } from "../../shared/threads.ts";
 import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
 
 /** Chat → page. `start.t` is epoch ms. */
@@ -14,7 +14,8 @@ export type PageCmd =
   | { type: "clear" }
   | { type: "overlay"; targets: PointingTarget[]; rests: CursorRest[]; visible: string[] }
   /** Element threads on this page (already filtered by normalizePageUrl): draw/update their markers. */
-  | { type: "threads"; threads: ThreadInfo[] }
+  | { type: "threads"; threads: ThreadInfo[]; deleting?: string[]; continuing?: string[]; connected?: boolean }
+  | PageThreadDeletePreview
   /**
    * A thread's spoken line: show a bubble from its marker. `ended`: its audio finished (the fade may start).
    * `confirm`: a question with Yes / No instead (stop the task?); unanswered after `ms`, it's a No and goes.
@@ -42,6 +43,9 @@ export type PageCmd =
   | { type: "comment.insert"; text: string; dictation?: DictationTranscript };
 
 export interface BubbleConfirm { confirmId: string; ms: number }
+
+export type PageThreadDeletePreview = { type: "thread.delete.preview"; requestId: string; threadId: string }
+  & ({ preview: ThreadDeletePreview } | { error: string });
 
 /** The orb's look: running while a turn or task that isn't an element thread's is being worked on. */
 export type OrbState = "idle" | "listening" | "speaking" | "running" | "asking" | "failed";
@@ -138,7 +142,9 @@ export type PageChangesStatus =
 /** The user acted on a thread in the page overlay. */
 export type PageThreadAction =
   | { type: "thread.focus"; threadId: string }
-  | { type: "thread.delete"; threadId: string }
+  | { type: "thread.delete.preview"; threadId: string; requestId: string }
+  | { type: "thread.delete"; threadId: string; mode: ThreadDeleteMode }
+  | { type: "thread.continue"; threadId: string }
   /** Open the Changes window scoped to this thread. Handled by Electron main. */
   | { type: "thread.commit"; threadId: string }
   /** Stop its active turn and solver, keeping the thread and its draft. Handled by the chat. */
@@ -147,9 +153,11 @@ export type PageThreadAction =
   | { type: "thread.smart"; threadId: string; on: boolean };
 
 export function isPageThreadAction(m: unknown): m is PageThreadAction {
-  const a = m as { type?: unknown; threadId?: unknown; on?: unknown } | null;
+  const a = m as { type?: unknown; threadId?: unknown; on?: unknown; mode?: unknown; requestId?: unknown } | null;
   if (!a || typeof a.threadId !== "string" || !a.threadId) return false;
-  return a.type === "thread.focus" || a.type === "thread.delete" || a.type === "thread.stop" || a.type === "thread.commit"
+  return a.type === "thread.focus" || a.type === "thread.stop" || a.type === "thread.commit" || a.type === "thread.continue"
+    || (a.type === "thread.delete" && (a.mode === "commit" || a.mode === "keep"))
+    || (a.type === "thread.delete.preview" && typeof a.requestId === "string" && !!a.requestId)
     || (a.type === "thread.smart" && typeof a.on === "boolean");
 }
 

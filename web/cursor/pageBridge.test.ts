@@ -27,6 +27,16 @@ describe("thread stop action", () => {
   });
 });
 
+describe("thread deletion actions", () => {
+  it("accepts only a scoped preview request and explicit delete modes", () => {
+    expect(isPageThreadAction({ type: "thread.delete.preview", threadId: "red", requestId: "req" })).toBe(true);
+    expect(isPageThreadAction({ type: "thread.delete.preview", threadId: "red" })).toBe(false);
+    for (const mode of ["keep", "commit"]) expect(isPageThreadAction({ type: "thread.delete", threadId: "red", mode })).toBe(true);
+    for (const mode of [undefined, "auto", true]) expect(isPageThreadAction({ type: "thread.delete", threadId: "red", mode })).toBe(false);
+    expect(isPageThreadAction({ type: "thread.continue", threadId: "red" })).toBe(true);
+  });
+});
+
 describe("shiftPageEvents", () => {
   it("shifts every timestamp", () => {
     expect(shiftPageEvents(events(10), 1000)).toEqual(events(1010));

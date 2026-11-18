@@ -15,7 +15,7 @@ import { pointingMatcher, type PointingMatcher } from "../../shared/pointing.ts"
 import { DEFAULT_CONFIG, isLocalStt, llmOf, type RunConfig } from "../../shared/config.ts";
 import type { ClientMsg, CostItem, CursorRest, CursorSample, LlmPrompt, LlmResponse, PageEvents, JobInfo, MemorySnapshot, PointingTarget, RouteIntent, RunRecord, Segment, ServerMsg, TaskRef, Word } from "../../shared/protocol.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
-import { displayTitle, normalizePageUrl, type ThreadAnchor, type ThreadInfo, type ThreadSay } from "../../shared/threads.ts";
+import { displayTitle, normalizePageUrl, type ThreadAnchor, type ThreadDeleteChoice, type ThreadDeletePreview, type ThreadInfo, type ThreadSay } from "../../shared/threads.ts";
 import { startCapture, warmCapture, type CaptureHandle } from "../audio/capture.ts";
 import { warmUpAudio } from "../audio/context.ts";
 import { createPlayer, type Player } from "../audio/player.ts";
@@ -48,6 +48,7 @@ const TALK_PRE_ROLL_MS = 300;
 const BATCH_MS = 100;
 /** Give up on a turn that never gets turn.done (server hiccup). */
 const TURN_TIMEOUT_MS = 90_000;
+const DELETE_PREVIEW_TIMEOUT_MS = 15_000;
 const TICK_MS = 250;
 const SHOWN_ALGORITHM = "dwellMode";
 /** The Electron app's preload (electron/preload.ts): push-to-talk and the browser pane, relayed from its process. */
@@ -755,7 +756,7 @@ function showJob(c: JobCard): void {
 
 /** A Stop (×) button: the task's solver is killed; what it already changed stays. The card / thread shows "stopped". */
 function stopTask(ref: TaskRef): void {
-  if (!taskRunning(ref)) return;
+  if (pendingDelete?.reset || (ref.kind === "thread" && pendingDelete?.waiting.has(ref.threadId)) || !taskRunning(ref)) return;
   sock.send({ type: "task.stop", task: ref });
   setStatus("Stopping the task…");
 }
@@ -865,6 +866,7 @@ async function enableAudio(): Promise<void> {
 $("enable").onclick = () => void enableAudio();
 
 sock.onAudio((pcm) => {
+  if (pendingDelete?.reset) return;
   // Frames aren't tagged: they belong to the active turn once it has opened a segment (so stray frames from a
   // cancelled turn don't play over the new recording), or to the notice being read out.
   const forTurn = !!turn && !turn.finished && turn.segmentOpen;
@@ -880,7 +882,7 @@ function onNotice(msg: Extract<ServerMsg, { type: "notice" }>): void {
 
 /** Audio spoken outside a turn (a job's result, a thread's line): its frames play between start and end. */
 function noticeAudio(key: string, state: "start" | "end", what: string): void {
-  if (stoppedNotices.has(key)) return;
+  if (pendingDelete?.reset || stoppedNotices.has(key)) return;
   if (state === "start") {
     noticeJobId = key;
     player?.startSegment("notice");
@@ -894,17 +896,21 @@ function noticeAudio(key: string, state: "start" | "end", what: string): void {
 }
 
 /** Stop the notice being read out (if any) and tell the server. */
-function stopNotice(): void {
+function stopNotice(tellServer = true): void {
   if (!noticeJobId) return;
   stoppedNotices.add(noticeJobId);
   const say = pageSays.get(noticeJobId);
   if (say) { pageBubble(say, true); pageSays.delete(noticeJobId); }
   noticeJobId = null;
-  sock.send({ type: "speech.stop" });
+  if (tellServer) sock.send({ type: "speech.stop" });
 }
 
 // ── element threads ────────────────────────────────
 const threads = new Map<string, ThreadInfo>();
+const deletePreviews = new Map<string, (result: ThreadDeletePreview[] | Error) => void>();
+const previewingDeletes = new Set<string>();
+const continuingThreads = new Map<string, string>();
+let pendingDelete: { requestId: string; waiting: Set<string>; reset: boolean } | null = null;
 let conversationSession: HarnessSessionInfo | null = null;
 async function copyNativeSession(info: HarnessSessionInfo): Promise<void> {
   if (!info.resumeCommand || !info.id) throw new Error("Session unavailable");
@@ -942,7 +948,9 @@ let pageWorkingThread: string | null = null;
 function sendPageThreads(): void {
   pageWorkingThread = workingTurn()?.threadId ?? null;
   const list = threadsOnPage([...threads.values(), ...queuedThreads()], pageUrl);
-  bridge.send({ type: "threads", threads: list.map((t) => t.threadId === pageWorkingThread ? { ...t, state: "running" } : t) });
+  bridge.send({ type: "threads", threads: list.map((t) => t.threadId === pageWorkingThread ? { ...t, state: "running" } : t),
+    deleting: list.filter((t) => pendingDelete?.waiting.has(t.threadId)).map((t) => t.threadId),
+    continuing: list.filter((t) => continuingThreads.has(t.threadId)).map((t) => t.threadId), connected: sock.isOpen });
 }
 
 function threadsChanged(): void {
@@ -1010,37 +1018,83 @@ function openThread(t: ThreadInfo): void {
   bridge.navigate(t.pageUrl);
 }
 
-/** From the list's ×: no confirmation. Dropped here right away; the server's thread.removed follows. */
-function deleteThread(threadId: string): void {
-  if (pendingOpen?.threadId === threadId) pendingOpen = null;
-  sock.send({ type: "thread.delete", threadId });
-  threads.delete(threadId);
+function localThreadWorking(threadId: string): boolean {
+  return (!!turn && !turn.finished && !turn.rec && turn.threadId === threadId)
+    || held.some((q) => q.threadId === threadId) || continuingThreads.has(threadId);
+}
+
+function previewDelete(threadIds: string[]): Promise<ThreadDeletePreview[]> {
+  if (!threadIds.length) return Promise.resolve([]);
+  if (!sock.isOpen) return Promise.reject(new Error("Server not connected."));
+  const requestId = crypto.randomUUID();
+  const working = new Set(threadIds.filter(localThreadWorking));
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error("Checking thread changes timed out.")), DELETE_PREVIEW_TIMEOUT_MS);
+    function finish(result: ThreadDeletePreview[] | Error): void {
+      clearTimeout(timeout);
+      deletePreviews.delete(requestId);
+      if (result instanceof Error) { reject(result); return; }
+      const previews = new Map(result.map((item) => [item.threadId, item]));
+      if (previews.size !== threadIds.length || threadIds.some((id) => !previews.has(id))) {
+        reject(new Error("The thread list changed. Check the changes again."));
+        return;
+      }
+      resolve(threadIds.map((id) => {
+        const item = previews.get(id)!;
+        return item.state !== "working" && (working.has(id) || localThreadWorking(id))
+          ? { ...item, state: "working", defaultMode: "keep", reason: undefined } : item;
+      }));
+    }
+    deletePreviews.set(requestId, finish);
+    sock.send({ type: "thread.delete.preview", requestId, threadIds });
+  });
+}
+
+function submitDelete(type: "thread.delete" | "threads.delete" | "conversation.reset", choices: ThreadDeleteChoice[]): void {
+  if (pendingDelete) return setStatus("A deletion is already in progress.", true);
+  if (!sock.isOpen) return setStatus("Server not connected.", true);
+  const requestId = crypto.randomUUID();
+  const modes = choices.map((choice): ThreadDeleteChoice => localThreadWorking(choice.threadId) ? { ...choice, mode: "keep" } : choice);
+  pendingDelete = { requestId, waiting: new Set(choices.map((c) => c.threadId)), reset: type === "conversation.reset" };
+  if (type === "thread.delete") sock.send({ type, requestId, ...modes[0]! });
+  else sock.send({ type, requestId, threads: modes });
+  if (pendingDelete.reset) silenceForReset();
   threadsChanged();
 }
 
-/**
- * A bulk-delete button: the first click arms it ("Click again to delete N"), a second click within 3 s deletes.
- * `ids` is read at click time, so threads that arrive meanwhile are included.
- */
-function bulkDelete(b: HTMLButtonElement, ids: () => string[]): void {
-  const label = b.textContent ?? "";
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  b.onclick = () => {
-    if (!b.classList.contains("armed")) {
-      b.classList.add("armed");
-      const n = ids().length;
-      b.textContent = `Click again to delete ${n} thread${n === 1 ? "" : "s"}`;
-      timer = setTimeout(() => { b.classList.remove("armed"); b.textContent = label; }, 3000);
-      return;
-    }
-    clearTimeout(timer);
-    b.classList.remove("armed");
-    b.textContent = label;
-    for (const id of ids()) deleteThread(id);
-  };
+function threadRemovalConfirmed(threadId: string): void {
+  if (pendingOpen?.threadId === threadId) pendingOpen = null;
+  for (const q of held.filter((q) => q.threadId === threadId)) removeHeld(q);
+  continuingThreads.delete(threadId);
+  if (turn && !turn.finished && !turn.rec && turn.threadId === threadId) {
+    cancelled.add(turn.turnId);
+    endTurn(turn);
+  }
+  if (noticeJobId && sayThreads.get(noticeJobId) === threadId) {
+    stopNotice(false);
+    player?.reset();
+    playback.reset();
+  }
+  if (!pendingDelete?.waiting.delete(threadId) || pendingDelete.waiting.size || pendingDelete.reset) return;
+  pendingDelete = null;
+  void sendHeld();
 }
 
-bulkDelete($("threads-clear") as HTMLButtonElement, () => [...threads.keys()]);
+/** The sidebar's × follows the server preview's automatic mode. */
+async function deleteThread(threadId: string): Promise<void> {
+  if (pendingDelete || previewingDeletes.has(threadId)) return;
+  previewingDeletes.add(threadId);
+  renderThreadList();
+  try {
+    const [preview] = await previewDelete([threadId]);
+    if (preview && threads.has(threadId)) submitDelete("thread.delete", [{ threadId, mode: preview.state === "complete" ? preview.defaultMode : "keep" }]);
+  } catch (error) {
+    setStatus((error as Error).message, true);
+  } finally {
+    previewingDeletes.delete(threadId);
+    renderThreadList();
+  }
+}
 
 function renderThreadList(): void {
   const groups = groupThreads(threads.values(), pageUrl);
@@ -1059,7 +1113,9 @@ function renderThreadList(): void {
     const del = el("button", "thread-bulk", "Delete all");
     del.type = "button";
     del.title = `Delete every thread on ${g.pageUrl}`;
-    bulkDelete(del, () => [...threads.values()].filter((t) => t.pageUrl === g.pageUrl).map((t) => t.threadId));
+    del.dataset.page = g.pageUrl;
+    del.disabled = !!pendingDelete || !sock.isOpen;
+    del.onclick = () => openDeleteConfirm(del, g.pageUrl);
     const headRow = el("div", "thread-page-row");
     const pageCost = threadsCost(g.threads);
     const pageMem = el("span", "thread-mem");
@@ -1084,15 +1140,18 @@ function renderThreadList(): void {
       b.onclick = () => openThread(t);
       const x = el("button", "thread-del", "×");
       x.type = "button";
-      x.title = "Delete this thread";
+      x.disabled = !!pendingDelete || previewingDeletes.has(t.threadId) || !sock.isOpen;
+      x.title = pendingDelete?.waiting.has(t.threadId) ? "Deleting this thread…" : previewingDeletes.has(t.threadId)
+        ? "Checking thread changes…" : !sock.isOpen ? "Server not connected" : "Delete this thread";
       x.setAttribute("aria-label", `Delete thread: ${t.title}`);
-      x.onclick = () => deleteThread(t.threadId);
+      x.onclick = () => void deleteThread(t.threadId);
       const row = el("div", "thread-row");
       row.append(b, x);
       box.append(row);
     }
     return box;
   }));
+  $<HTMLButtonElement>("threads-clear").disabled = $<HTMLButtonElement>("reset").disabled = !!pendingDelete || !sock.isOpen;
   renderOpenThread();
   renderMemory();
   renderJobsPill();
@@ -1245,7 +1304,6 @@ bridge.onThreadAction?.((a) => {
   if (!isPageThreadAction(a)) return;
   if (a.type === "thread.commit") return; // Electron handles opening the Changes window.
   if (a.type === "thread.stop") return stopThread(a.threadId);
-  if (pendingOpen?.threadId === a.threadId) pendingOpen = null;
   // Queued feedback isn't on the server: its panel's Delete drops it, and the rest queued on that element, from the queue.
   if (isQueuedId(a.threadId)) {
     const anchor = queue.find((x) => queuedThreadId(x) === a.threadId)?.anchor;
@@ -1254,6 +1312,27 @@ bridge.onThreadAction?.((a) => {
     }
     return;
   }
+  if (a.type === "thread.delete.preview" || a.type === "thread.delete" || a.type === "thread.continue") {
+    const t = threads.get(a.threadId);
+    if (!t || !onCurrentPage(t) || panelThreadId !== a.threadId) return;
+    if (a.type === "thread.delete.preview") {
+      const scope = { type: a.type, threadId: a.threadId, requestId: a.requestId } as const;
+      void previewDelete([a.threadId]).then(([preview]) => {
+        if (preview) bridge.send({ ...scope, preview });
+      }, (error: Error) => bridge.send({ ...scope, error: error.message }));
+      return;
+    }
+    if (a.type === "thread.delete") return submitDelete(a.type, [{ threadId: a.threadId, mode: a.mode }]);
+    if (pendingDelete?.reset || pendingDelete?.waiting.has(a.threadId) || localThreadWorking(a.threadId) || t.state === "running"
+        || !(t.canContinue || (t.interrupted && t.canContinue === undefined))) return;
+    if (!sock.isOpen) return setStatus("Server not connected.", true);
+    const requestId = crypto.randomUUID();
+    continuingThreads.set(a.threadId, requestId);
+    sendPageThreads();
+    sock.send({ ...a, requestId, config: commentConfig() });
+    return;
+  }
+  if (pendingOpen?.threadId === a.threadId) pendingOpen = null;
   sock.send(a);
 });
 bridge.onUrl?.((url) => { if (typeof url === "string") onPageUrl(url); });
@@ -1342,8 +1421,9 @@ const INTENT_WORKING: Record<RouteIntent, string> = { question: "answering", tas
 
 /** The × under the active turn, or its row in the tasks list: stop it (turn.cancel) and silence what it was saying. */
 function stopActiveTurn(turnId: string): void {
+  if (pendingDelete?.reset) return;
   const t = workingTurn();
-  if (!t || t.turnId !== turnId) return;
+  if (!t || t.turnId !== turnId || (t.threadId && pendingDelete?.waiting.has(t.threadId))) return;
   player?.reset();
   playback.reset();
   cancelTurn(t, "stop");
@@ -1353,7 +1433,7 @@ function stopActiveTurn(turnId: string): void {
 
 /** A panel's Stop cancels both routing and its solver, and drops only that thread's held follow-ups. */
 function stopThread(threadId: string): void {
-  if (isQueuedId(threadId)) return;
+  if (isQueuedId(threadId) || pendingDelete?.reset || pendingDelete?.waiting.has(threadId)) return;
   for (const q of held.filter((q) => q.threadId === threadId)) removeHeld(q);
   const t = workingTurn();
   if (t?.threadId === threadId) stopActiveTurn(t.turnId);
@@ -1494,6 +1574,7 @@ function cancelTurn(t: Turn, reason: "interrupt" | "stop"): void {
 }
 
 function press(how: "manual" | "vad" = "manual"): void {
+  if (pendingDelete?.reset || (panelThreadId && pendingDelete?.waiting.has(panelThreadId))) return;
   if (!player) return setStatus("Click “Enable mic & audio” first.", true);
   if (commentOpen()) return startDictation(how, chatDraftOpen ? "chat" : "page"); // a form is open: talking fills it in
   const queued = !settings.instant;
@@ -1546,6 +1627,7 @@ function press(how: "manual" | "vad" = "manual"): void {
         onFrame: (pcm) => { if (turn === t && t.tRelease === undefined && !t.finished) out.sendAudio(pcm); },
         preRollMs: how === "vad" ? VAD_PRE_ROLL_MS : TALK_PRE_ROLL_MS,
       });
+      if (t.finished) { t.capture.stop(); return; }
       const tAudioStart = await t.capture.tAudioStart;
       t.tAudioStart = tAudioStart;
       if (!t.finished) out.send({ type: "turn.audioStart", turnId, tAudioStart });
@@ -1639,7 +1721,7 @@ let stopConfirm: { confirmId: string; task: SpokenTask; timer: ReturnType<typeof
 
 /** `relayed`: pressed in the browser pane or the toolbar, where the page may use Esc itself: it only stops speech. */
 function onEscape(relayed: boolean): void {
-  if (drawingPreviewOpen()) return;
+  if (drawingPreviewOpen() || pendingDelete?.reset) return;
   closeTasks();
   const now = performance.now();
   if (escBurst && now - escBurst.last <= ESC_BURST_GAP_MS) {
@@ -1840,7 +1922,7 @@ function commentConfig(): RunConfig {
 }
 
 function startDictation(how: "manual" | "vad" | "button", to: DictationTo): void {
-  if (dictation) return;
+  if (dictation || pendingDelete?.reset) return;
   if (!sock.isOpen) return setStatus("Server not connected.", true);
   // The server runs one turn at a time: dictating talks over a reply, like a new turn would.
   const prev = turn;
@@ -1956,6 +2038,7 @@ function onDictationMsg(msg: ServerMsg): void {
  * `chat`: from the message box: sent now, never queued, pointing at nothing; it stays in the conversation. False: not sent (the status says why).
  */
 function sendComment(text: string, sample: CursorSample | null, threadId?: string, annotation?: DrawingAnnotation, chat = false): boolean {
+  if (pendingDelete?.reset || (threadId && pendingDelete?.waiting.has(threadId))) return false;
   if (threadId || chat) {
     const busy = !sock.isOpen ? "Server not connected" : isRecording() ? "You're talking" : sending ? "The list is being sent" : "";
     if (busy) { setStatus(`${busy}: the message wasn't sent.`, true); return false; }
@@ -2046,6 +2129,7 @@ function removeHeld(q: Queued): void {
 
 /** Send `q` next: the current turn is cancelled, which sends what's held (q first). */
 function interruptForHeld(q: Queued): void {
+  if (pendingDelete?.reset || (q.threadId && pendingDelete?.waiting.has(q.threadId))) return;
   const i = held.indexOf(q);
   if (i < 0) return;
   held.splice(i, 1);
@@ -2065,6 +2149,7 @@ async function sendHeld(): Promise<void> {
   if (sendingHeld) return;
   sendingHeld = true;
   while (held.length) {
+    if (pendingDelete?.reset || (held[0]?.threadId && pendingDelete?.waiting.has(held[0].threadId))) break;
     if (turn && !turn.finished) { // the user started talking meanwhile: after that turn
       sendingHeld = false;
       return sendAfter(turn);
@@ -2250,7 +2335,7 @@ function stopSending(): void {
 
 /** Send the queue in order, one turn at a time. */
 async function sendQueue(): Promise<void> {
-  if (sending || !queue.length) return;
+  if (sending || !queue.length || pendingDelete?.reset) return;
   if (isRecording()) return setStatus("Finish talking first, then send the queue.", true);
   if (held.length || sendingHeld) return setStatus("Your comments are still being sent; send the list after them.", true);
   if (turn && !turn.finished) cancelTurn(turn, "interrupt");
@@ -2343,7 +2428,42 @@ const INTENT_STATUS: Record<RouteIntent, string> = {
   answer: "Answering…",
 };
 
-sock.on((msg: ServerMsg) => {
+sock.on((msg: ServerMsg | { type: "thread.delete.done"; requestId?: string }) => {
+  if (msg.type === "thread.delete.preview") return deletePreviews.get(msg.requestId)?.(msg.threads);
+  if (msg.type === "thread.delete.done") {
+    if (!pendingDelete || pendingDelete.reset || pendingDelete.requestId !== msg.requestId) return;
+    // An already-removed thread can complete without another thread.removed broadcast.
+    for (const id of pendingDelete.waiting) {
+      threads.delete(id);
+      threadRemovalConfirmed(id);
+    }
+    return threadsChanged();
+  }
+  if (msg.type === "conversation.reset.done") {
+    if (!pendingDelete?.reset || pendingDelete.requestId !== msg.requestId) return;
+    pendingDelete = null;
+    for (const q of [...held]) removeHeld(q);
+    clearConversation();
+    threadsChanged();
+    refreshBusy();
+    setStatus("New conversation.");
+    return;
+  }
+  if (msg.type === "error" && msg.requestId) {
+    const preview = deletePreviews.get(msg.requestId);
+    if (preview) return preview(new Error(msg.message));
+    if (pendingDelete?.requestId === msg.requestId) {
+      pendingDelete = null;
+      threadsChanged();
+      void sendHeld();
+    }
+    for (const [id, requestId] of continuingThreads) {
+      if (requestId !== msg.requestId) continue;
+      continuingThreads.delete(id);
+      sendPageThreads();
+      break;
+    }
+  }
   if (msg.type === "conversation.session") {
     conversationSession = msg.session;
     renderConversationSession();
@@ -2361,10 +2481,20 @@ sock.on((msg: ServerMsg) => {
   if (msg.type === "threads.snapshot") {
     threads.clear();
     for (const t of msg.threads) threads.set(t.threadId, t);
+    if (pendingDelete) for (const id of pendingDelete.waiting) if (!threads.has(id)) threadRemovalConfirmed(id);
     return threadsChanged();
   }
-  if (msg.type === "thread") { threads.set(msg.thread.threadId, msg.thread); return threadsChanged(); }
-  if (msg.type === "thread.removed") { threads.delete(msg.threadId); return threadsChanged(); }
+  if (msg.type === "thread") {
+    const t = msg.thread;
+    threads.set(t.threadId, t);
+    if (t.state === "running" || (!t.interrupted && !t.canContinue)) continuingThreads.delete(t.threadId);
+    return threadsChanged();
+  }
+  if (msg.type === "thread.removed") {
+    threads.delete(msg.threadId);
+    threadRemovalConfirmed(msg.threadId);
+    return threadsChanged();
+  }
   if (msg.type === "thread.say") return onThreadSay(msg);
   if (!("turnId" in msg) || !msg.turnId) {
     if (msg.type === "error") setStatus(`${msg.source}: ${msg.message}`, true);
@@ -2628,78 +2758,135 @@ function clearConversation(): void {
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-/** What a reset would lose, for the confirmation; null when there's nothing worth asking about. */
-function resetLosses(): string[] | null {
-  const all = [...threads.values()];
-  const working = all.filter((t) => t.state === "running").length;
-  const tasks = [...jobs.values()].filter((c) => c.info.state === "running").length;
-  if (!all.length && !tasks) return null;
+function deleteBatchLines(previews: ThreadDeletePreview[], committed: number, reset: boolean, page: boolean, tasks: number): string[] {
+  const working = previews.filter((t) => t.state === "working").length;
+  const kept = previews.filter((t) => t.state !== "none").length - committed;
   const lines: string[] = [];
-  if (all.length) {
-    lines.push(`${plural(all.length, "thread")} will be deleted, on every page.`);
+  if (previews.length) {
+    lines.push(`${plural(previews.length, "thread")} will be deleted${page ? " on this page" : ", on every page"}.`);
+    lines.push(`${plural(committed, "thread")} will be committed, ${kept} kept uncommitted.`);
     lines.push(working
       ? `${working === 1 ? "1 thread is" : `${working} threads are`} still working and will be stopped.`
       : "None of them are working, so nothing will be stopped.");
   }
-  if (tasks) lines.push(`${tasks === 1 ? "1 background task is" : `${tasks} background tasks are`} running and will be stopped.`);
+  if (reset && tasks) lines.push(`${tasks === 1 ? "1 background task is" : `${tasks} background tasks are`} running and will be stopped.`);
   return lines;
 }
 
-let resetConfirm: HTMLElement | null = null;
+let batchConfirm: { box: HTMLElement; anchor: () => HTMLButtonElement | undefined } | null = null;
 
-function closeResetConfirm(): void {
-  resetConfirm?.remove();
-  resetConfirm = null;
+function closeDeleteConfirm(restoreFocus = false): void {
+  const dialog = batchConfirm;
+  batchConfirm = null;
+  dialog?.box.remove();
+  if (restoreFocus) dialog?.anchor()?.focus();
 }
 
-function openResetConfirm(lines: string[]): void {
-  closeResetConfirm();
-  const box = el("div", "reset-confirm");
+async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep: ReadonlySet<string> = new Set()): Promise<void> {
+  const reset = button.id === "reset";
+  const anchor = () => page === undefined ? $<HTMLButtonElement>(button.id)
+    : [...$("threads-list").querySelectorAll<HTMLButtonElement>(".thread-bulk")].find((b) => b.dataset.page === page);
+  if (batchConfirm?.anchor() === button) return closeDeleteConfirm(true);
+  closeDeleteConfirm();
+  if (pendingDelete) return;
+  const scope = () => [...threads.values()].filter((t) => page === undefined || t.pageUrl === page).map((t) => t.threadId);
+  const runningJobs = () => reset ? [...jobs.values()].filter((c) => c.info.state === "running").length : 0;
+  const ids = scope();
+  const tasks = runningJobs();
+  if (!ids.length && !tasks) {
+    if (reset) submitDelete("conversation.reset", []);
+    return;
+  }
+
+  const title = reset ? "Clear conversation?" : page === undefined ? "Delete all threads?" : "Delete threads on this page?";
+  const box = el("div", `reset-confirm${reset ? "" : " thread-delete-confirm"}`);
   box.setAttribute("role", "alertdialog");
-  box.setAttribute("aria-label", "Clear conversation?");
+  box.setAttribute("aria-label", title);
+  box.setAttribute("aria-describedby", "batch-delete-description");
+  const description = el("div");
+  description.id = "batch-delete-description";
+  description.setAttribute("aria-live", "polite");
+  if (ids.length) description.append(el("p", "", "Checking thread changes…"));
   const cancel = el("button", "", "Cancel");
-  const ok = el("button", "danger", "Clear conversation");
+  const ok = el("button", "danger", reset ? "Clear conversation" : "Delete threads");
   cancel.type = ok.type = "button";
-  cancel.onclick = closeResetConfirm;
-  ok.onclick = () => { closeResetConfirm(); resetConversation(); };
+  cancel.onclick = () => closeDeleteConfirm(true);
   box.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    e.stopPropagation();
-    closeResetConfirm();
-    $("reset").focus();
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDeleteConfirm(true);
+    } else if (e.key === "Tab") {
+      const last = ok.isConnected ? ok : cancel;
+      if (document.activeElement === (e.shiftKey ? cancel : last)) {
+        e.preventDefault();
+        (e.shiftKey ? last : cancel).focus();
+      }
+    }
   });
   const actions = el("div", "reset-confirm-actions");
-  actions.append(cancel, ok);
-  box.append(el("strong", "", "Clear conversation?"), ...lines.map((l) => el("p", "", l)), actions);
-  $("reset").after(box);
-  resetConfirm = box;
+  actions.append(cancel);
+  box.append(el("strong", "", title), description, actions);
+  (reset ? button : $("threads-clear").parentElement!).after(box);
+  const dialog = { box, anchor };
+  batchConfirm = dialog;
   cancel.focus();
+
+  try {
+    const previews = await previewDelete(ids);
+    if (batchConfirm !== dialog) return;
+    const choices = previews.map((preview): ThreadDeleteChoice => {
+      const { threadId, state, defaultMode } = preview;
+      const hasJob = !("willCommit" in preview) || preview.willCommit !== false;
+      return { threadId, mode: !keep.has(threadId) && state === "complete" && defaultMode === "commit" && hasJob ? "commit" : "keep" };
+    });
+    const committed = choices.filter((c) => c.mode === "commit").length;
+    description.replaceChildren(...deleteBatchLines(previews, committed, reset, page !== undefined, tasks).map((l) => el("p", "", l)));
+    ok.onclick = () => {
+      const current = scope();
+      const next = anchor();
+      const nowWorking = choices.filter(({ threadId, mode }) => mode === "commit"
+        && (threads.get(threadId)?.state === "running" || localThreadWorking(threadId)));
+      closeDeleteConfirm(true);
+      if (nowWorking.length || current.length !== ids.length || current.some((id) => !ids.includes(id)) || runningJobs() !== tasks) {
+        const stillKeep = new Set([...choices.filter(({ mode }) => mode === "keep"), ...nowWorking].map(({ threadId }) => threadId));
+        if (next) void openDeleteConfirm(next, page, stillKeep);
+        return;
+      }
+      submitDelete(reset ? "conversation.reset" : "threads.delete", choices);
+    };
+    actions.append(ok);
+  } catch (error) {
+    if (batchConfirm === dialog) description.replaceChildren(el("p", "", (error as Error).message));
+  }
 }
 
 // A click anywhere else dismisses the confirmation.
 document.addEventListener("pointerdown", (e) => {
-  if (resetConfirm && !resetConfirm.contains(e.target as Node) && e.target !== $("reset")) closeResetConfirm();
+  if (batchConfirm && !batchConfirm.box.contains(e.target as Node) && !batchConfirm.anchor()?.contains(e.target as Node)) closeDeleteConfirm();
 }, true);
 
-$("reset").onclick = () => {
-  if (resetConfirm) { closeResetConfirm(); return; }
-  const lines = resetLosses();
-  if (lines) openResetConfirm(lines);
-  else resetConversation();
-};
+for (const id of ["reset", "threads-clear"]) {
+  const button = $<HTMLButtonElement>(id);
+  button.onclick = () => void openDeleteConfirm(button);
+}
 
-function resetConversation(): void {
-  if (turn && !turn.finished) cancelTurn(turn, "stop");
-  stopNotice();
+/** Reset is the server's cancellation barrier. End local capture, playback and queue replay. */
+function silenceForReset(): void {
+  stopNotice(false);
   player?.reset();
   playback.reset();
-  sock.send({ type: "conversation.reset" });
-  clearConversation();
-  // The server clears every thread too (and says so); don't wait for it.
-  threads.clear();
-  threadsChanged();
+  if (sending) stopSending();
+  if (dictation) endDictation(dictation, undefined, false);
+  if (turn && !turn.finished) {
+    if (turn.rec) dropRecording(turn);
+    else {
+      cancelled.add(turn.turnId);
+      endTurn(turn);
+    }
+  }
   refreshBusy();
-  setStatus("New conversation.");
+  setStatus("Clearing conversation…");
 }
 
 // The server keeps the conversation (and its jobs) per WebSocket connection: after a reconnect it starts fresh.
@@ -2708,6 +2895,12 @@ function resetConversation(): void {
   let opened = false;
   sock.onStatus = (s) => {
     render?.(s);
+    if (s === "closed") {
+      for (const preview of deletePreviews.values()) preview(new Error("Server not connected."));
+      pendingDelete = null;
+      continuingThreads.clear();
+      threadsChanged();
+    }
     if (s !== "open") return;
     if (opened) {
       if (turn && !turn.finished && !turn.rec) failTurn(turn, "Connection lost.");
@@ -2726,6 +2919,7 @@ function resetConversation(): void {
       scrollDown();
     }
     opened = true;
+    threadsChanged();
     refreshBusy();
   };
 }

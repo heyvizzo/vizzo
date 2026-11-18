@@ -3,7 +3,7 @@ import { isDrawingAnnotation, type DrawingAnnotation } from "./annotations.ts";
 // Binary frames carry PCM16 mono 24 kHz audio for the active turn; text frames are JSON.
 import type { LlmChoice, RunConfig } from "./config.ts";
 import type { MarkName, Metrics } from "./marks.ts";
-import type { ThreadInfo, ThreadSay } from "./threads.ts";
+import type { ThreadDeleteChoice, ThreadDeletePreview, ThreadInfo, ThreadSay } from "./threads.ts";
 import type { HarnessSessionInfo } from "./harnessSession.ts";
 import type { ChangesStatus } from "./changes.ts";
 
@@ -327,9 +327,11 @@ export type ClientMsg =
   /** Debug: while on (and no turn is active), the server echoes binary audio frames back. */
   | { type: "echo"; on: boolean }
   /** Chat mode: forget the conversation. */
-  | { type: "conversation.reset" }
-  /** Element threads: delete one (stops its run, closes its harness session, removes it; edits stay in the code). */
-  | { type: "thread.delete"; threadId: string }
+  | { type: "conversation.reset"; requestId?: string; threads?: ThreadDeleteChoice[] }
+  | { type: "thread.delete.preview"; requestId: string; threadIds: string[] }
+  | ({ type: "thread.delete"; requestId?: string } & ThreadDeleteChoice)
+  | { type: "threads.delete"; requestId?: string; threads: ThreadDeleteChoice[] }
+  | { type: "thread.continue"; requestId?: string; threadId: string; turnId?: string; config?: RunConfig }
   /** Element threads: the user opened a thread's panel (it becomes the focused thread; its result counts as told). */
   | { type: "thread.focus"; threadId: string }
   /** Element threads: the panel's "Always use the smart model" checkbox (ThreadInfo.alwaysSmart). */
@@ -380,11 +382,13 @@ export type ServerMsg =
   /** Element threads: a thread was created or changed (full record). */
   | { type: "thread"; thread: ThreadInfo }
   | { type: "thread.removed"; threadId: string }
+  | { type: "thread.delete.preview"; requestId: string; threads: ThreadDeletePreview[] }
+  | { type: "conversation.reset.done"; requestId?: string }
   /** Element threads: frames a line spoken outside a turn (a result, reminder or central line); audio between start and end belongs to it. */
   | { type: "thread.say"; say: ThreadSay; state: "start" | "end" }
   /** RAM in use, sampled every few seconds while a page is connected (server/memory.ts). */
   | { type: "memory"; memory: MemorySnapshot }
-  | { type: "error"; turnId?: string; source: string; message: string };
+  | { type: "error"; turnId?: string; requestId?: string; source: string; message: string };
 
 export interface Usage {
   anthropic?: unknown;
@@ -436,11 +440,51 @@ export interface RunRecord {
   error?: string;
 }
 
+function identifier(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 256 && !value.includes("\0");
+}
+
+function object(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function deleteChoice(value: unknown): value is ThreadDeleteChoice {
+  return object(value) && identifier(value.threadId) && (value.mode === "commit" || value.mode === "keep");
+}
+
+function uniqueIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(identifier) && new Set(value).size === value.length;
+}
+
+function deleteChoices(value: unknown): value is ThreadDeleteChoice[] {
+  return Array.isArray(value) && value.every(deleteChoice) && uniqueIds(value.map(({ threadId }) => threadId));
+}
+
 export function parseClientMsg(raw: string): ClientMsg | null {
   try {
-    const m = JSON.parse(raw) as { type?: unknown };
-    if (m?.type === "turn.start" && "annotation" in m && m.annotation !== undefined && !isDrawingAnnotation(m.annotation)) return null;
-    return typeof m?.type === "string" ? (m as ClientMsg) : null;
+    const m: unknown = JSON.parse(raw);
+    if (!object(m) || typeof m.type !== "string") return null;
+    switch (m.type) {
+      case "turn.start":
+        if (m.annotation !== undefined && !isDrawingAnnotation(m.annotation)) return null;
+        break;
+      case "thread.delete.preview":
+        if (!identifier(m.requestId) || !uniqueIds(m.threadIds)) return null;
+        break;
+      case "thread.delete":
+        if (!deleteChoice(m) || (m.requestId !== undefined && !identifier(m.requestId))) return null;
+        break;
+      case "threads.delete":
+      case "conversation.reset":
+        if ((m.type !== "conversation.reset" || m.threads !== undefined) && !deleteChoices(m.threads)) return null;
+        if (m.requestId !== undefined && !identifier(m.requestId)) return null;
+        break;
+      case "thread.continue":
+        if (!identifier(m.threadId) || (m.requestId !== undefined && !identifier(m.requestId)) ||
+            (m.turnId !== undefined && !identifier(m.turnId)) || (m.config !== undefined && !object(m.config))) return null;
+        break;
+    }
+    return m as ClientMsg;
   } catch {
     return null;
   }
