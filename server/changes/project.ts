@@ -30,13 +30,24 @@ const GIT_ENV = [
   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_ATTR_SOURCE", "GIT_PREFIX", "GIT_QUARANTINE_PATH",
 ];
 
-function runGit(cwd: string, args: string[], maxBuffer = MAX_FILE_BYTES + 1) {
+const DISCOVERY_ENV = [
+  "GIT_CEILING_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_IMPLICIT_WORK_TREE",
+];
+const NO_REPOSITORY = "fatal: not a git repository (or any of the parent directories)";
+
+function runGit(cwd: string, args: string[], { discovery = false } = {}) {
   const env = { ...process.env };
   for (const key of GIT_ENV) delete env[key];
+  if (discovery) {
+    for (const key of DISCOVERY_ENV) delete env[key];
+    for (const key of Object.keys(env)) if (key.startsWith("GIT_TRACE")) delete env[key];
+    env.GIT_DISCOVERY_ACROSS_FILESYSTEM = "1";
+    env.GIT_TRACE2 = env.GIT_TRACE2_EVENT = env.GIT_TRACE2_PERF = "0";
+  }
   env.GIT_NO_LAZY_FETCH = "1";
   env.LC_ALL = "C";
   return spawnSync("git", ["--no-optional-locks", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-    "--literal-pathspecs", ...args], { cwd, env, input: Buffer.alloc(0), maxBuffer, timeout: 10_000 });
+    "--literal-pathspecs", ...args], { cwd, env, input: Buffer.alloc(0), maxBuffer: MAX_FILE_BYTES + 1, timeout: 10_000 });
 }
 
 function runProjectGit(project: LedgerProject, args: string[]) {
@@ -97,6 +108,24 @@ function readGitDirectoryMarker(path: string, prefix: string): string {
   return resolve(dirname(path), text.slice(prefix.length));
 }
 
+/** Check the canonical storage directory before recovery knows any of the journal's project identities. */
+export function assertOutsideGitStorage(directory: string): void {
+  const result = runGit(directory, [
+    "rev-parse", "--is-inside-work-tree", "--is-inside-git-dir", "--is-bare-repository",
+  ], { discovery: true });
+  if (result.error) throw new Error("Could not verify the source-control storage location", { cause: result.error });
+  if (result.status !== 0) {
+    const failure = result.stderr.toString().trim();
+    if (result.status === 128 && (failure === NO_REPOSITORY || failure === `${NO_REPOSITORY}: .git`)) return;
+    throw new Error("Could not verify the source-control storage location");
+  }
+  const flags = line(result.stdout).split("\n");
+  if (flags.length !== 3 || flags.some((value) => value !== "true" && value !== "false")) {
+    throw new Error("Could not verify the source-control storage location");
+  }
+  if (flags.includes("true")) throw new Error("Source-control storage must be outside Git worktrees and metadata");
+}
+
 export function discoverLedgerProject(directory: string): ProjectDiscovery {
   try {
     if (!exactText(directory) || directory.includes("\0")) return { reason: "Malformed project directory" };
@@ -106,7 +135,7 @@ export function discoverLedgerProject(directory: string): ProjectDiscovery {
     if (worktree.error) throw worktree.error;
     const inside = worktree.status === 0 ? line(worktree.stdout) : undefined;
     const failure = worktree.stderr.toString().trim();
-    if (inside === "false" || failure.startsWith("fatal: not a git repository (or any of the parent directories)")) {
+    if (inside === "false" || failure.startsWith(NO_REPOSITORY)) {
       return { reason: "The project folder is not in a Git worktree" };
     }
     if (inside !== "true") throw new Error(failure || "Could not identify the Git worktree");

@@ -1,6 +1,6 @@
-import { fork, type ChildProcess } from "node:child_process";
+import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -69,6 +69,24 @@ async function saveWith(voice: ChildProcess, value: string): Promise<unknown> {
 }
 
 describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")("source-control ledger lease", () => {
+  it.each(["", ".git"])("refuses to create a storage directory inside Git at %j", (under) => {
+    const repository = join(fixture, "repository");
+    execFileSync("git", ["init", "-q", "--template=", repository]);
+    const location = join(repository, under, "missing", "config", "ledger.json");
+    expect(() => new LedgerPersistence(location).acquireLease()).toThrow("Source-control storage must be outside Git worktrees and metadata");
+    expect(existsSync(join(repository, under, "missing"))).toBe(false);
+    expect(existsSync(location + ".lock")).toBe(false);
+  });
+
+  it("leaves storage untouched when Git cannot verify the location", () => {
+    const broken = join(fixture, "broken");
+    mkdirSync(broken);
+    writeFileSync(join(broken, ".git"), "gitdir: missing-metadata\n");
+    const location = join(broken, "missing", "ledger.json");
+    expect(() => new LedgerPersistence(location).acquireLease()).toThrow("Could not verify the source-control storage location");
+    expect(existsSync(join(broken, "missing"))).toBe(false);
+  });
+
   it("refuses a second voice at a canonical alias and releases the same inode after a crash", async () => {
     const owner = await startVoice("first");
     const leasePath = `${journal}.lock`;
