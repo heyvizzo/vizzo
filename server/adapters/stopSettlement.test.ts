@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HarnessId } from "../../shared/config.ts";
 import { LedgerWorkerClient } from "../changes/ledgerWorkerClient.ts";
@@ -24,7 +25,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixtureThread(folder: string, harness: HarnessId, mode: "late" | "never" | "descendant") {
+function fixtureThread(folder: string, harness: HarnessId, mode: "late" | "never" | "descendant" | "reject-prompt") {
   vi.stubEnv(envBin[harness], fixture);
   vi.stubEnv("VIZZO_FAKE_NATIVE_HARNESS", harness);
   vi.stubEnv("VIZZO_FAKE_STOP_MODE", mode);
@@ -177,6 +178,21 @@ it("escalates a timed-out private group even after a terminal while a child can 
     expect(readFileSync(join(request.folder, "created"), "utf8")).toBe("proved");
     expect(request.thread.live).toBe(false);
     expect(request.observed.unconfirmed).not.toHaveBeenCalled();
+  } finally { request.close(); }
+}, 20_000);
+
+it("waits for RPC agent_end when an interrupted prompt reports rejection first", async () => {
+  const request = start("omp", "reject-prompt");
+  try {
+    await request.active;
+    const settled = request.thread.settled!;
+    request.thread.abort();
+    await expect(request.answer).rejects.toMatchObject({ name: "AbortError" });
+    await expect.poll(() => existsSync(join(request.folder, "rejected"))).toBe(true);
+    await expect(Promise.race([settled.then(() => "settled"), delay(500, "pending")])).resolves.toBe("pending");
+    writeFileSync(join(request.folder, "release-terminal"), "");
+    await settled;
+    expect(request.thread.live).toBe(true);
   } finally { request.close(); }
 }, 20_000);
 
