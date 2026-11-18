@@ -77,6 +77,8 @@ export interface CommitRecoveryPorts<Job extends CommitRecoveryJournal> {
   reload(key: CommitRecoveryJobKey): Promise<Job | null>;
   /** Durably attach this checkpoint to the original journal record before the next Git mutation. */
   checkpoint(job: Job, checkpoint: CommitRecoveryCheckpoint): Promise<void>;
+  /** Check interactive Fix context synchronously just before installing the prepared index. */
+  assertInstallContext?(): void;
   /** Durably record the outcome. Preserve the checkpoint when blocked and clear it on other outcomes.
    * When keeping a job for Fix, store null to prevent future use of the original lock identity.
    * On done, settle ownership in the same write.
@@ -231,6 +233,7 @@ const baseIndexWarning = "Git's staging area still has the previous entries. Com
 async function repairIndex(
   job: CommitRepairJournal, index: IndexLock, reusable: boolean, head: GitHead,
   checkpoint: (state: CommitRecoveryCheckpoint) => Promise<void>,
+  assertInstallContext?: () => void,
 ): Promise<FinishedRecovery> {
   const root = job.project.root;
   const indexPath = index.indexPath;
@@ -260,9 +263,10 @@ async function repairIndex(
         preservesOtherEntries(real, previous, job.entries)) {
       await checkpoint({ step: "install-index", owner, reusable: true });
       try {
-        await index.install("published");
+        await index.install("published", assertInstallContext);
         return { status: "done", evidence: "published", commit: job.commit, index: "reused" };
       } catch (error) {
+        if (error instanceof GitPublicationError && error.code === "stale-context") throw error;
         if (!(error instanceof GitPublicationError) || error.code !== "index-not-ready") {
           return repairNeeded(job, "index-error", true, `${baseIndexWarning} ${reasonText(error)}`);
         }
@@ -279,9 +283,10 @@ async function repairIndex(
   }
   await checkpoint({ step: "install-index", owner, reusable: true });
   try {
-    await index.install("published");
+    await index.install("published", assertInstallContext);
     return { status: "done", evidence: "published", commit: job.commit, index: "rebuilt" };
   } catch (error) {
+    if (error instanceof GitPublicationError && error.code === "stale-context") throw error;
     return repairNeeded(job, "index-error", true, reasonText(error));
   }
 }
@@ -350,7 +355,7 @@ async function recover<Job extends CommitRecoveryJournal>(job: Job, repository: 
         if (evidence === "published") {
           if (abandoned) await checkpoint({ step: "inspect-index", owner, reusable });
           const verifiedHead = await captureGitHead(root);
-          outcome = await repairIndex(candidate, index, reusable, verifiedHead, checkpoint);
+          outcome = await repairIndex(candidate, index, reusable, verifiedHead, checkpoint, ports.assertInstallContext);
         } else {
           outcome = unconfirmed(candidate, evidence);
         }

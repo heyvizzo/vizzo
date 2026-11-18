@@ -7,11 +7,12 @@ import { runCommitTransaction, type CommitContext, type CommitJournal, type Comm
 import { changeWriterId } from "./components.ts";
 import { ABSENT, type ReadEntry } from "./entries.ts";
 import { MAX_FILE_BYTES } from "./evidence.ts";
+import { GitPublicationError } from "./gitPublication.ts";
 import type { GitEntryChange } from "./gitTree.ts";
 import type { CommitJobKey, CommitJobRecord, CommitJobSummary } from "./ledger.ts";
 import { changesLedger, type LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import type { LedgerProject } from "./project.ts";
-import { ScanRuntime, type ScanLedgerSource, type ScanWriterSource } from "./scanRuntime.ts";
+import { REVIEW_AGAIN, ScanRuntime, type ScanLedgerSource, type ScanWriterSource } from "./scanRuntime.ts";
 import { writerRegistry, type WriterId, type WriterRegistry } from "./writers.ts";
 
 export type CommitScan = (context: CommitContext) => Promise<FrozenCommitSelection<CommitOwnershipReceipt> | null>;
@@ -27,6 +28,12 @@ type RecoveryJournal = CommitRecoveryJournal & { project: LedgerProject };
 const execGit = promisify(execFile);
 const busy = new Map<string, Promise<void>>();
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function assertCurrentScope(isCurrent?: () => boolean): (() => void) | undefined {
+  return isCurrent && (() => {
+    if (!isCurrent()) throw new GitPublicationError("stale-context", REVIEW_AGAIN);
+  });
+}
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
@@ -152,11 +159,13 @@ export class ChangesService {
     }
   }
 
-  private restoreJob(summary: CommitJobSummary): Promise<CommitRecoveryResult> {
+  private restoreJob(summary: CommitJobSummary, isCurrent?: () => boolean): Promise<CommitRecoveryResult> {
     const { project, jobId } = summary;
     const key = { projectId: project.id, jobId };
     return serial(project, async () => {
+      if (isCurrent && !isCurrent()) return { status: "skipped", reason: "missing-job" };
       const job = await this.ledger.commitJob(key);
+      if (isCurrent && !isCurrent()) return { status: "skipped", reason: "missing-job" };
       if (!job) return { status: "skipped", reason: "missing-job" };
       if (isTerminal(job.journal.phase)) return { status: "skipped", phase: job.journal.phase };
       if (job.journal.phase === "queued") {
@@ -172,10 +181,12 @@ export class ChangesService {
       const ports: CommitRecoveryPorts<RecoveryJournal> = {
         reload: async () => {
           const current = await this.ledger.commitJob(key);
+          if (isCurrent && !isCurrent()) return null;
           if (!current || current.journal.phase === "queued") return null;
           return { ...current.journal, project: current.project, recovery: current.recovery };
         },
         checkpoint: (_job, checkpoint) => this.ledger.checkpointRecovery(key, checkpoint),
+        assertInstallContext: assertCurrentScope(isCurrent),
         finish: async (_job, outcome) => {
           await this.ledger.finishRecovery(key, outcome);
           finished = true;
@@ -186,6 +197,7 @@ export class ChangesService {
         if (!finished && result.status === "blocked") await this.ledger.finishRecovery(key, result);
         return result;
       } catch (error) {
+        if (error instanceof GitPublicationError && error.code === "stale-context") return { status: "skipped", reason: "missing-job" };
         await this.reportIssue(key, `Vizzo could not finish commit recovery. ${message(error)}`);
         throw error;
       }
@@ -208,10 +220,11 @@ export class ChangesService {
     return this.ledger.queueCommit(await this.verifyProject(project), request);
   }
 
-  async commit(project: LedgerProject, request: CommitRequest, scanAndFreeze: CommitScan): Promise<CommitResult> {
+  async commit(project: LedgerProject, request: CommitRequest, scanAndFreeze: CommitScan, isCurrent?: () => boolean): Promise<CommitResult> {
     await this.restore();
     const key = { projectId: project.id, jobId: request.jobId };
     return serial(project, async () => {
+      if (isCurrent && !isCurrent()) return { status: "refused", code: "stale", reason: REVIEW_AGAIN };
       const pinned = await this.verifyProject(project);
       const blocker = (await this.ledger.commitJobs()).find((job) =>
         job.project.commonDir === pinned.commonDir && job.phase !== "queued" && !isTerminal(job.phase));
@@ -234,6 +247,7 @@ export class ChangesService {
           const ownership = await this.ledger.pinCommit(key, frozen);
           return { ...frozen, ownership };
         },
+        assertPublicationContext: assertCurrentScope(isCurrent),
         settle: (record) => this.ledger.checkpointCommit(record),
       }).catch(async (error) => {
         await this.reportIssue(key, `Vizzo could not finish the commit. ${message(error)}`);
@@ -248,10 +262,14 @@ export class ChangesService {
     return this.ledger.commitJobs(projectId);
   }
 
-  async fix(projectId: string, jobId: string): Promise<CommitRecoveryResult> {
+  writerSnapshot(projectId: string): ReturnType<ScanWriterSource["snapshot"]> {
+    return this.writers.snapshot(projectId);
+  }
+
+  async fix(projectId: string, jobId: string, isCurrent?: () => boolean): Promise<CommitRecoveryResult> {
     await this.restore();
     const summary = (await this.ledger.commitJobs(projectId)).find((job) => job.jobId === jobId && job.phase !== "queued");
-    return summary ? this.restoreJob(summary) : { status: "skipped", reason: "missing-job" };
+    return summary && (!isCurrent || summary.canFix) ? this.restoreJob(summary, isCurrent) : { status: "skipped", reason: "missing-job" };
   }
 
   async flush(): Promise<void> {

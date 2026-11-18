@@ -13,7 +13,7 @@ import type { LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import { evidencePath, sameHead, type LedgerProject } from "./project.ts";
 
 const POLL_MS = 2_000;
-const REVIEW_AGAIN = "Changed meanwhile: review again";
+export const REVIEW_AGAIN = "Changed meanwhile: review again";
 const NO_WORKTREE = "The project folder is not in a Git worktree";
 const UNSAFE_PATH = "Path cannot be observed in this project";
 const MISMATCH = "The ledger and Git read different versions of this entry";
@@ -51,6 +51,9 @@ export type ScanResponse<T> =
 export interface ScanReview {
   readonly project: Readonly<LedgerProject>;
   readonly view: ChangesView;
+  readonly graph: ChangeComponentGraph;
+  /** A served scope can change independently of the worktree's project id. */
+  readonly isProjectCurrent: () => boolean;
   /** Use as the transaction's scanAndFreeze port. The review token stays on the server. */
   readonly scanAndFreeze: CommitTransactionPorts<ChangeOwnershipReceipt>["scanAndFreeze"];
 }
@@ -142,6 +145,7 @@ export class ScanRuntime {
   private timer?: ReturnType<typeof setInterval>;
   private generation = 0;
   private readonly scans = new Map<string, Promise<void>>();
+  private readonly statusListeners = new Set<() => void>();
 
   constructor(private readonly ports: ScanRuntimePorts) {}
 
@@ -153,12 +157,26 @@ export class ScanRuntime {
     return active.unavailable ?? { kind: "loading", directory: active.directory };
   }
 
+  subscribeStatus(listener: () => void): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  private notifyStatus(): void {
+    for (const listener of this.statusListeners) {
+      try { listener(); }
+      catch (error) { console.warn("[changes] source-control status listener failed", error); }
+    }
+  }
+
   setProject(directory: string | null): Promise<void> {
+    const previous = this.active;
     if (directory === null) this.active = undefined;
     else {
       const absolute = resolve(directory);
       if (absolute !== this.active?.directory) this.active = { directory: absolute, requested: false };
     }
+    if (previous !== this.active) this.notifyStatus();
     return this.refresh();
   }
 
@@ -191,6 +209,7 @@ export class ScanRuntime {
         while (this.active === active && active.requested) {
           active.requested = false;
           await this.publishCurrent(active);
+          if (this.active === active) this.notifyStatus();
         }
       } finally {
         active.task = undefined;
@@ -222,7 +241,37 @@ export class ScanRuntime {
     }
     const binding = active.binding;
     return { status: 200, data: this.review(current.project, current.graph,
-      () => this.active === active && active.binding === binding && active.published !== undefined) };
+      () => this.active === active && active.binding === binding && active.published !== undefined,
+      () => this.active === active && active.project !== undefined && projectKey(active.project) === projectKey(current.project)) };
+  }
+
+  /** Recovery and stop actions must also work when a commit pin prevents publishing a scan. */
+  projectContext(projectId: string, generation?: number): ScanResponse<{
+    project: Readonly<LedgerProject>;
+    isCurrent: () => boolean;
+  }> {
+    const active = this.active;
+    const project = active?.project;
+    if (!active || !project || project.id !== projectId) return { status: 409, reason: REVIEW_AGAIN };
+    const isCurrent = () => this.active === active && active.project !== undefined &&
+      projectKey(active.project) === projectKey(project) &&
+      (generation === undefined || active.published?.graph.view.generation === generation);
+    return isCurrent() ? { status: 200, data: { project, isCurrent } } : { status: 409, reason: REVIEW_AGAIN };
+  }
+
+  /** Follow only a commit just published by this request, with the same active project and branch. */
+  async reviewAfterPublication(review: ScanReview, commit: string): Promise<ScanResponse<ScanReview>> {
+    const { project, isProjectCurrent } = review;
+    if (!isProjectCurrent()) return { status: 409, reason: REVIEW_AGAIN };
+    try {
+      const input = await this.serialize(project, () => this.scan(project, { branch: review.view.branch, oid: commit }));
+      if (!isProjectCurrent()) return { status: 409, reason: REVIEW_AGAIN };
+      const graph = buildChangeComponents({ ...input, generation: ++this.generation });
+      return { status: 200, data: this.review(project, graph, isProjectCurrent, isProjectCurrent) };
+    } catch (error) {
+      const reason = isHeadChange(error) || error instanceof ScanProjectChangedError ? REVIEW_AGAIN : String(error);
+      return { status: 409, reason };
+    }
   }
 
   /** The caller must supply the server-owned descriptor pinned to the writer or job. */
@@ -233,10 +282,10 @@ export class ScanRuntime {
     return this.review(pinned, graph, () => true);
   }
 
-  private review(project: Readonly<LedgerProject>, graph: ChangeComponentGraph, active: () => boolean): ScanReview {
+  private review(project: Readonly<LedgerProject>, graph: ChangeComponentGraph, active: () => boolean, isProjectCurrent = active): ScanReview {
     const { review: token, view } = graph;
     return Object.freeze({
-      project, view,
+      project, view, graph, isProjectCurrent,
       scanAndFreeze: async (context: CommitContext) => {
         const { request, head } = context;
         if (!active() || context.project.id !== project.id || context.project.root !== project.root ||
@@ -351,6 +400,8 @@ export class ScanRuntime {
     ]);
     await this.assertProject(project);
     if (!sameHead(head, await this.head(project))) throw new GitScanBaseChangedError();
-    return { ...groupState, projectId: project.id, scope, head, writers, ...reconcile(git.entries, ledger) };
+    const grokInScope = writers.executions.some(({ harness, folder }) => harness === "grok" &&
+      (folder === project.servedDir || folder === project.scope));
+    return { ...groupState, projectId: project.id, scope, head, writers, grokInScope, ...reconcile(git.entries, ledger) };
   }
 }
