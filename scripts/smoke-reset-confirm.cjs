@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const userData = mkdtempSync(path.join(tmpdir(), 'vizzo-reset-confirm-'));
 app.setPath('userData', userData);
 process.on('uncaughtException', error => { console.error(error); app.exit(1); });
-let chat, vite, sockets, peer;
+let chat, vite, sockets, peer, heldFeedback = [];
 const errors = [], received = [];
 const base = {
   pageUrl: 'data:text/html', intent: 'task', summary: '', unread: false, awaitingReply: false, createdAt: 0, lastInteractionAt: 0, messages: [],
@@ -20,6 +20,7 @@ const threads = [
   { ...base, threadId: 't1', title: 'one', state: 'idle' },
   { ...base, threadId: 't2', title: 'two', state: 'running' },
   { ...base, threadId: 't3', title: 'three', state: 'idle' },
+  { ...base, threadId: 't4', title: 'four', state: 'idle' },
 ];
 ipcMain.on('hotkeys:get', e => { e.returnValue = null; });
 ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false }); });
@@ -29,11 +30,24 @@ ipcMain.handle('page:url', () => base.pageUrl);
 ipcMain.handle('page:state', () => ({ tFrom: null }));
 ipcMain.handle('drawing:get', () => false);
 ipcMain.handle('comment:get', () => false);
-ipcMain.on('page:cmd', () => {});
+ipcMain.on('page:cmd', (_e, cmd) => { if (cmd.type === 'held') heldFeedback = cmd.items; });
 const send = msg => peer.send(JSON.stringify(msg));
 const resets = () => received.filter(m => m.type === 'conversation.reset').length;
+const previews = () => received.filter(m => m.type === 'thread.delete.preview');
+const mutations = () => received.filter(m => ['thread.delete', 'threads.delete', 'conversation.reset', 'task.stop', 'turn.cancel'].includes(m.type));
+const reply = (request, states) => send({ type: 'thread.delete.preview', requestId: request.requestId,
+  threads: request.threadIds.map(threadId => ({ threadId, ...states[threadId] })) });
+const states = {
+  t1: { state: 'complete', defaultMode: 'commit', willCommit: true },
+  t2: { state: 'working', defaultMode: 'keep' },
+  t3: { state: 'complete', defaultMode: 'commit', willCommit: false },
+  t4: { state: 'none', defaultMode: 'keep' },
+};
+const choices = ['commit', 'keep', 'keep', 'keep'].map((mode, i) => ({ threadId: threads[i].threadId, mode }));
 const evaluate = source => chat.webContents.executeJavaScript(source);
 const confirmText = () => evaluate('document.querySelector(".reset-confirm")?.innerText ?? null');
+const confirmReady = () => evaluate('!!document.querySelector(".reset-confirm .danger")');
+const listed = () => evaluate('document.querySelectorAll(".thread-item").length');
 // The reset button only shows once the conversation has something in it.
 const addNote = () => evaluate('(() => { const p = document.createElement("p"); p.className = "status note"; p.textContent = "earlier"; document.getElementById("messages").append(p); })()');
 const clickReset = () => evaluate('document.getElementById("reset").click()');
@@ -79,46 +93,110 @@ async function main() {
   chat.webContents.debugger.attach('1.3');
   chat.webContents.debugger.on('message', (_e, method, params) => { if (method === 'Runtime.exceptionThrown') errors.push(params.exceptionDetails.exception?.description ?? params.exceptionDetails.text); });
   await chat.webContents.debugger.sendCommand('Runtime.enable');
-  await until(() => peer && evaluate('document.querySelectorAll(".thread-item").length===3'), 'threads listed');
+  await until(async () => peer && await listed() === 4, 'threads listed');
 
-  // With threads: ask first, and say how many go and how many get stopped.
+  // Cancel a pending preview. A late reply must not populate the next dialog.
   await addNote();
   await clickReset();
-  await until(confirmText, 'confirmation shows');
+  await until(() => previews().length === 1, 'first preview requested');
+  assert.match(await confirmText(), /Checking thread changes/);
+  await evaluate('document.querySelector(".reset-confirm-actions button").click()');
+  assert.equal(await confirmText(), null, 'Cancel closes it');
+  assert.equal(await evaluate('document.activeElement.id'), 'reset', 'Cancel restores focus');
+  await clickReset();
+  await until(() => previews().length === 2, 'second preview requested');
+  reply(previews()[0], { ...states, t1: { state: 'working', defaultMode: 'keep' } });
+  reply(previews()[1], states);
+  await until(confirmReady, 'current preview confirmed');
   const text = await confirmText();
   assert.match(text, /Clear conversation\?/);
-  assert.match(text, /3 threads will be deleted/);
+  assert.match(text, /4 threads will be deleted/);
+  assert.match(text, /1 thread will be committed, 2 kept uncommitted/);
   assert.match(text, /1 thread is still working and will be stopped/);
-  assert.equal(resets(), 0, 'nothing reset before confirming');
+  assert.deepEqual(mutations(), [], 'preflight sends no mutation');
   const artifacts = path.join(root, 'results', 'reset-confirm-smoke');
   mkdirSync(artifacts, { recursive: true });
   writeFileSync(path.join(artifacts, 'confirm.png'), (await chat.webContents.capturePage(undefined, { stayHidden: true })).toPNG());
 
-  // Cancel keeps everything.
-  await evaluate('document.querySelector(".reset-confirm-actions button:not(.danger)").click()');
-  assert.equal(await confirmText(), null, 'Cancel closes it');
-  assert.equal(resets(), 0);
-  assert.equal(await evaluate('document.querySelectorAll(".thread-item").length'), 3, 'threads kept');
-
-  // Esc closes it too.
-  await clickReset();
-  await until(confirmText, 'confirmation shows again');
   await evaluate('document.querySelector(".reset-confirm").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
   assert.equal(await confirmText(), null, 'Esc closes it');
+  assert.equal(await evaluate('document.activeElement.id'), 'reset', 'Esc restores focus');
   assert.equal(resets(), 0);
+  assert.equal(await listed(), 4, 'threads kept');
 
-  // Idle threads only: says nothing will be stopped.
-  threads[1].state = 'idle'; send({ type: 'thread', thread: threads[1] });
-  await until(() => evaluate('!document.querySelector(".thread-item[data-state=running]")'), 'no thread running');
+  // Clear previews the whole batch once. A working thread that goes idle still submits keep.
+  await evaluate('document.getElementById("threads-clear").click()');
+  await until(() => previews().length === 3, 'Clear previews all threads');
+  assert.deepEqual(previews()[2].threadIds, threads.map(t => t.threadId));
+  reply(previews()[2], states);
+  await until(confirmReady, 'Clear shows preview');
+  assert.match(await confirmText(), /1 thread will be committed, 2 kept uncommitted/);
+  send({ type: 'thread', thread: { ...threads[1], state: 'idle' } });
+  await until(() => evaluate('!document.querySelector(".thread-item[data-state=running]")'), 'thread became idle');
+  await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
+  await until(() => mutations().length === 1, 'one Clear mutation sent');
+  assert.equal(mutations()[0].type, 'threads.delete');
+  assert.deepEqual(mutations()[0].threads, choices);
+  assert.equal(await listed(), 4, 'Clear waits for durable removal');
+  for (const t of threads) send({ type: 'thread.removed', threadId: t.threadId });
+  await until(async () => await listed() === 0, 'Clear removes confirmed threads');
+
+  // The sidebar × uses the server's automatic choice and also waits for the acknowledgment.
+  send({ type: 'threads.snapshot', threads });
+  await until(async () => await listed() === 4, 'threads restored for single delete');
+  await evaluate('document.querySelector(".thread-del").click()');
+  await until(() => previews().length === 4, 'automatic mode requested');
+  assert.deepEqual(previews()[3].threadIds, ['t1']);
+  reply(previews()[3], states);
+  await until(() => mutations().length === 2, 'single delete sent');
+  assert.equal(mutations()[1].mode, 'commit');
+  assert.equal(await listed(), 4, 'single delete waits for durable removal');
+  send({ type: 'thread.removed', threadId: 't1' });
+  await until(async () => await listed() === 3, 'single deletion confirmed');
+
+  // The server already removed a good target before this request ran. Only the correlated acknowledgment arrives.
+  await evaluate('document.querySelector(".thread-del").click()');
+  await until(() => previews().length === 5, 'another deletion preview requested');
+  assert.deepEqual(previews()[4].threadIds, ['t2']);
+  reply(previews()[4], states);
+  await until(() => mutations().length === 3, 'another deletion sent');
+  send({ type: 'thread.delete.done', requestId: mutations()[1].requestId });
+  send({ type: 'thread', thread: { ...threads[2], title: 'Still here' } });
+  await until(() => evaluate('document.querySelector(".thread-item[data-thread-id=t3] .thread-title").textContent === "Still here"'), 'stale acknowledgment processed');
+  assert.equal(await listed(), 3, 'old acknowledgment does not remove the new target');
+  assert.equal(await evaluate('document.getElementById("threads-clear").disabled'), true, 'old acknowledgment does not release the new mutation');
+  send({ type: 'thread.delete.done', requestId: mutations()[2].requestId });
+  await until(async () => await listed() === 2 && await evaluate('!document.getElementById("threads-clear").disabled'), 'correlated acknowledgment completes an already-applied deletion');
+
+  // Reset during a sent turn. It sends one mutation, with no earlier turn.cancel or task.stop.
+  send({ type: 'threads.snapshot', threads });
+  send({ type: 'job', job: { jobId: 'working-job', state: 'running', question: 'Background', startedAt: 0 } });
+  await until(async () => await listed() === 4, 'threads restored for reset');
+  await evaluate(`(() => {
+    const form = document.querySelector('#compose textarea');
+    form.value = 'An active request';
+    form.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#compose .if-send').click();
+  })()`);
+  await until(() => received.some(m => m.type === 'turn.release'), 'turn in flight');
   await clickReset();
-  await until(confirmText, 'confirmation shows for idle threads');
-  assert.match(await confirmText(), /None of them are working, so nothing will be stopped/);
-
-  // Confirm clears.
+  await until(() => previews().length === 6, 'reset preflights before cancellation');
+  reply(previews()[5], states);
+  await until(confirmReady, 'reset shows commit, keep and work warning');
+  assert.match(await confirmText(), /1 background task is running and will be stopped/);
+  chat.webContents.send('page:comment', { type: 'comment.send', threadId: 't1', text: 'A follow-up held locally after the preview',
+    sample: { t: Date.now(), x: 1, y: 1, scrollX: 0, scrollY: 0, elementPath: base.anchor.domPath, dataSource: null, label: 'A' } });
+  await until(() => heldFeedback.some(c => c.threadId === 't1'), 'new follow-up waits behind the active turn');
   await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
   await until(() => resets() === 1, 'reset sent');
+  assert.deepEqual(mutations().map(m => m.type), ['threads.delete', 'thread.delete', 'thread.delete', 'conversation.reset']);
+  assert.deepEqual(mutations()[3].threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'a newly held follow-up also caps the mode at keep');
   assert.equal(await confirmText(), null);
-  assert.equal(await evaluate('document.querySelectorAll(".thread-item").length'), 0, 'threads cleared');
+  assert.equal(await listed(), 4, 'reset keeps threads during durable handoff');
+  assert.equal(await evaluate('!!document.querySelector(".turn")'), true, 'conversation remains until reset completes');
+  send({ type: 'threads.snapshot', threads: [] });
+  send({ type: 'conversation.reset.done', requestId: mutations()[3].requestId });
+  await until(async () => await listed() === 0 && await evaluate('!document.querySelector(".turn")'), 'reset acknowledgment clears conversation');
 
   // Nothing to lose: no question.
   await addNote();
@@ -126,7 +204,7 @@ async function main() {
   await until(() => resets() === 2, 'reset sent without asking');
   assert.equal(await confirmText(), null);
   assert.deepEqual(errors, []);
-  console.log('Reset confirm smoke passed: asks with thread and working counts, Cancel/Esc keep everything, confirm clears, no question when nothing is lost.');
+  console.log('Reset confirm smoke passed: batches preview once, count tied and working threads, cap keep, keep markers through handoff, and reset without a preceding cancellation.');
 }
 
 main().then(() => finish(0), error => { console.error(error); return finish(1); });

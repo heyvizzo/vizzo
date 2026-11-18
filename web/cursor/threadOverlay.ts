@@ -8,11 +8,11 @@ import { drawingPreview, drawingPreviewOpen } from "./drawingPreview.ts";
 // Elements are re-resolved on scroll, resize, DOM mutation (HMR included): selector → role + text → the anchor's
 // last bounds (drawn faded). The conversation orb stands for the page as a whole: the central conversation's bubbles
 // come from it and its panel shows the conversation. It sits fixed in the viewport, bottom center until dragged.
-import { displayTitle, type ThreadAnchor, type ThreadInfo, type ThreadMessage, type ThreadSay, type ThreadState } from "../../shared/threads.ts";
+import { displayTitle, type ThreadAnchor, type ThreadDeleteMode, type ThreadDeletePreview, type ThreadInfo, type ThreadMessage, type ThreadSay, type ThreadState } from "../../shared/threads.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
 import type { CursorSample } from "../../shared/protocol.ts";
 import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
-import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageChangesStatus, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction } from "./pageBridge.ts";
+import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageChangesStatus, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction, PageThreadDeletePreview } from "./pageBridge.ts";
 import { mountPlasmaOrb, PLASMA_ORB_CSS, type PlasmaState } from "./plasmaOrb.ts";
 import { ORB_ASKING_COLORS, ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
 import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
@@ -67,8 +67,6 @@ const ORB_LOOKS: Record<OrbState, { state: PlasmaState; colors: StateColor }> = 
 const markerLook = (t: ThreadInfo): string => ((t.awaitingReply || t.interrupted) && (t.state === "idle" || t.state === "pending") ? "asking" : t.state);
 /** The words for the "asking" look. */
 const askingLabel = (t: ThreadInfo | null | undefined): string => (t?.interrupted ? "interrupted" : "asking you");
-/** What Resume sends an interrupted thread (a follow-up: its harness session continues where it stopped). */
-export const RESUME_TEXT = "Vizzo was closed while you were working on this. Continue where you left off and finish the request.";
 /** The orb is kept this far inside the viewport. */
 const ORB_MARGIN = 4;
 /** A press on the orb that moves more than this is a drag, not a click. */
@@ -153,6 +151,7 @@ ${MARKDOWN_CSS}
 .th-state[data-state="queued"] { color: var(--ui-violet); border-color: color-mix(in srgb, var(--ui-violet) 35%, transparent); }
 .th-panel button { font: inherit; font-size: 12px; color: inherit; background: var(--ui-field); border: 1px solid var(--ui-line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 .th-panel button:hover { border-color: var(--ui-accent); }
+.th-panel button:disabled { opacity: .6; cursor: default; }
 .th-panel button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
 .th-panel .th-close { padding: 0 7px; font-size: 15px; line-height: 20px; border: 0; background: transparent; color: var(--ui-muted); }
 .th-panel .th-trash, .th-panel .th-stop { display: flex; align-items: center; padding: 3px 5px; border: 0; background: transparent; color: var(--ui-muted); }
@@ -182,10 +181,12 @@ ${MARKDOWN_CSS}
 .th-held { display: flex; gap: 6px; margin-top: 6px; }
 .th-panel .th-held button { font-size: 11px; padding: 2px 8px; }
 .th-compose { padding: 8px 12px; border-top: 1px solid var(--ui-line); }
+.th-compose[inert] { opacity: .6; }
 .th-smart { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); cursor: pointer; }
 .th-smart input { margin: 0; accent-color: var(--ui-accent); cursor: pointer; }
-.th-foot { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--ui-line); }
-.th-foot .th-confirm { flex: 1; font-size: 12px; }
+.th-foot { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--ui-line); }
+.th-foot .th-confirm { font-size: 12px; }
+.th-delete-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .th-foot .th-danger { border-color: color-mix(in srgb, var(--ui-err) 50%, transparent); color: var(--ui-err-text); }
 .th-foot .th-danger:hover { border-color: var(--ui-err); }
 .th-foot .spacer { flex: 1; }
@@ -226,7 +227,8 @@ export interface ThreadOverlayOpts {
 }
 
 export interface ThreadOverlay {
-  setThreads(threads: ThreadInfo[]): void;
+  setThreads(threads: ThreadInfo[], deleting?: string[], continuing?: string[], connected?: boolean): void;
+  showDeletePreview(result: PageThreadDeletePreview): void;
   setChangesStatus(status: PageChangesStatus): void;
   bubble(say: ThreadSay, ended: boolean, confirm?: BubbleConfirm): void;
   provisional(turnId: string, anchor?: ThreadAnchor): void;
@@ -284,11 +286,20 @@ export function markerPoint(
   return { x: r.x + rel(a.point.x, b.x, b.width) * r.width, y: r.y + rel(a.point.y, b.y, b.height) * r.height };
 }
 
-/** The panel's delete confirmation. */
-export function deleteConfirmText(state: ThreadState): string {
-  if (state === "queued") return "Delete this feedback? It won't be sent.";
-  return state === "running" ? "It's still working — stop it and delete?" : "Delete this thread? Its edits stay in the code.";
+const KEEP_DELETE = { label: "Delete, keep uncommitted", mode: "keep" } as const;
+
+/** The first action is the focused default. Queued feedback has no server preview. */
+export function deleteConfirmation(preview: ThreadDeletePreview | "queued"): { text: string; actions: { label: string; mode: ThreadDeleteMode }[] } {
+  if (preview === "queued") return { text: "Delete this feedback? It won't be sent.", actions: [{ label: "Delete", mode: "keep" }] };
+  switch (preview.state) {
+    case "none": return { text: preview.reason ?? "Delete this thread?", actions: [{ label: "Delete", mode: "keep" }] };
+    case "complete": return { text: preview.reason ?? "Delete this thread?", actions: [{ label: "Commit and delete", mode: "commit" }, KEEP_DELETE] };
+    case "incomplete": return { text: preview.reason ?? "The last task left unfinished changes.", actions: [KEEP_DELETE] };
+    case "working": return { text: "Its work will be stopped part-way and kept uncommitted.", actions: [{ label: "Stop and delete", mode: "keep" }] };
+  }
 }
+
+type DeleteConfirmation = { kind: "checking"; requestId: string } | { kind: "ready"; preview: ThreadDeletePreview | "queued" } | { kind: "error"; message: string };
 
 /** A finished thread (idle, pending) has no label: the marker's check says it. */
 export const STATE_LABEL: Record<ThreadState, string> = { running: "working", pending: "", idle: "", failed: "failed", queued: "not sent" };
@@ -408,7 +419,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   /** `view`: the viewport when it opened; the panel is placed against it, so it stays put as the page scrolls. */
   /** `threadId` null: the orb's panel (the conversation; no form). */
   let panel: {
-    threadId: string | null; root: HTMLElement; resize: HTMLElement; form: InlineForm | null; confirming: boolean; openDetails: Set<string>;
+    threadId: string | null; root: HTMLElement; resize: HTMLElement; form: InlineForm | null; confirming: DeleteConfirmation | null; openDetails: Set<string>;
     /** A resized or dragged panel keeps its chosen position relative to its marker until closed. */
     offset: { x: number; y: number; side: "above" | "below" } | null;
     /** Messages already shown: a new one is scrolled into view. */
@@ -422,6 +433,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   } | null = null;
   /** Asked to open before the thread arrived. */
   let pendingOpen: string | null = null;
+  let nextDeletePreview = 0;
+  let deleting = new Set<string>();
+  let continuing = new Set<string>();
+  let connected = true;
   /** The orb: `x`, `y` its center in viewport coords. `drag`: a press on it, a drag once it moved past DRAG_SLOP. */
   const orb = {
     btn: h("button", "th-orb"), state: "idle" as OrbState, pos: null as OrbPos | null, x: 0, y: 0,
@@ -562,7 +577,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     btn.dataset.tip = b ? "" : btn.dataset.tipText ?? "";
   }
 
-  function setThreads(threads: ThreadInfo[]): void {
+  function setThreads(threads: ThreadInfo[], deletingIds: string[] = [], continuingIds: string[] = [], online = true): void {
+    deleting = new Set(deletingIds);
+    continuing = new Set(continuingIds);
+    connected = online;
     const ids = new Set(threads.map((t) => t.threadId));
     for (const [id, m] of markers) {
       if (ids.has(id)) continue;
@@ -873,7 +891,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       // Open while the panel is: the panel is the focus, so talking dictates into it whether or not the field has focus.
       activateOnCreate: true,
     });
-    panel = { threadId, root, resize: panelResizeHandles(root), offset: null, form, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight } };
+    panel = { threadId, root, resize: panelResizeHandles(root), offset: null, form, confirming: null, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: scrollX, sy: scrollY, vw: innerWidth, vh: innerHeight } };
     const b = bubbleOf(threadId);
     if (b) collapse(b);
     renderPanel();
@@ -891,7 +909,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     root.setAttribute("aria-label", "Conversation");
     layer.append(root);
     panelDrag(root);
-    panel = { threadId: null, root, resize: panelResizeHandles(root), offset: null, form: null, confirming: false, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: 0, sy: 0, vw: innerWidth, vh: innerHeight } };
+    panel = { threadId: null, root, resize: panelResizeHandles(root), offset: null, form: null, confirming: null, openDetails: new Set(), seen: new Set(), goal: null, view: { sx: 0, sy: 0, vw: innerWidth, vh: innerHeight } };
     const b = bubbleOf(null);
     if (b) collapse(b);
     renderPanel();
@@ -944,22 +962,78 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     return row;
   }
 
-  /** Resume on an interrupted thread: a follow-up that continues its harness session. */
-  function resumeAction(threadId: string): HTMLElement {
-    const go = h("button", undefined, "Resume");
+  function continueAction(t: ThreadInfo): HTMLElement {
+    const pending = continuing.has(t.threadId);
+    const go = h("button", "th-continue", t.interrupted ? "Resume" : "Continue");
     go.type = "button";
-    go.dataset.tip = "Continue this task where it stopped (its session keeps what it already did)";
+    go.disabled = pending || deleting.has(t.threadId) || !connected || t.canContinue === false;
+    go.dataset.tip = pending ? "Starting the continuation…" : !connected ? "Server not connected"
+      : t.canContinue === false ? "The previous session is unavailable" : "Continue the unfinished request in its session";
     go.onclick = () => {
-      const m = markers.get(threadId);
-      const hit = m && opts.sampleAt(m.x - scrollX, m.y - scrollY);
-      if (!hit) return;
-      hit.sample.t += performance.timeOrigin; // crosses the bridge as epoch ms
-      go.disabled = true;
-      opts.forms.send(RESUME_TEXT, hit.sample, threadId);
+      opts.send({ type: "thread.continue", threadId: t.threadId });
     };
     const row = h("div", "th-held");
     row.append(go);
     return row;
+  }
+
+  function beginDeleteConfirm(t: ThreadInfo): void {
+    if (panel?.threadId !== t.threadId) return;
+    if (t.state === "queued") panel.confirming = { kind: "ready", preview: "queued" };
+    else {
+      const requestId = `${performance.timeOrigin}-${++nextDeletePreview}`;
+      panel.confirming = { kind: "checking", requestId };
+      opts.send({ type: "thread.delete.preview", threadId: t.threadId, requestId });
+    }
+    renderPanel();
+    panel.root.querySelector<HTMLButtonElement>(".th-delete-actions button")?.focus({ preventScroll: true });
+  }
+
+  function showDeletePreview(result: PageThreadDeletePreview): void {
+    if (panel?.threadId !== result.threadId || panel.confirming?.kind !== "checking" || panel.confirming.requestId !== result.requestId) return;
+    panel.confirming = "preview" in result ? { kind: "ready", preview: result.preview } : { kind: "error", message: result.error };
+    renderPanel();
+    panel.root.querySelector<HTMLButtonElement>(".th-delete-actions button")?.focus({ preventScroll: true });
+  }
+
+  function cancelDeleteConfirm(): void {
+    if (!panel) return;
+    panel.confirming = null;
+    renderPanel();
+    panel.root.querySelector<HTMLButtonElement>(".th-trash")?.focus({ preventScroll: true });
+  }
+
+  function renderDeleteConfirm(threadId: string, confirm: DeleteConfirmation): HTMLElement {
+    const foot = h("div", "th-foot");
+    foot.setAttribute("role", "alertdialog");
+    foot.setAttribute("aria-label", "Confirm deletion");
+    foot.setAttribute("aria-describedby", "th-delete-description");
+    const dialog = confirm.kind === "ready" ? deleteConfirmation(confirm.preview)
+      : { text: confirm.kind === "checking" ? "Checking thread changes…" : confirm.message, actions: [] };
+    const message = h("span", "th-confirm", dialog.text);
+    message.id = "th-delete-description";
+    if (confirm.kind !== "ready") message.setAttribute("role", "status");
+    const actions = h("div", "th-delete-actions");
+    for (const { label, mode } of dialog.actions) {
+      const button = h("button", "th-danger", label);
+      button.type = "button";
+      button.dataset.choice = mode;
+      button.disabled = deleting.has(threadId) || (confirm.kind === "ready" && confirm.preview !== "queued" && !connected);
+      button.onclick = () => {
+        if (panel?.threadId !== threadId) return;
+        opts.send({ type: "thread.delete", threadId, mode });
+        if (confirm.kind === "ready" && confirm.preview === "queued") closePanel();
+        else cancelDeleteConfirm();
+      };
+      actions.append(button);
+    }
+    const cancel = h("button", undefined, "Cancel");
+    cancel.type = "button";
+    cancel.dataset.choice = "cancel";
+    cancel.onclick = cancelDeleteConfirm;
+    actions.append(cancel);
+    foot.append(message, actions);
+    return foot;
   }
 
   /** A waiting comment's buttons (the sidebar acts on them). */
@@ -1022,6 +1096,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const t = p.threadId === null ? null : markers.get(p.threadId)?.thread;
     if (t === undefined) return closePanel();
     const scroll = p.root.querySelector(".th-body")?.scrollTop;
+    const active = (layer.getRootNode() as ShadowRoot | Document).activeElement as HTMLElement | null;
+    const deleteChoice = active?.closest(".th-foot") && active.dataset.choice;
     const close = h("button", "th-close", "×");
     close.type = "button";
     close.dataset.tip = "Close (Esc)";
@@ -1032,7 +1108,8 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     // The state chip and actions go on the session row when shown, otherwise in the header.
     const controls: HTMLElement[] = [];
     const look = t ? markerLook(t) : orb.state;
-    const chip = look === "asking" ? askingLabel(t) : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
+    const isDeleting = t ? deleting.has(t.threadId) : false;
+    const chip = isDeleting ? "deleting…" : look === "asking" ? askingLabel(t) : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
     if (chip) {
       const state = h("span", "th-state", chip);
       state.dataset.state = look;
@@ -1042,6 +1119,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       if (t.state === "running") {
         const stop = h("button", "th-stop");
         stop.type = "button";
+        stop.disabled = isDeleting || !connected;
         stop.innerHTML = ICON_STOP;
         stop.dataset.tip = "Stop execution; then send your next message";
         stop.setAttribute("aria-label", "Stop execution");
@@ -1053,7 +1131,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
         const reason = commitDisabledReason(t.threadId, changesStatus);
         const commit = h("button", "th-commit", "Commit");
         commit.type = "button";
-        commit.disabled = reason !== null;
+        commit.disabled = reason !== null || isDeleting;
         commit.dataset.tip = reason ?? "Review this thread's changes";
         if (reason !== null) commit.setAttribute("aria-label", `Commit unavailable. ${reason}`);
         commit.onclick = (event) => {
@@ -1064,9 +1142,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
       const del = h("button", "th-trash");
       del.type = "button";
       del.innerHTML = ICON_TRASH;
-      del.dataset.tip = t.state === "queued" ? "Delete this feedback (it won't be sent)" : "Delete this thread (its edits stay in the code)";
+      del.dataset.tip = t.state === "queued" ? "Delete this feedback" : isDeleting ? "Deleting this thread…" : !connected ? "Server not connected" : "Delete this thread";
       del.setAttribute("aria-label", "Delete");
-      del.onclick = () => { p.confirming = true; renderPanel(); p.root.querySelector<HTMLButtonElement>(".th-foot button")?.focus(); };
+      del.disabled = !!p.confirming || isDeleting || (t.state !== "queued" && !connected);
+      del.onclick = () => beginDeleteConfirm(t);
       controls.push(del);
     }
     const badge = showSession ? sessionBadge(t ? t.session : conversationSession, copyNativeSession, true) : null;
@@ -1101,10 +1180,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const pending = t.state === "queued" ? [] : queuedMessages(t.anchor.domPath);
     const waiting = held.filter((c) => c.threadId === t.threadId);
     if (t.messages.length || pending.length || waiting.length) {
-      const lastInterrupted = t.interrupted ? t.messages.findLast((m) => m.kind === "interrupted") : undefined;
+      const lastInterrupted = t.interrupted && t.state !== "running" ? t.messages.findLast((m) => m.kind === "interrupted") : undefined;
       for (const m of t.messages) {
         const row = renderMessage(m, p.openDetails);
-        if (m === lastInterrupted) row.append(resumeAction(t.threadId));
+        if (m === lastInterrupted) row.append(continueAction(t));
         note(m.id, row);
         body.append(row);
       }
@@ -1123,20 +1202,10 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
         body.append(row);
       }
     } else body.append(h("div", "th-empty", "Nothing here yet."));
+    if (t.state !== "running" && !t.interrupted && t.canContinue) body.append(continueAction(t));
 
     // The delete confirmation, right below the header's trash button.
-    const foot = h("div", "th-foot");
-    if (p.confirming) {
-      const yes = h("button", "th-danger", t.state === "running" ? "Stop and delete" : "Delete");
-      yes.type = "button";
-      yes.dataset.tip = t.state === "running" ? "Stop the running task and delete this thread" : "Delete this thread";
-      yes.onclick = () => { opts.send({ type: "thread.delete", threadId: t.threadId }); closePanel(); };
-      const no = h("button", undefined, "Cancel");
-      no.type = "button";
-      no.dataset.tip = "Keep this thread";
-      no.onclick = () => { p.confirming = false; renderPanel(); };
-      foot.append(h("span", "th-confirm", deleteConfirmText(t.state)), no, yes);
-    }
+    const foot = p.confirming && renderDeleteConfirm(t.threadId, p.confirming);
     // "Always use the smart model": the router only speaks for it (a spoken turn), a typed one goes straight to it.
     const smart = h("label", "th-smart");
     if (t.state !== "queued") {
@@ -1151,10 +1220,13 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const form = p.form!;
     const compose = form.root.parentElement ?? h("div", "th-compose");
     if (!compose.isConnected) { compose.append(form.root); p.root.append(compose); }
+    compose.inert = isDeleting;
     for (const c of [...p.root.children]) if (c !== compose && c !== p.resize) c.remove();
-    compose.before(head, ...(session ? [session] : []), ...(p.confirming ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
+    compose.before(head, ...(session ? [session] : []), ...(foot ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
     if (smart.childElementCount) compose.after(smart);
     if (!p.resize.isConnected) p.root.append(p.resize);
+    if (deleteChoice && foot) (foot.querySelector<HTMLButtonElement>(`[data-choice="${deleteChoice}"]:not(:disabled)`)
+      ?? foot.querySelector<HTMLButtonElement>("[data-choice=cancel]"))?.focus({ preventScroll: true });
     scrollBody(p, body, scroll, firstRender, fresh);
     placePanel();
   }
@@ -1194,6 +1266,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
    * would pick. Feedback not sent yet (Instant off) isn't on the server: what's typed there joins the list.
    */
   function followUp(threadId: string, text: string): void {
+    if (deleting.has(threadId)) return;
     const m = markers.get(threadId);
     const hit = m && opts.sampleAt(m.x - scrollX, m.y - scrollY);
     if (!hit || !panel?.form) return;
@@ -1217,13 +1290,26 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     }
   }
 
-  // Esc and clicks outside the overlay close the panel.
+  // Esc and clicks outside the overlay close the panel. While confirming, Esc returns to Delete.
   window.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !panel || drawingPreviewOpen()) return;
+    if (!panel || drawingPreviewOpen()) return;
+    if (panel.confirming && (e.key === "Tab" || e.key === "Enter")) {
+      const buttons = [...panel.root.querySelectorAll<HTMLButtonElement>(".th-delete-actions button:not(:disabled)")];
+      const focused = (layer.getRootNode() as ShadowRoot | Document).activeElement;
+      if (e.key === "Enter" && focused instanceof HTMLButtonElement && buttons.includes(focused)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) focused.click();
+      } else if (e.key === "Tab" && focused === (e.shiftKey ? buttons[0] : buttons.at(-1))) {
+        e.preventDefault();
+        (e.shiftKey ? buttons.at(-1) : buttons[0])?.focus();
+      }
+    }
+    if (e.key !== "Escape") return;
     if (panel.form && (layer.getRootNode() as ShadowRoot | Document).activeElement === panel.form.field) return; // the field's own handler
     e.preventDefault();
     e.stopPropagation();
-    if (panel.confirming) { panel.confirming = false; renderPanel(); } else closePanel();
+    if (panel.confirming) cancelDeleteConfirm(); else closePanel();
   }, true);
   window.addEventListener("pointerdown", (e) => {
     // Words typed in its form keep it open.
@@ -1356,6 +1442,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
 
   return {
     setThreads,
+    showDeletePreview,
     setChangesStatus,
     bubble,
     provisional,
