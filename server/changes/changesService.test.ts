@@ -215,20 +215,28 @@ it("claims a durable queued job only with the exact request and refuses duplicat
   expect(repo.git("rev-list", "--count", "HEAD").trim()).toBe("2");
 });
 
-it.each(["files", "reftable"] as const)("reattaches an independent pre-freeze patch reported during the %s pin", async (format) => {
+it.each([
+  { format: "files", exact: true },
+  { format: "reftable", exact: true },
+  { format: "files", exact: false },
+  { format: "reftable", exact: false },
+] as const)("keeps the original preimage proof for a held patch ($format, $exact)", async ({ format, exact }) => {
   const repo = await repository(format);
   await repo.edit("A", base, onlyA);
   const b = repo.queueWriter("B");
   const wrote = deferred();
   const report = deferred();
+  const changes = [{
+    path: join(repo.root, selectedPath),
+    patch: exact
+      ? "@@ -1,5 +1,5 @@\n ONE\n blank a\n two\n blank b\n-three\n+THREE\n"
+      : "@@ -5 +5 @@\n-three\n+THREE\n",
+  }];
   const run = b.run(async () => {
     repo.put(selectedPath, onlyA.replace("three", "THREE"));
     wrote.resolve();
     await report.promise;
-    b.edits("B", "delayed", [{
-      path: join(repo.root, selectedPath),
-      patch: "@@ -1,5 +1,5 @@\n ONE\n blank a\n two\n blank b\n-three\n+THREE\n",
-    }]);
+    b.edits("B", "delayed", changes);
   });
   await wrote.promise;
   const review = await repo.scanner.reviewProject(repo.project);
@@ -245,7 +253,13 @@ it.each(["files", "reftable"] as const)("reattaches an independent pre-freeze pa
   try {
     expect(await repo.service.commit(repo.project, requestFor(review), review.scanAndFreeze)).toMatchObject({ status: "done" });
     expect(repo.git("show", `HEAD:${selectedPath}`)).toBe(onlyA);
-    expect(gitOwners(await repo.ledger.observe(repo.project, [selectedPath]))).toEqual([[b.id]]);
+    expect(gitOwners(await repo.ledger.observe(repo.project, [selectedPath]))).toEqual([[exact ? b.id : null]]);
+    const receipt = await repo.ledger.ingest(repo.project, {
+      executionId: b.id, sessionId: "B", toolCallId: "delayed", outcome: "completed", changes,
+    });
+    expect(receipt.duplicate).toBe(true);
+    expect(receipt.results).toEqual([exact ? "applied" : "rejected"]);
+    if (!exact) expect(receipt.reason).toBe("Patch matches more than one recorded preimage");
   } finally {
     report.resolve();
     await run;
@@ -253,10 +267,12 @@ it.each(["files", "reftable"] as const)("reattaches an independent pre-freeze pa
 }, 90_000);
 
 it.each([
-  { format: "files", witness: true },
-  { format: "reftable", witness: true },
-  { format: "files", witness: false },
-] as const)("keeps an unexplained rollback Other and requires a disk witness ($format, $witness)", async ({ format, witness }) => {
+  { format: "files", witness: true, earlier: false },
+  { format: "reftable", witness: true, earlier: false },
+  { format: "files", witness: false, earlier: false },
+  { format: "files", witness: true, earlier: true },
+  { format: "reftable", witness: true, earlier: true },
+] as const)("keeps an unexplained rollback Other and requires a disk witness ($format, $witness, $earlier)", async ({ format, witness, earlier }) => {
   const repo = await repository(format);
   await repo.edit("A", base, onlyA);
   const review = await repo.scanner.reviewProject(repo.project);
@@ -267,6 +283,7 @@ it.each([
   repo.ledger.checkpointCommit = async (record, proof) => {
     await checkpoint(record, proof);
     if (record.phase !== "index-ready" || record.step !== "install") return;
+    if (earlier) await repo.edit("earlier", onlyA, withB);
     repo.put(selectedPath, base);
     b = await repo.edit("B", base, after, onDisk);
   };
@@ -331,8 +348,9 @@ const crashScript = String.raw`
   };
   const checkpoint = ledger.checkpointCommit.bind(ledger);
   ledger.checkpointCommit = async (record, proof) => {
-    await checkpoint(record, proof);
-    if (record.phase !== phase || record.step !== step) return;
+    const beforeSettlement = record.phase === phase && phase === "done";
+    if (!beforeSettlement) await checkpoint(record, proof);
+    if (!beforeSettlement && (record.phase !== phase || record.step !== step)) return;
     const writer = writers.queue({ writer: { kind: "thread", id: "held" }, title: "held", request: "Edit",
       folder: old, purpose: "request", harness: "codex" });
     await writer.run(async () => {
@@ -428,5 +446,27 @@ describe.each(["files", "reftable"] as const)("restart from durable %s checkpoin
     expect(readFileSync(join(repo.project.gitDir, "index"))).toEqual(index);
     expect(repo.git("rev-parse", "HEAD").trim()).toBe(advanced);
     await expect(restarted.ledger.trackedPaths(repo.project)).rejects.toThrow("branch tip changed");
+  }, 90_000);
+
+  it("settles ownership if the installed candidate index is intact after branch advancement", async () => {
+    const repo = await repository(format);
+    await repo.edit("A", base, onlyA);
+    await interrupt(repo, "done", "");
+    const indexPath = join(repo.project.gitDir, "index");
+    expect(existsSync(indexPath + ".lock")).toBe(false);
+    expect(repo.git("show", `:${selectedPath}`)).toBe(onlyA);
+    const published = repo.git("rev-parse", "HEAD").trim();
+    const advanced = repo.git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "External advance").trim();
+    repo.git("update-ref", "HEAD", advanced);
+    const index = readFileSync(indexPath);
+    const restarted = repo.connect();
+    expect(await restarted.service.jobs(repo.project.id)).toMatchObject([{
+      jobId: "interrupted", status: "done", commit: published, outcome: { index: "already-current" },
+    }]);
+    expect(readFileSync(indexPath)).toEqual(index);
+    expect(repo.git("rev-parse", "HEAD").trim()).toBe(advanced);
+    const writers = await restarted.writers.snapshot(repo.project.id);
+    const b = writers.executions.find(({ writer }) => writer.id === "held")?.executionId;
+    expect(gitOwners(await restarted.ledger.observe(repo.project, [selectedPath]))).toEqual([[b]]);
   }, 90_000);
 });

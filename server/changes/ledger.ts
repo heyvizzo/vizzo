@@ -403,14 +403,19 @@ function explainFrozenGaps(
 ): CommitOwnershipPlan {
   const selected = new Set(plan.paths.map(({ path }) => path));
   for (const [key, receipt] of Object.entries(state.receipts)) {
-    const head = receipt.held?.head;
-    if (!head || (!sameHead(head, state.head) && !sameHead(head, nextHead))) continue;
+    if (!receipt.held) continue;
+    const { head } = receipt.held;
+    if (!head || (!sameHead(head, state.head) && !sameHead(head, nextHead))) break;
     for (const { index, effects: [{ path, evidence }, second] } of receipt.pending) {
       if (second || !selected.has(path) || !acceptsHeldPath(state, receipt, path)) continue;
       const chain = structuredClone(state.files[fileKey(path)]!);
       const placement = place(chain, evidence, content);
-      if (!placement || typeof placement === "string" ||
-          (placement.rejoin === undefined && placement.reconnect === undefined)) continue;
+      if (placement === "ambiguous") {
+        setPendingResult(receipt, index, "rejected");
+        receipt.reason = "Patch matches more than one recorded preimage";
+        continue;
+      }
+      if (!placement || placement === "too-large" || (placement.rejoin === undefined && placement.reconnect === undefined)) continue;
       insert(chain, placement, { executionId: receipt.executionId, key: JSON.stringify([key, path]) });
       const verified = verifyLateCommitEdit(plan, path, chain, content);
       if (!verified) continue;
@@ -435,7 +440,7 @@ function reconnectHeldRollbacks(
       observe(current, endpoint);
       continue;
     }
-    if (!sameEntry(tip(current), tip(original))) continue;
+    if (!sameEntry(current.versions[0]!.entry, tip(original)) || sameEntry(tip(current), endpoint)) continue;
     const witness = structuredClone(original);
     observe(witness, endpoint);
     const placement = place(witness, evidence, content);
@@ -443,9 +448,10 @@ function reconnectHeldRollbacks(
         !sameEntry(placement.after, endpoint)) continue;
     const preimage = witness.versions[placement.from]!.entry;
     // The intervening return to the historical preimage is an unexplained gap.
-    current.versions.push({ entry: preimage });
+    if (!sameEntry(tip(current), preimage)) current.versions.push({ entry: preimage });
+    const from = current.versions.length - 1;
     observe(current, endpoint);
-    insert(current, { from: current.versions.length - 2, after: endpoint, rejoin: current.versions.length - 1 }, {
+    insert(current, { from, after: endpoint, rejoin: current.versions.length - 1 }, {
       executionId: receipt.executionId, key: JSON.stringify([key, path]),
     });
     setPendingResult(receipt, index, "applied");
@@ -456,24 +462,27 @@ function replayHeld(
   state: ProjectState, project: LedgerProject, before: LedgerHead, settled: LedgerHead,
   previous: ReadonlyMap<string, Chain>, content: Content,
 ): void {
+  let frozenHistory = previous;
   for (const [key, receipt] of Object.entries(state.receipts)) {
     const held = receipt.held;
     if (!held) continue;
     expire(state, held.receivedAt);
     delete receipt.held;
     if (!held.head) {
+      frozenHistory = new Map();
       for (const { index } of receipt.pending) setPendingResult(receipt, index, "expired");
       receipt.reason = "Git HEAD was unavailable when the edit arrived";
       continue;
     }
     const head = sameHead(before, held.head) ? settled : held.head;
     if (!sameHead(state.head, head)) {
+      frozenHistory = new Map();
       rebaseState(state, project, head, content);
       state.headMoved = true;
     }
     addReceiptPaths(state, receipt, content);
     if (held.observed && sameHead(state.head, settled)) {
-      reconnectHeldRollbacks(state, key, receipt, held.observed, previous, content);
+      reconnectHeldRollbacks(state, key, receipt, held.observed, frozenHistory, content);
     }
     applyPending(state, content);
     boundAll(state, content);
