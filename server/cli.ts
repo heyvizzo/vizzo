@@ -32,9 +32,15 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   if (opts.persist !== false) {
     const { threadStore } = await import("./threads/store.ts");
     const { threadsFile } = await import("./threads/persist.ts");
+    const { changesService } = await import("./changes/changesService.ts");
     const store = threadStore();
     store.persistTo(threadsFile());
-    for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => { store.flush(); process.exit(0); });
+    for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => {
+      store.flush();
+      void changesService().flush().catch((error) => console.warn("[changes] could not flush source-control state", error))
+        .finally(() => process.exit(0));
+    });
+    await changesService().restore().catch((error) => console.warn("[changes] could not recover source-control state", error));
   }
   try {
     await startServer(port, opts);

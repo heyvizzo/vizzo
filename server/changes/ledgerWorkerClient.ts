@@ -1,6 +1,9 @@
 import { Worker } from "node:worker_threads";
+import type { CommitOwnershipPlan, CommitOwnershipReceipt, PublishedBaseEvidence } from "./commitOwnership.ts";
+import type { CommitRecoveryCheckpoint, CommitRecoveryResult } from "./commitRecovery.ts";
+import type { CommitJournal, CommitRequest, CommitStart, FrozenCommitSelection } from "./commitTransaction.ts";
 import type { EditBatch } from "./evidence.ts";
-import type { BatchResult, LedgerStore, LedgerView } from "./ledger.ts";
+import type { BatchResult, CommitJobKey, CommitJobRecord, CommitJobSummary, LedgerStore, LedgerView } from "./ledger.ts";
 import type { LedgerProject, ProjectDiscovery } from "./project.ts";
 import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
@@ -10,7 +13,16 @@ type Request =
   | { method: "observe" | "compact"; project: LedgerProject; paths: readonly string[] }
   | { method: "pending" | "restoreWriters" }
   | { method: "saveWriter"; project: LedgerProject; execution: WriterExecutionRecord }
-  | { method: "writerSnapshot"; projectId: string };
+  | { method: "writerSnapshot"; projectId: string }
+  | { method: "trackedPaths"; project: LedgerProject }
+  | { method: "queueCommit"; project: LedgerProject; request: CommitRequest }
+  | { method: "beginCommit"; project: LedgerProject; start: CommitStart }
+  | { method: "pinCommit"; key: CommitJobKey; frozen: FrozenCommitSelection<CommitOwnershipReceipt> }
+  | { method: "checkpointCommit"; record: CommitJournal<CommitOwnershipPlan>; proof?: PublishedBaseEvidence }
+  | { method: "commitJob"; key: CommitJobKey }
+  | { method: "commitJobs"; projectId?: string }
+  | { method: "checkpointRecovery"; key: CommitJobKey; checkpoint: CommitRecoveryCheckpoint }
+  | { method: "finishRecovery"; key: CommitJobKey; outcome: Exclude<CommitRecoveryResult, { status: "skipped" }> };
 
 export type LedgerRequest = Request & { id: number };
 export type LedgerResponse = { id: number; result: unknown } | { id: number; error: string };
@@ -86,6 +98,42 @@ export class LedgerWorkerClient {
     return this.request({ method: "writerSnapshot", projectId });
   }
 
+  trackedPaths(project: LedgerProject): Promise<string[]> {
+    return this.request({ method: "trackedPaths", project });
+  }
+
+  queueCommit(project: LedgerProject, request: CommitRequest): Promise<boolean> {
+    return this.request({ method: "queueCommit", project, request });
+  }
+
+  beginCommit(project: LedgerProject, start: CommitStart): Promise<boolean> {
+    return this.request({ method: "beginCommit", project, start });
+  }
+
+  pinCommit(key: CommitJobKey, frozen: FrozenCommitSelection<CommitOwnershipReceipt>): Promise<CommitOwnershipPlan> {
+    return this.request({ method: "pinCommit", key, frozen });
+  }
+
+  checkpointCommit(record: CommitJournal<CommitOwnershipPlan>, proof?: PublishedBaseEvidence): Promise<void> {
+    return this.request({ method: "checkpointCommit", record, proof });
+  }
+
+  commitJob(key: CommitJobKey): Promise<CommitJobRecord | null> {
+    return this.request({ method: "commitJob", key });
+  }
+
+  commitJobs(projectId?: string): Promise<CommitJobSummary[]> {
+    return this.request({ method: "commitJobs", projectId });
+  }
+
+  checkpointRecovery(key: CommitJobKey, checkpoint: CommitRecoveryCheckpoint): Promise<void> {
+    return this.request({ method: "checkpointRecovery", key, checkpoint });
+  }
+
+  finishRecovery(key: CommitJobKey, outcome: Exclude<CommitRecoveryResult, { status: "skipped" }>): Promise<void> {
+    return this.request({ method: "finishRecovery", key, outcome });
+  }
+
   /** Also serves as a flush barrier for earlier requests, which are acknowledged after fsync. */
   pending(): Promise<ReturnType<LedgerStore["pending"]>> {
     return this.request({ method: "pending" });
@@ -96,3 +144,6 @@ export class LedgerWorkerClient {
     finally { await this.worker.terminate(); }
   }
 }
+
+let shared: LedgerWorkerClient | undefined;
+export function changesLedger(): LedgerWorkerClient { return shared ??= new LedgerWorkerClient(); }
