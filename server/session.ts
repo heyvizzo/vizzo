@@ -299,7 +299,7 @@ export class Session {
         this.send({ type: "thread.delete.done", requestId: msg.requestId });
         return;
       case "conversation.reset":
-        await deleteThreads(store, msg.threads ?? [], true, changes);
+        await deleteThreads(store, msg.threads, true, changes);
         store.broadcast({ type: "conversation.reset.done", requestId: msg.requestId });
     }
   }

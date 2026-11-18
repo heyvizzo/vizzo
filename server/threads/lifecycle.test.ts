@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 describe("deleting and restoring threads", () => {
-  it("preflights every pinned folder before reset and holds removal behind each stop", async () => {
+  it("preflights every pinned folder before reset and closes only after the ledger handoff", async () => {
     const oldProject = join(directory, "old");
     const nextProject = join(directory, "next");
     mkdirSync(oldProject);
@@ -38,18 +38,18 @@ describe("deleting and restoring threads", () => {
     setProjectDir(nextProject);
     const b = store.create(anchor, "new thread", "task");
     const closed = vi.fn();
-    let finishStop!: () => void;
-    const settled = new Promise<void>((resolve) => { finishStop = resolve; });
-    const stopped = vi.fn(() => settled);
+    let finishHandoff!: () => void;
+    const handoff = new Promise<void>((resolve) => { finishHandoff = resolve; });
+    const stopped = vi.fn();
     store.get(b.threadId)!.run = { stop: closed, stopForDeletion: stopped, working: true };
     const prepareReset = vi.spyOn(store, "prepareReset");
     const clear = vi.spyOn(store, "clearConversation");
-    const choices = [{ threadId: a.threadId, mode: "commit" as const }];
+    const choices = [{ threadId: b.threadId, mode: "keep" as const }, { threadId: a.threadId, mode: "commit" as const }];
     const service: DeleteService = {
       previewThreadDeletes: vi.fn(),
       deleteThreads: vi.fn<DeleteService["deleteThreads"]>(async (targets, _ports) => {
         expect(targets.map(({ folder, mode }) => ({ folder, mode }))).toEqual([
-          { folder: oldProject, mode: "commit" }, { folder: nextProject, mode: "keep" },
+          { folder: nextProject, mode: "keep" }, { folder: oldProject, mode: "commit" },
         ]);
         throw new Error("Review the other project again");
       }),
@@ -63,6 +63,7 @@ describe("deleting and restoring threads", () => {
     service.deleteThreads = vi.fn<DeleteService["deleteThreads"]>(async (targets, ports) => {
       await ports.prepare?.();
       await ports.stop(b.threadId);
+      await handoff;
       await ports.remove(targets.map(({ threadId }) => threadId));
       expect(loadThreads(file)).toEqual([]);
       return [];
@@ -73,13 +74,36 @@ describe("deleting and restoring threads", () => {
     expect(closed).not.toHaveBeenCalled();
     expect(store.blocksRun(a.threadId)).toBe(true);
     await expect(deleteThreads(store, choices, false, service)).rejects.toThrow("still in progress");
-    finishStop();
+    finishHandoff();
     await deletion;
     await deleteThreads(store, choices, false, service); // a retry sees no live thread
     expect(service.deleteThreads).toHaveBeenCalledOnce();
     expect(closed).toHaveBeenCalledOnce();
     expect(clear).toHaveBeenCalledOnce();
     store.flush();
+  });
+
+  it("refuses a reset that never reviewed a newly arrived thread, including during preflight", async () => {
+    setProjectDir(directory);
+    const store = new ThreadStore();
+    const a = store.create(anchor, "reviewed", "task");
+    const choices = [{ threadId: a.threadId, mode: "commit" as const }];
+    const cancel = vi.spyOn(store, "prepareReset");
+    const service = {
+      previewThreadDeletes: vi.fn(),
+      deleteThreads: vi.fn<DeleteService["deleteThreads"]>(async (targets, ports) => {
+        expect(targets.map(({ threadId }) => threadId)).toEqual([a.threadId]);
+        store.create(anchor, "arrived during review", "task");
+        await ports.prepare?.();
+        throw new Error("Unexpected reset");
+      }),
+    };
+    await expect(deleteThreads(store, choices, true, service)).rejects.toThrow("The thread list changed");
+    await expect(deleteThreads(store, choices, true, service)).rejects.toThrow("The thread list changed");
+    await expect(deleteThreads(store, [], true, service)).rejects.toThrow("The thread list changed");
+    expect(service.deleteThreads).toHaveBeenCalledOnce();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(store.list()).toHaveLength(2);
   });
 
   it("keeps a failed handoff blocked and finishes it before restoring threads at startup", async () => {
@@ -112,10 +136,9 @@ describe("deleting and restoring threads", () => {
     expect(completeThreadDeletes).toHaveBeenCalledWith([closed]);
   });
 
-  it.each(["restore", "pendingThreadDeletes"] as const)("retains saved nonrepository threads when %s is unavailable", async (fail) => {
+  it.each(["restore", "pendingThreadDeletes"] as const)("retains folderless and newly created nonrepository threads when %s is unavailable", async (fail) => {
     const first = new ThreadStore();
     first.persistTo(file);
-    setProjectDir(directory);
     const saved = first.create(anchor, "saved", "task");
     first.flush();
     const startup = { restore: vi.fn(async () => {}), pendingThreadDeletes: vi.fn(async () => []), completeThreadDeletes: vi.fn() };
@@ -123,9 +146,13 @@ describe("deleting and restoring threads", () => {
     const store = new ThreadStore();
     await restoreThreadLifecycle(file, startup, store);
     expect(store.info(saved.threadId)).toBeDefined();
+    setProjectDir(directory);
+    const untracked = store.create(anchor, "new untracked thread", "task");
     const service = { previewThreadDeletes: vi.fn(), deleteThreads: vi.fn() };
-    expect(await previewThreadDeletes(store, [saved.threadId], service)).toMatchObject([{ state: "none", defaultMode: "keep" }]);
-    await deleteThreads(store, [{ threadId: saved.threadId, mode: "commit" }], false, service);
+    expect(await previewThreadDeletes(store, [saved.threadId, untracked.threadId], service)).toMatchObject([
+      { state: "none", defaultMode: "keep" }, { state: "none", defaultMode: "keep" },
+    ]);
+    await deleteThreads(store, [saved, untracked].map(({ threadId }) => ({ threadId, mode: "commit" })), false, service);
     expect(service.previewThreadDeletes).not.toHaveBeenCalled();
     expect(service.deleteThreads).not.toHaveBeenCalled();
     expect(loadThreads(file)).toEqual([]);

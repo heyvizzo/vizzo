@@ -181,28 +181,28 @@ class ThreadRunner implements ThreadRunState {
   stop(): void {
     this.stopped = true;
     for (const q of this.queue.splice(0)) { q.execution.cancelQueued(); q.resolve(null); }
-    if (this.current) {
+    const h = this.rec.handle; // the record may already be gone from the store (delete)
+    if (this.current && !this.current.abortedBy) {
       this.current.abortedBy = "stop";
       this.current.q.execution.stopping();
+      try { h?.abort(); } catch { /* ignore */ }
     }
-    const h = this.rec.handle; // the record may already be gone from the store (delete)
-    try { h?.abort(); } catch { /* ignore */ }
     try { h?.close(); } catch { /* ignore */ }
   }
 
-  async stopForDeletion(): Promise<void> {
+  stopForDeletion(): void {
     const dropped = this.queue.splice(0);
     for (const q of dropped) { q.execution.cancelQueued(); q.resolve(null); }
     const cur = this.current;
     if (cur && !cur.abortedBy) {
       cur.abortedBy = "user";
       cur.q.execution.stopping();
-      this.rec.handle?.abort();
+      try { this.rec.handle?.abort(); } catch { /* the writer remains settling until the harness confirms */ }
     }
     if (cur || dropped.length) {
       this.store.update(this.threadId, (t) => { t.state = "idle"; t.awaitingReply = false; });
     }
-    await Promise.all([...this.settling].map((execution) => execution.awaitStop()));
+    // The ledger retains the stopped writer and its late edit evidence even after the thread is closed.
   }
 
   private next(): void {
