@@ -434,7 +434,7 @@ export class Session {
 
 /** A continuation uses the saved harness and the sidebar's current speech and tracing preferences. */
 function continuationConfig(sent?: RunConfig): RunConfig {
-  const config = { ...DEFAULT_CONFIG };
+  const config = { ...DEFAULT_CONFIG, llm: llmOf(sent ?? DEFAULT_CONFIG) };
   if (sent?.ttsModel && Object.hasOwn(TTS_LABELS, sent.ttsModel)) config.ttsModel = sent.ttsModel;
   if (typeof sent?.ttsVoice === "string") config.ttsVoice = sent.ttsVoice;
   if (typeof sent?.ttsStyle?.direction === "string" && Number.isFinite(sent.ttsStyle.speed) && Number.isFinite(sent.ttsStyle.volume)) config.ttsStyle = sent.ttsStyle;

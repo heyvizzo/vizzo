@@ -155,4 +155,21 @@ describe("Session + element threads", () => {
       ws.emit("close");
     }
   });
+
+  it("uses the current smart harness when an interrupted legacy thread had no saved choice", async () => {
+    const store = resetThreadStore();
+    const info = store.create(anchor, "the red button", "task");
+    store.update(info.threadId, (thread) => { thread.interrupted = true; });
+    const deps = createFakeDeps(FAST_TIMING, DEFAULT_SCENARIO);
+    const openThread = vi.fn(deps.openThread!);
+    const settings = { provider: "codex", model: "my-codex-model" } as const;
+    const ws = new FakeWs();
+    try {
+      new Session(ws as unknown as WebSocket, { persist: false, threadDeps: { ...deps, openThread } });
+      ws.client({ type: "thread.continue", threadId: info.threadId, config: { ...DEFAULT_CONFIG, silent: true, llm: { ...DEFAULT_CONFIG.llm, smart: settings } } });
+      await vi.waitFor(() => expect(store.info(info.threadId)?.messages.some(({ kind }) => kind === "result")).toBe(true));
+      expect(openThread).toHaveBeenCalledOnce();
+      expect(openThread).toHaveBeenCalledWith(expect.objectContaining({ choice: settings }));
+    } finally { ws.emit("close"); }
+  });
 });
