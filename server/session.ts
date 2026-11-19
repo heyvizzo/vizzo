@@ -65,6 +65,8 @@ export interface SessionOpts {
   persist?: boolean;
   /** Supplied only to a local Vizzo session. */
   changes?: Pick<ChangesService, "previewThreadDeletes" | "deleteThreads">;
+  /** Null while Git UI is disabled. A revision change invalidates work still waiting to hand off. */
+  sourceControlRevision?: () => number | null;
   threadDeps?: Pick<OrchestratorDeps, "openThread" | "solveInThread" | "openTts" | "voiceId">;
 }
 
@@ -283,24 +285,35 @@ export class Session {
   }
 
   private async threadAction(msg: Extract<ClientMsg, { type: "conversation.reset" | "thread.delete" | "threads.delete" | "thread.delete.preview" | "thread.continue" }>): Promise<void> {
+    if (msg.type === "thread.continue") return this.continueThread(msg);
     const store = threadStore();
-    const { changes } = this.opts;
+    const { changes, sourceControlRevision } = this.opts;
+    const revision = sourceControlRevision?.();
+    const isCurrent = () => revision !== null && sourceControlRevision?.() === revision;
+    const verifyCommit = () => {
+      if (!isCurrent()) throw new Error("Review the deletion again.");
+    };
     switch (msg.type) {
       case "thread.delete.preview": {
-        const threads = await previewThreadDeletes(store, msg.threadIds, changes);
+        const threads = await previewThreadDeletes(store, msg.threadIds, changes, isCurrent);
         this.send({ type: "thread.delete.preview", requestId: msg.requestId, threads });
         return;
       }
-      case "thread.continue":
-        return this.continueThread(msg);
       case "thread.delete":
       case "threads.delete":
-        await deleteThreads(store, msg.type === "thread.delete" ? [msg] : msg.threads, false, changes);
-        this.send({ type: "thread.delete.done", requestId: msg.requestId });
-        return;
-      case "conversation.reset":
-        await deleteThreads(store, msg.threads, true, changes);
-        store.broadcast({ type: "conversation.reset.done", requestId: msg.requestId });
+      case "conversation.reset": {
+        const choices = msg.type === "thread.delete" ? [msg] : msg.threads;
+        const reset = msg.type === "conversation.reset";
+        const enforceGate = choices?.some(({ mode }) => mode === "commit") ? verifyCommit : undefined;
+        try {
+          await deleteThreads(store, choices, reset, changes, enforceGate);
+        } catch (error) {
+          if (sourceControlRevision?.() === null && !enforceGate) throw new Error("Could not finish deleting the threads. Please try again.");
+          throw error;
+        }
+        if (reset) store.broadcast({ type: "conversation.reset.done", requestId: msg.requestId });
+        else this.send({ type: "thread.delete.done", requestId: msg.requestId });
+      }
     }
   }
 

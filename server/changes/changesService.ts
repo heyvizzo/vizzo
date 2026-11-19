@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { ChangeComponent } from "../../shared/changes.ts";
+import { threadStore } from "../threads/store.ts";
 import type { CommitOwnershipPlan, CommitOwnershipReceipt, PublishedBaseEvidence } from "./commitOwnership.ts";
 import { recoverCommit, type CommitRecoveryJournal, type CommitRecoveryPorts, type CommitRecoveryResult } from "./commitRecovery.ts";
 import { runCommitTransaction, type CommitContext, type CommitJournal, type CommitRequest, type CommitResult,
@@ -12,6 +14,7 @@ import { GitPublicationError } from "./gitPublication.ts";
 import type { GitEntryChange } from "./gitTree.ts";
 import type { CommitJobKey, CommitJobRecord, CommitJobSummary } from "./ledger.ts";
 import { changesLedger, type LedgerWorkerClient } from "./ledgerWorkerClient.ts";
+import { closedMessageContext, threadMessageContext, type CommitContextMessage } from "./messageContext.ts";
 import type { LedgerProject } from "./project.ts";
 import { REVIEW_AGAIN, ScanRuntime, type ScanLedgerSource, type ScanWriterSource } from "./scanRuntime.ts";
 import { writerRegistry, type WriterId, type WriterRegistry } from "./writers.ts";
@@ -296,6 +299,24 @@ export class ChangesService {
 
   writerSnapshot(projectId: string): ReturnType<ScanWriterSource["snapshot"]> {
     return this.writers.snapshot(projectId);
+  }
+
+  async threadMessageContexts(project: LedgerProject, components: readonly ChangeComponent[]) {
+    const ids = new Set(components.flatMap(({ writers }) => writers.flatMap(({ kind, id }) => kind === "thread" ? [id] : [])));
+    const contexts = new Map<string, readonly CommitContextMessage[]>();
+    for (const id of ids) {
+      const thread = threadStore().info(id);
+      if (thread) {
+        contexts.set(id, threadMessageContext(thread.messages));
+        ids.delete(id);
+      }
+    }
+    if (ids.size) {
+      for (const group of await this.ledger.closedThreads(project)) {
+        if (ids.has(group.threadId)) contexts.set(group.threadId, closedMessageContext(group));
+      }
+    }
+    return contexts;
   }
 
   async fix(projectId: string, jobId: string, isCurrent?: () => boolean): Promise<CommitRecoveryResult> {

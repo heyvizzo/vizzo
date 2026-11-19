@@ -41,7 +41,8 @@ function commitRequest(review: ScanReview, components: readonly ChangeComponent[
 
 /** Each job freezes its own selection under Git's locks and may only follow a proven publication from this request. */
 export async function commitReviewedChanges(service: ChangesService, reviewed: ScanReview,
-  selected: readonly ChangeComponent[], message: string, separately: boolean, scopeThreadId?: string): Promise<ChangesCommitResult> {
+  selected: readonly ChangeComponent[], message: string, separately: boolean, scopeThreadId?: string,
+  isEnabled: () => boolean = () => true): Promise<ChangesCommitResult> {
   let batches = separately ? separate(reviewed.view, selected, scopeThreadId) : [selected.map(({ id }) => id)];
   let review = reviewed;
   const commits: string[] = [];
@@ -57,7 +58,7 @@ export async function commitReviewedChanges(service: ChangesService, reviewed: S
         const frozen = await review.scanAndFreeze(context);
         receipt = frozen?.ownership;
         return frozen;
-      }, review.isProjectCurrent);
+      }, () => isEnabled() && review.isProjectCurrent());
       if (result.status === "done" || result.status === "repair-needed") commits.push(result.commit);
       if (result.status !== "done") return refused(result.reason);
       if (!remaining.length) return { commits };

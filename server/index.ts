@@ -6,6 +6,7 @@ import { warmStatus } from "./adapters/warmPool.ts";
 import type { Orchestrator } from "./orchestrators/types.ts";
 import type { RunConfig } from "../shared/config.ts";
 import type { ServerMsg } from "../shared/protocol.ts";
+import { readChangesPreferences } from "../electron/settings.ts";
 import { changesService } from "./changes/changesService.ts";
 import { changeRoutes, isLocalChangesRequest, subscribeChangesStatus, type ChangesHttpOptions } from "./changes/http.ts";
 import { projectFile, watchProject } from "./project.ts";
@@ -22,16 +23,29 @@ export interface StartServerOpts {
   host?: string;
   /** Source-control service and native provider overrides used by the HTTP integration tests. */
   changes?: ChangesHttpOptions;
+  /** Read the current source-control preference. Electron and the CLI use the saved desktop preference. */
+  sourceControlEnabled?: () => boolean;
   threadDeps?: SessionOpts["threadDeps"];
 }
 
-export interface RunningServer { port: number; close(): Promise<void> }
+export interface RunningServer { port: number; refreshSourceControl(): void; close(): Promise<void> }
 
 /** Start the HTTP + /ws server. Port 0 picks a free port. */
 export function startServer(port: number, opts: StartServerOpts = {}): Promise<RunningServer> {
   const log = opts.quiet ? () => {} : (...a: unknown[]) => console.log(...a);
   const changes = opts.changes?.service ?? changesService();
   const handleChanges = changeRoutes(changes, opts.changes);
+  const readSourceControlEnabled = opts.sourceControlEnabled ?? (() => readChangesPreferences().gitSourceControl);
+  let sourceControlEnabled = readSourceControlEnabled();
+  let revision = 0;
+  const sourceControlRevision = (): number | null => {
+    const enabled = readSourceControlEnabled();
+    if (enabled !== sourceControlEnabled) {
+      sourceControlEnabled = enabled;
+      revision++;
+    }
+    return enabled ? revision : null;
+  };
   // Open event streams (one per browser tab) that get a line whenever a demo file is saved.
   const streams = new Set<ServerResponse>();
   const stopWatch = watchProject((file) => {
@@ -39,7 +53,10 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
   });
   const http = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (url.pathname === "/api/changes" || url.pathname.startsWith("/api/changes/")) return handleChanges(req, res, url);
+    if (url.pathname === "/api/changes" || url.pathname.startsWith("/api/changes/")) {
+      const start = sourceControlRevision();
+      return handleChanges(req, res, url, () => start !== null && sourceControlRevision() === start);
+    }
     if (req.method === "POST" && (url.pathname === "/api/sessions/release" || url.pathname === "/api/sessions/continue")) {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -222,7 +239,9 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
 
   const wss = new WebSocketServer({ server: http, path: "/ws" });
   const changesClients = new Set<WebSocket>();
+  const changesWatchers = new Set<WebSocket>();
   const unsubscribeChanges = subscribeChangesStatus(changes, (status) => {
+    if (sourceControlRevision() === null) return;
     const event: ServerMsg = status.kind === "ready"
       ? { type: "changes.updated", project: status.project, generation: status.generation }
       : { type: "changes.status", status };
@@ -236,9 +255,14 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
     const watcher = new URL(req.url ?? "/", "http://localhost").searchParams.get("view") === "changes";
     const local = isLocalChangesRequest(req);
     if (watcher && !local) { ws.close(1008, "Source control requires the local Vizzo window"); return; }
-    if (!watcher) new Session(ws, { orchestrators: opts.orchestrators, persist: opts.persist, threadDeps: opts.threadDeps, changes: local ? changes : undefined });
+    if (watcher && sourceControlRevision() === null) { ws.close(1008, "Git source control is disabled"); return; }
+    if (watcher) changesWatchers.add(ws);
+    else new Session(ws, {
+      orchestrators: opts.orchestrators, persist: opts.persist, threadDeps: opts.threadDeps,
+      changes: local ? changes : undefined, sourceControlRevision,
+    });
     if (local) changesClients.add(ws);
-    ws.on("close", () => { changesClients.delete(ws); log("[ws] closed"); });
+    ws.on("close", () => { changesClients.delete(ws); changesWatchers.delete(ws); log("[ws] closed"); });
   });
 
   return new Promise((resolve, reject) => {
@@ -256,6 +280,14 @@ export function startServer(port: number, opts: StartServerOpts = {}): Promise<R
       watchMemory();
       resolve({
         port: actual,
+        refreshSourceControl: () => {
+          // A disable/re-enable can occur between server requests. Main reports every saved toggle.
+          revision++;
+          for (const ws of changesWatchers) {
+            changesClients.delete(ws);
+            ws.close(1008, "Git source control preference changed");
+          }
+        },
         close: () => new Promise<void>((res) => {
           for (const c of wss.clients) c.terminate();
           for (const r of streams) r.end();

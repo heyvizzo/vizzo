@@ -66,6 +66,8 @@ export interface AgentSpec {
   speed?: LlmSpeed;
   /** What it loads besides its file tools; left out = every toggle at its default. */
   toggles?: HarnessToggles;
+  /** Commit drafting must not inherit harness tools or use its normal chat agent. */
+  commitMessage?: boolean;
   system: string;
   /** The solver's project folder, worked in with file tools. Omitted: an empty folder, no tools. */
   project?: string;
@@ -225,7 +227,7 @@ const binOrThrow = (id: HarnessId): string => {
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-const on = (spec: AgentSpec, id: HarnessToggleId): boolean => toggleOn(spec.harness, spec.toggles, id, ROLE_TIER[spec.role]);
+const on = (spec: AgentSpec, id: HarnessToggleId): boolean => !spec.commitMessage && toggleOn(spec.harness, spec.toggles, id, ROLE_TIER[spec.role]);
 /**
  * The solver in a project runs as the harness itself: its own system prompt with ours appended, and its own tools
  * minus what the toggles switch off and what can't work with nobody at the keyboard. Everything else (router,
@@ -533,6 +535,7 @@ export function grokArgs(spec: AgentSpec, user: string, session?: { id: string; 
     ...(tools
       ? [...(starts ? ["--rules", spec.system] : []), ...(spec.project ? ["--cwd", spec.project] : []), ...(native(spec) ? [] : ["--max-turns", "40"])]
       : [...(starts ? ["--system-prompt-override", spec.system] : []), "--max-turns", "1"]),
+    ...(spec.commitMessage ? ["--tools="] : []),
     `--disallowed-tools=${disallowed.join(",")}`,
   ];
 }
@@ -1184,14 +1187,22 @@ const opencodeTools = (spec: AgentSpec): string[] => [
   ...Object.entries(OPENCODE_TOGGLE_TOOLS).flatMap(([id, tools]) => (on(spec, id as HarnessToggleId) ? tools : [])),
 ];
 /** What a server loads is set when it starts: one server per such setup (plugins off = --pure). */
-interface OpencodeSetup { pure: boolean; env: Record<string, string> }
+interface OpencodeSetup { pure: boolean; env: Record<string, string>; config?: string }
+const OPENCODE_COMMIT_AGENT = "vizzo-commit-message";
 export function opencodeSetup(spec: AgentSpec): OpencodeSetup {
   return {
     pure: !on(spec, "plugins"),
     env: {
       ...(on(spec, "skills") ? {} : { OPENCODE_DISABLE_EXTERNAL_SKILLS: "true", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "true" }),
       ...(on(spec, "instructions") ? {} : { OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: "true" }),
+      ...(spec.commitMessage && {
+        OPENCODE_DISABLE_PROJECT_CONFIG: "true", OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+      }),
     },
+    ...(spec.commitMessage && { config: JSON.stringify({
+      agent: { [OPENCODE_COMMIT_AGENT]: { mode: "primary", permission: { "*": "deny" }, steps: 1 } },
+      share: "disabled",
+    }) }),
   };
 }
 /** Yolo: allow everything opencode would otherwise ask about. */
@@ -1258,7 +1269,7 @@ class OpencodeServer {
       }
       const native = this.native = new NativeHarnessProcess(
         binOrThrow("opencode"), ["serve", "--hostname", "127.0.0.1", "--port", String(port), ...(setup.pure ? ["--pure"] : [])],
-        EMPTY_CWD, { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: OPENCODE_CONFIG,
+        EMPTY_CWD, { ...process.env, ...setup.env, OPENCODE_CONFIG_CONTENT: setup.config ?? OPENCODE_CONFIG,
           OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: this.password },
       );
       const { proc } = native;
@@ -1399,7 +1410,7 @@ class OpencodeAgent implements WarmAgent {
     const open = (): Promise<unknown> =>
       start?.kind === "resume" ? this.server.api(`/session/${start.ref.id}`, this.dir, { method: "GET" })
         : start?.kind === "fork" ? this.server.api(`/session/${start.ref.id}/fork`, this.dir, { method: "POST", body: {} })
-          : this.server.api("/session", this.dir, { method: "POST", body: {} });
+          : this.server.api("/session", this.dir, { method: "POST", body: spec.commitMessage ? { title: "Vizzo commit message" } : {} });
     this.sessionP = this.server.watch(this.dir).then(open).then((s) => (this.sessionId = (s as { id: string }).id));
     this.sessionP.catch(() => { this.failed = true; });
   }
@@ -1516,7 +1527,9 @@ class OpencodeAgent implements WarmAgent {
         ...(slash > 0 ? { model: { providerID: this.spec.model.slice(0, slash), modelID: this.spec.model.slice(slash + 1) } } : {}),
         ...(this.spec.level ? { variant: this.spec.level } : {}),
         system: this.spec.system,
-        tools: Object.fromEntries(OPENCODE_TOOLS.map((t) => [t, allowed.includes(t)])),
+        // OpenCode converts this map to session permissions. The wildcard also denies unknown and MCP tools.
+        ...(this.spec.commitMessage ? { agent: OPENCODE_COMMIT_AGENT, tools: { "*": false } }
+          : { tools: Object.fromEntries(OPENCODE_TOOLS.map((t) => [t, allowed.includes(t)])) }),
         parts: opencodeParts(user, annotations),
       },
     }).then((result) => {
@@ -1619,7 +1632,7 @@ export function describeAgent(spec: AgentSpec): string {
     case "opencode": {
       const setup = opencodeSetup(spec);
       const env = Object.keys(setup.env).map((k) => `${k}=true `).join("");
-      return `${env}opencode serve${setup.pure ? " --pure" : ""} · POST /session/:id/message { model: ${spec.model || "default"}, variant: ${spec.level ?? "default"}, system, tools: ${opencodeTools(spec).join(",") || "none"} } · permissions: allow all`;
+      return `${env}opencode serve${setup.pure ? " --pure" : ""} · POST /session/:id/message { model: ${spec.model || "default"}, variant: ${spec.level ?? "default"}, system, tools: ${opencodeTools(spec).join(",") || "none"} } · permissions: ${spec.commitMessage ? "deny all" : "allow all"}`;
     }
   }
 }

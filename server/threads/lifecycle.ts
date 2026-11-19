@@ -1,6 +1,7 @@
 import type { ThreadDeleteChoice, ThreadDeletePreview } from "../../shared/threads.ts";
 import { changesService, type ChangesService } from "../changes/changesService.ts";
 import type { ThreadDeleteTarget, ThreadDeletePreview as DeleteReceipt } from "../changes/deleteFlows.ts";
+import { threadMessageContext } from "../changes/messageContext.ts";
 import { discoverLedgerProject } from "../changes/project.ts";
 import { threadStore, type ThreadRecord, type ThreadStore } from "./store.ts";
 
@@ -16,6 +17,7 @@ export function threadDeleteTarget(record: ThreadRecord, mode: ThreadDeleteChoic
   return {
     threadId: info.threadId, title: info.title, folder, mode, working: record.run?.working === true || info.state === "running",
     requests: info.messages.filter(({ role }) => role === "user").map(({ text }) => text), summary: info.summary,
+    messageContext: threadMessageContext(info.messages),
     interruptedExecutionId: info.interrupted ? record.activeRequest?.executionId : undefined,
   };
 }
@@ -33,21 +35,35 @@ function legacyPreflight(targets: readonly ThreadDeleteTarget[]): DeleteReceipt[
 }
 
 export async function previewThreadDeletes(
-  store: ThreadStore, threadIds: readonly string[], changes?: DeleteService,
+  store: ThreadStore, threadIds: readonly string[], changes?: DeleteService, isEnabled: () => boolean = () => true,
 ): Promise<ThreadDeletePreview[]> {
+  const generic = (): ThreadDeletePreview[] => threadIds.map((threadId) => {
+    const record = store.get(threadId);
+    return { threadId, state: record && threadDeleteTarget(record).working ? "working" : "none", defaultMode: "keep" };
+  });
+  if (!isEnabled()) return generic();
   if (!store.sourceControlAvailable) changes = undefined;
   const targets = threadIds.flatMap((id) => {
     const record = store.get(id);
     return record ? [threadDeleteTarget(record)] : [];
   });
-  const receipts = changes && targets.some(({ folder }) => folder) ? await changes.previewThreadDeletes(targets) : legacyPreflight(targets);
+  let receipts: DeleteReceipt[];
+  try {
+    receipts = changes && targets.some(({ folder }) => folder) ? await changes.previewThreadDeletes(targets) : legacyPreflight(targets);
+  } catch (error) {
+    if (!isEnabled()) return generic();
+    throw error;
+  }
+  if (!isEnabled()) return generic();
   for (const receipt of receipts) applyCompletion(store, receipt);
   const byId = new Map(receipts.map(({ threadId, state, reason, defaultMode, owned, willCommit }) =>
     [threadId, { threadId, state, reason, defaultMode, owned, willCommit }]));
   return threadIds.map((threadId) => byId.get(threadId) ?? { threadId, state: "none", defaultMode: "keep" });
 }
 
-export async function deleteThreads(store: ThreadStore, choices: readonly ThreadDeleteChoice[] | undefined, reset: boolean, changes?: DeleteService): Promise<void> {
+export async function deleteThreads(
+  store: ThreadStore, choices: readonly ThreadDeleteChoice[] | undefined, reset: boolean, changes?: DeleteService, verifyCommit?: () => void,
+): Promise<void> {
   if (!store.sourceControlAvailable) changes = undefined;
   const modes = new Map(choices?.map(({ threadId, mode }) => [threadId, mode]));
   const ids = reset && choices === undefined ? store.list().map(({ threadId }) => threadId) : [...modes.keys()];
@@ -58,6 +74,7 @@ export async function deleteThreads(store: ThreadStore, choices: readonly Thread
       throw new Error("The thread list changed. Review it before starting a new conversation.");
     }
   };
+  verifyCommit?.();
   if (reset) verifyReset();
   const targets = ids.flatMap((threadId) => {
     const record = store.get(threadId);
@@ -73,6 +90,7 @@ export async function deleteThreads(store: ThreadStore, choices: readonly Thread
     if (changes && targets.some(({ folder }) => folder)) {
       await changes.deleteThreads(targets, {
         prepare,
+        verifyCommit,
         stop: (threadId) => store.stopForDeletion(threadId),
         remove: (threadIds) => store.removeDurably(threadIds),
       });

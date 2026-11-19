@@ -17,7 +17,7 @@ import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { CookieReadError, chromeSafeStoragePassword, readBrowserCookies, toElectronCookie, type BrowserId, type ElectronCookie } from "./cookies.ts";
-import { applyEnv, ENV_FIELDS, SECRET_KEYS, sanitizeEnv } from "./settings.ts";
+import { applyEnv, ENV_FIELDS, readChangesPreferences, SECRET_KEYS, sanitizeEnv } from "./settings.ts";
 import { editInstructions, instructionSnapshot } from "./instructions.ts";
 import type { StoredInstructions } from "../shared/instructions.ts";
 import { keychainService, openEnv, sealEnv, type Cipher } from "./secrets.ts";
@@ -30,7 +30,9 @@ import { THEME } from "../shared/theme.ts";
 import { continueSession, prepareSessionResume } from "../shared/sessionResume.ts";
 import { endsHold, fromElectronInput, hotkeys, matchesDown, onHotkeys, setHotkeys } from "../shared/hotkeys.ts";
 import type { ChangesStatus } from "../shared/changes.ts";
+import { changesPreferences } from "../shared/changesPreferences.ts";
 import { isPageThreadAction, type PageChangesStatus } from "../web/cursor/pageBridge.ts";
+import { isSection } from "../web/settings/attention.ts";
 
 const TOOLBAR_HEIGHT = 44;
 const SIDEBAR_WIDTH = 480;
@@ -198,11 +200,9 @@ function attentionChanged(): void {
   sidebar?.webContents.send("attention:changed");
 }
 
-/** Settings' sections (web/settings/attention.ts SECTIONS): the one it opens at, named in its URL hash. */
-const SETTINGS_SECTIONS = ["dashboard", "models", "instructions", "stt", "tts", "keyboard", "permissions", "debugging", "cookies", "keys"];
-
 function openSettings(section?: string) {
-  const hash = section && SETTINGS_SECTIONS.includes(section) ? `#${section}` : "";
+  const target = section === "debugging" ? "preferences" : section;
+  const hash = isSection(target) ? `#${target}` : "";
   if (settingsWin && !settingsWin.isDestroyed()) {
     // Settings follows its hash (hashchange) to the section.
     if (hash) void settingsWin.webContents.executeJavaScript(`location.hash = ${JSON.stringify(hash)}`).catch(() => {});
@@ -249,6 +249,7 @@ function updateChangesScope() {
 }
 
 function openChanges(threadId?: string) {
+  if (!readChangesPreferences(settingsFile()).gitSourceControl) return;
   setChangesScope(threadId);
   if (changesWin) {
     if (!changesWin.webContents.getURL()) return; // the window will show itself after its first load
@@ -267,7 +268,7 @@ function openChanges(threadId?: string) {
     minHeight: 400,
     title: "Changes",
     show: false,
-    webPreferences: { contextIsolation: true, sandbox: true, partition: "changes" },
+    webPreferences: { contextIsolation: true, sandbox: true, partition: "changes", preload: join(__dirname, "changes-preload.cjs") },
   });
   w.webContents.session.setPermissionRequestHandler((_wc, _permission, done) => done(false));
   w.webContents.session.setPermissionCheckHandler(() => false);
@@ -315,9 +316,10 @@ function pageChangesStatus(status: ChangesStatus): PageChangesStatus {
 
 function setChangesStatus(status: ChangesStatus) {
   changesStatus = status;
+  const enabled = readChangesPreferences(settingsFile()).gitSourceControl;
   const wc = toolbar?.webContents;
-  if (wc?.getURL() === TOOLBAR_URL) wc.send("changes:status", status);
-  browser?.webContents.send("changes:page-status", pageChangesStatus(status));
+  if (wc?.getURL() === TOOLBAR_URL) wc.send("changes:status", enabled ? status : { kind: "none" });
+  browser?.webContents.send("changes:page-status", enabled ? pageChangesStatus(status) : null, enabled);
 }
 
 /** A JSON object's fields; {} for anything else. */
@@ -868,9 +870,31 @@ async function clearCookies(): Promise<{ cleared: number; message: string }> {
 function registerIpc() {
   const fromChangesToolbar = (e: IpcMainInvokeEvent) => e.sender === toolbar?.webContents
     && e.senderFrame === e.sender.mainFrame && e.senderFrame?.url === TOOLBAR_URL;
-  ipcMain.handle("changes:get-status", (e) => fromChangesToolbar(e) ? changesStatus : null);
+  ipcMain.handle("changes:get-status", (e) =>
+    fromChangesToolbar(e) && readChangesPreferences(settingsFile()).gitSourceControl ? changesStatus : null);
   ipcMain.handle("changes:open", (e) => {
     if (fromChangesToolbar(e) && (changesStatus.kind === "ready" || changesStatus.kind === "unavailable")) openChanges();
+  });
+  const fromChanges = (e: IpcMainEvent) => e.sender === changesWin?.webContents && e.senderFrame === e.sender.mainFrame
+    && appBase !== "" && e.senderFrame?.url.split("#")[0] === `${appBase}changes.html`;
+  ipcMain.on("changes:auto-message:get", (e) => {
+    const prefs = readChangesPreferences(settingsFile());
+    e.returnValue = fromChanges(e) && prefs.gitSourceControl && prefs.autoCommitMessage;
+  });
+  ipcMain.on("changes:auto-message:set", (e, enabled: unknown) => {
+    if (!fromChanges(e) || typeof enabled !== "boolean" || !readChangesPreferences(settingsFile()).gitSourceControl) {
+      e.returnValue = false;
+      return;
+    }
+    const chat = JSON.stringify({ ...jsonObject(readSettings().chat), autoCommitMessage: enabled });
+    try { saveSettings({ chat }); }
+    catch (error) {
+      console.warn("[changes] could not save the automatic commit-message preference", error);
+      e.returnValue = false;
+      return;
+    }
+    sidebar?.webContents.send("chat-settings:changed", chat);
+    e.returnValue = true;
   });
   ipcMain.handle("nav:go", (_e, input: string) => {
     const url = toUrl(input);
@@ -1033,7 +1057,8 @@ function registerIpc() {
   });
   ipcMain.on("page:ready", (e) => {
     if (!fromPage(e)) return;
-    e.sender.send("changes:page-status", pageChangesStatus(changesStatus));
+    const enabled = readChangesPreferences(settingsFile()).gitSourceControl;
+    e.sender.send("changes:page-status", enabled ? pageChangesStatus(changesStatus) : null, enabled);
     sendPageUrl();
   });
   // The chat's settings (read synchronously: the sidebar needs them before it builds its UI). The sidebar and the
@@ -1042,10 +1067,27 @@ function registerIpc() {
   ipcMain.on("chat-settings:get", (e) => { e.returnValue = fromSidebar(e) || fromSettings(e) ? readSettings().chat ?? null : null; });
   ipcMain.on("chat-settings:save", (e, json: unknown) => {
     if (!(fromSidebar(e) || fromSettings(e)) || typeof json !== "string" || json.length >= 200_000) return;
-    const merged = JSON.stringify({ ...jsonObject(readSettings().chat), ...jsonObject(json) });
+    const prior = jsonObject(readSettings().chat);
+    const patch = jsonObject(json);
+    const settingsFrame = fromSettings(e) && e.senderFrame === e.sender.mainFrame
+      && appBase !== "" && e.senderFrame?.url.split("#")[0] === `${appBase}settings.html`;
+    if (!settingsFrame) {
+      delete patch.gitSourceControl;
+      delete patch.commitMessageTier;
+    }
+    // Only the Changes window owns this preference.
+    delete patch.autoCommitMessage;
+    const chat = { ...prior, ...patch };
+    const merged = JSON.stringify(chat);
     saveSettings({ chat: merged });
+    const enabled = readChangesPreferences(settingsFile()).gitSourceControl;
+    if (enabled !== changesPreferences(prior).gitSourceControl) {
+      if (!enabled) changesWin?.destroy();
+      setChangesStatus({ kind: enabled ? "loading" : "none" });
+      server?.postMessage({ type: "changes-preference" });
+    }
     if (fromSettings(e)) sidebar?.webContents.send("chat-settings:changed", merged);
-    setHotkeys(jsonObject(merged).hotkeys);
+    setHotkeys(chat.hotkeys);
   });
   // The keyboard shortcuts (shared/hotkeys.ts), saved with the chat's settings: the preloads read them at load and
   // hear each change (the sidebar's page has them from its settings).
