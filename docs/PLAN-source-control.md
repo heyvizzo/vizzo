@@ -558,3 +558,14 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   every eligible component in the current review, including Other and work in collapsed thread groups. The
   normal **Commit** action publishes that selection in one commit. Newly arrived or newly eligible changes
   require another selection, and a thread's initial selection still contains only its eligible own components.
+- The product owner requested thread discussion in commit drafts and selection of the drafting model. Drafting
+  sends bounded request, correction, follow-up, and result text for threads that own selected components, along
+  with the existing diff evidence. A bounded transcript survives thread deletion. Settings → Models selects
+  the Fast or Smart model for this text-only task. Fast is the default.
+- The **Automatically generate commit message** preference is on by default. Switching it off exposes
+  **Generate** alongside the commit message textarea and lets the user write a message directly. A background
+  delete commit uses its deterministic message while automatic drafting is off.
+- Settings → Preferences replaces Debugging. **General preferences** contains **Full answers** and the opt-in
+  Git source control switch. The latter controls the Changes window, toolbar and thread commit actions, and the
+  Git choices in delete confirmations. The ledger continues settling writers and recovering durable deletions
+  independently to preserve custody.
