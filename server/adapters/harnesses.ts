@@ -18,12 +18,12 @@ import { anthropicContent, codexInput, rpcImages, opencodeParts, assertDrawingVi
 // itself: its own prompt with ours appended, and its own tools. The tier's toggles (shared/config.ts
 // HARNESS_TOGGLES; all on for the solver unless switched off) decide what else loads: shell, web, subagents, MCP
 // servers, skills, hooks, plugins, instruction files; each harness below maps them to its flags, config or environment.
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { NativeHarnessProcess } from "./nativeProcess.ts";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, normalize, relative } from "node:path";
 import { HARNESS_TOGGLES, LLM_PROVIDER_LABELS, toggleOn, type HarnessId, type HarnessToggleId, type HarnessToggles, type LlmSpeed, type LlmTier } from "../../shared/config.ts";
 import { priceOf, tokenCost } from "../prices.ts";
@@ -872,17 +872,38 @@ class RpcAgent implements WarmAgent {
 
 type Notify = (method: string, params: Record<string, unknown>) => void;
 
-/** One `codex app-server` (JSON-RPC over stdio) shared by every Codex agent. */
+/** Model catalog tool modes take precedence over per-thread switches, so drafting uses its own server. */
+function codexDraftCatalog(bin: string): { cwd: string; path: string; dispose: () => void } {
+  const { models } = JSON.parse(execFileSync(bin, ["debug", "models", "--bundled"], {
+    cwd: EMPTY_CWD, encoding: "utf8", timeout: 3_000, maxBuffer: 8 * 1024 * 1024, killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "pipe"],
+  })) as { models?: Record<string, unknown>[] };
+  if (!Array.isArray(models) || !models.length) throw new Error("Codex did not supply a bundled model catalog");
+  const cwd = mkdtempSync(join(tmpdir(), "vizzo-codex-draft-"));
+  const path = join(cwd, "models.json");
+  const dispose = () => { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* Best effort on exit. */ } };
+  try {
+    writeFileSync(path, JSON.stringify({ models: models.map((model) => ({
+      ...model,
+      tool_mode: "direct", multi_agent_version: null, apply_patch_tool_type: null, shell_type: "disabled",
+      experimental_supported_tools: [], supports_search_tool: false,
+    })) }), { flag: "wx", mode: 0o600 });
+    return { cwd, path, dispose };
+  } catch (error) { dispose(); throw error; }
+}
+
+/** Share one `codex app-server` per mode, leaving normal Codex sessions on their own server. */
 class CodexServer {
-  private static current: CodexServer | null = null;
+  private static current = new Map<boolean, CodexServer>();
   private static retiring = new Set<CodexServer>();
-  static get(): CodexServer {
-    if (!CodexServer.current || CodexServer.current.exited) CodexServer.current = new CodexServer();
-    return CodexServer.current;
+  static get(drafting: boolean): CodexServer {
+    let server = CodexServer.current.get(drafting);
+    if (!server || server.exited) CodexServer.current.set(drafting, (server = new CodexServer(drafting)));
+    return server;
   }
   static async stop(force = false): Promise<void> {
-    if (CodexServer.current) CodexServer.retiring.add(CodexServer.current);
-    CodexServer.current = null;
+    for (const server of CodexServer.current.values()) CodexServer.retiring.add(server);
+    CodexServer.current.clear();
     await Promise.all([...CodexServer.retiring].map(async (server) => {
       if (!await server.native.stop(force)) {
         if (force) throw new Error("Vizzo could not verify that the Codex process group stopped");
@@ -894,6 +915,7 @@ class CodexServer {
   }
 
   readonly native: NativeHarnessProcess;
+  readonly cwd: string;
   private proc: ChildProcessWithoutNullStreams;
   private id = 0;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -906,16 +928,25 @@ class CodexServer {
   /** The MCP servers in the user's config: a thread with MCP off turns each one off (an empty table merges). */
   readonly mcpServers: Promise<string[]>;
 
-  private constructor() {
+  private constructor(private readonly drafting: boolean) {
     mkdirSync(EMPTY_CWD, { recursive: true });
-    // What a thread loads is set per thread (codexConfig): the server starts with the user's config.
-    this.native = new NativeHarnessProcess(binOrThrow("codex"), ["app-server"], EMPTY_CWD);
+    const bin = binOrThrow("codex");
+    const catalog = drafting ? codexDraftCatalog(bin) : undefined;
+    this.cwd = catalog?.cwd ?? EMPTY_CWD;
+    const args = ["app-server", ...(catalog ? ["-c", "agents.enabled=false", "-c", `model_catalog_json=${JSON.stringify(catalog.path)}`] : [])];
+    try { this.native = new NativeHarnessProcess(bin, args, this.cwd); }
+    catch (error) { catalog?.dispose(); throw error; }
+    if (catalog) process.once("exit", catalog.dispose);
     this.proc = this.native.proc;
     this.proc.stdin.on("error", () => { /* Process close is the terminal signal. */ });
     jsonLines(this.proc, (m) => this.onMessage(m));
     this.proc.stderr.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString()).slice(-2000); });
     this.closed = this.native.closed.then((code) => {
       this.exited = true;
+      if (catalog) {
+        process.off("exit", catalog.dispose);
+        catalog.dispose();
+      }
       const err = new Error(`codex app-server exited (${code}): ${this.stderr.trim().slice(-300)}`);
       for (const p of this.pending.values()) p.reject(err);
       this.pending.clear();
@@ -929,7 +960,7 @@ class CodexServer {
     this.ready.catch(() => {});
     this.mcpServers = this.ready.then(() => this.call("config/read", { includeLayers: false }))
       .then((r) => Object.keys((r as { config?: { mcp_servers?: Record<string, unknown> } }).config?.mcp_servers ?? {}))
-      .catch(() => []);
+      .catch((error) => { if (drafting) throw error; return []; });
   }
 
   private onMessage(m: Record<string, unknown>): void {
@@ -943,8 +974,10 @@ class CodexServer {
       return;
     }
     if (id !== undefined && m.method) {
-      // Approval requests shouldn't come (approvalPolicy "never"); accept anything that does.
-      this.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, result: { decision: "accept" } }) + "\n");
+      // Drafting is a text request and permits no server callbacks. The normal app keeps its approval behavior.
+      const response = this.drafting ? { error: { code: -32601, message: "Commit drafting does not accept callbacks" } }
+        : { result: { decision: "accept" } };
+      this.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, ...response }) + "\n");
       return;
     }
     const params = (m.params ?? {}) as Record<string, unknown>;
@@ -1001,17 +1034,24 @@ export function codexConfig(spec: AgentSpec, mcpServers: string[]): Record<strin
   off("images", "image_generation");
   off("hooks", "hooks");
   off("plugins", "plugins", "apps", "browser_use", "computer_use", "in_app_browser");
+  if (spec.commitMessage) Object.assign(features, {
+    view_image: false, goals: false, default_mode_request_user_input: false,
+    code_mode: false, code_mode_only: false, code_mode_host: false, code_mode_host_grpc: false,
+    incremental_tools: false, incremental_tools_legacy: false, incremental_tools_legacy_gcp: false,
+    deferred_tool_world_state: false, sleep_tool: false, tool_suggest: false, request_permissions_tool: false,
+  });
   return {
     ...(Object.keys(features).length ? { features } : {}),
     ...(on(spec, "web") ? {} : { web_search: "disabled" }),
     ...(on(spec, "mcp") || !mcpServers.length ? {} : { mcp_servers: Object.fromEntries(mcpServers.map((n) => [n, { enabled: false }])) }),
     ...(on(spec, "skills") ? {} : { skills: { include_instructions: false, bundled: { enabled: false } } }),
     ...(on(spec, "instructions") ? {} : { project_doc_max_bytes: 0 }),
+    ...(spec.commitMessage && { tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false } } }),
   };
 }
 
 class CodexAgent implements WarmAgent {
-  private server = CodexServer.get();
+  private server: CodexServer;
   private thread: Promise<string>;
   private threadId: string | null = null;
   private used = false;
@@ -1027,6 +1067,7 @@ class CodexAgent implements WarmAgent {
    * saved one resumed (thread/resume) or a fork of one (thread/fork). Pooled agents can't become one.
    */
   constructor(private spec: AgentSpec, private start?: SessionStart) {
+    this.server = CodexServer.get(spec.commitMessage === true);
     this.kept = !!start;
     this.thread = this.server.mcpServers.then((mcp) => {
       const common = {
@@ -1034,7 +1075,8 @@ class CodexAgent implements WarmAgent {
         // No grace period after unsubscribe: the user may be taking this session over in a terminal.
         config: { ...codexConfig(spec, mcp), thread_unload_delay_secs: 0 },
         ...(spec.speed === "fast" ? { serviceTier: "priority" } : {}),
-        cwd: cwdOf(spec), approvalPolicy: "never", sandbox: "danger-full-access",
+        cwd: spec.commitMessage ? this.server.cwd : cwdOf(spec),
+        approvalPolicy: "never", sandbox: spec.commitMessage ? "read-only" : "danger-full-access",
         // The router's prompt replaces Codex's own; the solver keeps Codex's (it explains the tools) with ours added.
         ...(spec.project ? { developerInstructions: spec.system } : { baseInstructions: spec.system }),
       };
@@ -1628,10 +1670,10 @@ export function describeAgent(spec: AgentSpec): string {
     case "grok": return [...envOf(grokEnv(spec)), "grok", ...elide(grokArgs(spec, "…"))].join(" ");
     case "pi": case "omp": return [spec.harness, ...elide(rpcArgs(spec))].join(" ");
     case "codex":
-      return `codex app-server · thread/start { model: ${spec.model || "default"}${spec.speed === "fast" ? ", serviceTier: priority" : ""}, sandbox: danger-full-access, approvalPolicy: never, ${spec.project ? "developerInstructions" : "baseInstructions"}, config: ${JSON.stringify(codexConfig(spec, ["…"]))} } → turn/start { effort: ${spec.level ?? "default"} } · on: ${onLabels(spec)}`;
+      return `codex app-server · thread/start { model: ${spec.model || "default"}${spec.speed === "fast" ? ", serviceTier: priority" : ""}, sandbox: ${spec.commitMessage ? "read-only" : "danger-full-access"}, approvalPolicy: never, ${spec.project ? "developerInstructions" : "baseInstructions"}, config: ${JSON.stringify(codexConfig(spec, ["…"]))} } → turn/start { effort: ${spec.level ?? "default"} } · on: ${onLabels(spec)}`;
     case "opencode": {
       const setup = opencodeSetup(spec);
-      const env = Object.keys(setup.env).map((k) => `${k}=true `).join("");
+      const env = Object.entries(setup.env).map(([key, value]) => `${key}=${value} `).join("");
       return `${env}opencode serve${setup.pure ? " --pure" : ""} · POST /session/:id/message { model: ${spec.model || "default"}, variant: ${spec.level ?? "default"}, system, tools: ${opencodeTools(spec).join(",") || "none"} } · permissions: ${spec.commitMessage ? "deny all" : "allow all"}`;
     }
   }
