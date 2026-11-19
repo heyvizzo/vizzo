@@ -47,12 +47,17 @@ const thread = {
 const ready = { kind: "ready", project: "first", generation: 1, changedFiles: 3, ownedThreadIds: [threadId] };
 const oldGit = { kind: "unavailable", reason: "Source control requires Git 2.41 or later" };
 const lifecycle = [];
+const received = [];
 let selected = second;
 let changesRequest = 0;
 let utility;
 let backend;
 let sockets;
-const publish = (status, request = changesRequest) => utility.emit("message", { type: "changes-status", status, changesRequest: request });
+let projectStatus = ready;
+const publish = (status, request = changesRequest) => {
+  if (request === changesRequest) projectStatus = status;
+  utility.emit("message", { type: "changes-status", status, changesRequest: request });
+};
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selected] });
 utilityProcess.fork = (_module, _args, options) => {
   utility = new EventEmitter();
@@ -61,6 +66,10 @@ utilityProcess.fork = (_module, _args, options) => {
       case "flush": utility.emit("message", { type: "flushed" }); break;
       case "changes-visible":
       case "changes-focus": lifecycle.push(message); break;
+      case "changes-preference":
+        lifecycle.push(message);
+        if (JSON.parse(JSON.parse(readFileSync(settings)).chat).gitSourceControl) publish(projectStatus);
+        break;
       case "project":
         changesRequest = message.changesRequest;
         publish(message.dir === second
@@ -72,9 +81,11 @@ utilityProcess.fork = (_module, _args, options) => {
   utility.kill = () => backend.close();
   backend = createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
-    const body = req.url === "/api/llm/notice" ? null
-      : req.url === "/api/llm/providers" ? []
-      : req.url === "/api/speech/engines" ? { engines: [] }
+    const url = new URL(req.url, "http://127.0.0.1");
+    const body = url.pathname === "/api/llm/notice" ? null
+      : ["/api/llm/providers", "/api/llm/models"].includes(url.pathname) ? []
+      : ["/api/speech/engines", "/api/speech/selection"].includes(url.pathname) ? { engines: [], installs: [] }
+      : url.pathname === "/api/traces" ? { files: [] }
       : {};
     res.end(JSON.stringify(body));
   });
@@ -84,7 +95,11 @@ utilityProcess.fork = (_module, _args, options) => {
     peer.on("message", (data, binary) => {
       if (binary) return;
       const msg = JSON.parse(data.toString());
+      received.push(msg);
       if (msg.type === "ping") peer.send(JSON.stringify({ ...msg, type: "pong", serverNow: performance.now() }));
+      if (msg.type === "thread.delete.preview") peer.send(JSON.stringify({
+        type: msg.type, requestId: msg.requestId, threads: msg.threadIds.map((threadId) => ({ threadId, state: "complete", defaultMode: "commit" })),
+      }));
     });
   });
   backend.listen(Number(options.env.PORT), "127.0.0.1", () => {
@@ -161,6 +176,23 @@ async function run() {
   const bar = (code) => toolbar.executeJavaScript(code);
   const commitButton = () => panelNode(page, ".th-panel .th-commit");
   const commitDisabled = () => inspect(page, ".th-panel .th-commit", "function() { return this.disabled; }");
+  page.debugger.attach("1.3");
+  await until(() => sidebar.executeJavaScript('document.querySelectorAll(".thread-item").length === 1'), "thread snapshot");
+  page.send("page:open-thread", threadId);
+  await until(() => panelNode(page, ".th-panel .th-trash"), "thread panel with source control off");
+  assert(await bar('document.querySelector("#changes").hidden'));
+  assert.equal(await commitButton(), 0);
+  await bar("shell.changes.open()");
+  ipcMain.emit("page:thread", { sender: page, senderFrame: page.mainFrame }, { type: "thread.commit", threadId });
+  assert.equal(BrowserWindow.getAllWindows().length, 1, "both native entry points refuse opens while off");
+  await sidebar.executeJavaScript('shell.openSettings("preferences")');
+  const preferences = await until(() => byUrl("/settings.html#preferences"), "Settings Preferences");
+  const prefs = (code) => preferences.executeJavaScript(code);
+  const clickPreference = () => prefs('document.querySelector("#git-source-control").click()');
+  await until(() => prefs('document.querySelector("#git-source-control") && !document.querySelector("#section-preferences").hidden'), "opt-in checkbox");
+  assert.equal(await prefs('document.querySelector("#git-source-control").checked'), false);
+  await clickPreference();
+  BrowserWindow.fromWebContents(preferences).hide();
   await until(() => bar('document.querySelector("#changes-count").textContent === "3"'), "current project's distinct file count");
   await sidebar.executeJavaScript("shell.queue.publish({ instant: true, count: 2, sending: false })");
   await until(() => bar('document.querySelector("#queue-count").textContent === "2"'), "separate queue count");
@@ -177,21 +209,32 @@ async function run() {
   ipcMain.emit("page:thread", { sender: sidebar, senderFrame: sidebar.mainFrame }, { type: "thread.commit", threadId });
   ipcMain.emit("page:thread", { sender: page, senderFrame: null }, { type: "thread.commit", threadId });
   ipcMain.emit("page:thread", { sender: page, senderFrame: page.mainFrame }, { type: "thread.commit", threadId: "unowned" });
-  assert.equal(BrowserWindow.getAllWindows().length, 1, "invalid thread opens are ignored");
+  assert.equal(changesWindows().length, 0, "invalid thread opens are ignored");
 
   await bar('document.querySelector("#changes").click()');
   const window = await until(() => changesWindows().find((w) => w.isVisible()), "unscoped Changes window");
   const evaluate = (code) => window.webContents.executeJavaScript(code);
   assert.equal(await evaluate("location.hash"), "");
-  assert.equal(await evaluate("typeof window.shell"), "undefined", "Changes has no shell credentials or IPC");
+  assert.equal(await evaluate("typeof window.shell"), "undefined", "Changes has no generic shell bridge");
   assert.equal(await evaluate("window.open('/untrusted')"), null, "Changes cannot create a popup");
+  assert.deepEqual(await evaluate("Object.keys(window.vizzoChangesPreferences).sort()"), ["getAuto", "setAuto"]);
+  assert.equal(await evaluate("window.vizzoChangesPreferences.getAuto()"), true);
+  await evaluate("window.vizzoChangesPreferences.setAuto(false)");
+  const chatSettings = () => JSON.parse(JSON.parse(readFileSync(settings)).chat);
+  assert.equal(chatSettings().gitSourceControl, true);
+  assert.equal(chatSettings().autoCommitMessage, false);
+  for (const event of [{ sender: sidebar, senderFrame: sidebar.mainFrame }, { sender: window.webContents, senderFrame: null }]) {
+    ipcMain.emit("changes:auto-message:set", event, true);
+    ipcMain.emit("changes:auto-message:get", event);
+    assert.equal(event.returnValue, false, "the bridge rejects every other sender and frame");
+  }
+  await sidebar.executeJavaScript('shell.chatSettings.save(JSON.stringify({ gitSourceControl: false, autoCommitMessage: true }))');
+  assert.equal(await bar("shell.changes.getStatus().then(s => s.kind)"), "ready");
+  assert.equal(chatSettings().autoCommitMessage, false);
   await until(() => focusCount() > 0, "scanner focus");
   await until(() => visible().at(-1) === true, "scanner visibility");
   assert.deepEqual(visible(), [true]);
 
-  page.debugger.attach("1.3");
-  await until(() => sidebar.executeJavaScript('document.querySelectorAll(".thread-item").length === 1'), "thread snapshot");
-  page.send("page:open-thread", threadId);
   await until(commitButton, "owned thread's Commit button");
   assert.equal(await commitDisabled(), false);
   const button = await commitButton();
@@ -242,6 +285,7 @@ async function run() {
   await bar('document.querySelector("#changes").click()');
   const reopened = await until(() => changesWindows().find((w) => w.isVisible()), "reopened Changes window");
   assert.deepEqual(reopened.getNormalBounds(), bounds);
+  assert.equal(await reopened.webContents.executeJavaScript("window.vizzoChangesPreferences.getAuto()"), false);
   reopened.close();
 
   selected = outside;
@@ -253,7 +297,33 @@ async function run() {
   assert.match(await bar('document.querySelector("#changes").getAttribute("aria-label")'), /requires Git 2\.41 or later/);
   await until(commitDisabled, "outdated Git disables thread Commit");
   assert.match(await inspect(page, ".th-panel .th-commit", 'function() { return this.getAttribute("aria-label"); }'), /requires Git 2\.41 or later/);
-  console.log("Changes Electron smoke passed: toolbar ordering, counts and Git availability, trusted IPC, thread scope, project switches, scanner lifecycle, and restored bounds.");
+  publish(ready);
+  await until(() => bar('!document.querySelector("#changes").hidden'), "Git is ready for live toggle");
+  await bar("shell.changes.open()");
+  await until(() => changesWindows().find((w) => w.isVisible()), "Changes open before the live toggle");
+  await inspect(page, ".th-panel .th-trash", "function() { this.click(); }");
+  const oldAction = await until(() => panelNode(page, '.th-delete-actions [data-choice="commit"]'), "live Commit-and-delete offer");
+  const { object: stale } = await page.debugger.sendCommand("DOM.resolveNode", { nodeId: oldAction });
+  await clickPreference();
+  await until(() => bar('document.querySelector("#changes").hidden'), "live opt-out hides toolbar Changes");
+  await until(() => changesWindows().length === 0, "live opt-out closes the Changes window");
+  await until(async () => !(await commitButton()), "live opt-out removes thread Commit");
+  const generic = await until(() => inspect(page, ".th-foot", "function() { return this.innerText; }"), "generic delete confirmation");
+  assert.match(generic, /Delete this thread/);
+  assert.doesNotMatch(generic, /commit|changes/i);
+  assert.equal(await panelNode(page, '.th-delete-actions [data-choice="commit"]'), 0);
+  assert.equal(chatSettings().gitSourceControl, false);
+  assert.equal(chatSettings().autoCommitMessage, false);
+  await clickPreference();
+  await until(commitButton, "live re-enable restores thread Commit");
+  assert.equal(await panelNode(page, ".th-foot"), 0, "old confirmation dismissed on re-enable");
+  await page.debugger.sendCommand("Runtime.callFunctionOn", { objectId: stale.objectId, functionDeclaration: "function() { this.click(); }" });
+  await inspect(page, ".th-panel .th-trash", "function() { this.click(); }");
+  await until(() => panelNode(page, '.th-delete-actions [data-choice="commit"]'), "new review after re-enable");
+  assert.equal(received.filter((msg) => msg.type === "thread.delete.preview").length, 2);
+  assert.equal(received.some((msg) => msg.type === "thread.delete"), false, "stale Commit cannot be replayed after re-enable");
+  assert.equal(lifecycle.filter(({ type }) => type === "changes-preference").length, 3);
+  console.log("Changes Electron smoke passed: live opt-in and opt-out, stale delete protection, isolated persisted preferences, toolbar count, thread scope, project switches, scanner lifecycle, and restored bounds.");
 }
 
 async function finish(code) {
