@@ -554,3 +554,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   An earlier Keep remains the most that can be authorized by that confirmation.
 - A known pinned project can keep and close a thread while its Git scan is blocked by recovery. The ledger
   retains the closed group and the reason for a later explicit review.
+- The product owner requested one bulk tick for a combined commit. **Select all changes** explicitly selects
+  every eligible component in the current review, including Other and work in collapsed thread groups. The
+  normal **Commit** action publishes that selection in one commit. Newly arrived or newly eligible changes
+  require another selection, and a thread's initial selection still contains only its eligible own components.
