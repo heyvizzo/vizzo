@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fullDiskAccess, fullDiskRow, keychainRow, microphoneRow } from "./permissions.ts";
-import { applyEnv, sanitizeEnv } from "./settings.ts";
+import { applyEnv, readChangesPreferences, sanitizeEnv } from "./settings.ts";
 
 describe("sanitizeEnv", () => {
   it("drops unknown keys, including the old Claude provider switch", () => {
@@ -25,6 +25,30 @@ describe("applyEnv", () => {
     expect(target.OPENAI_API_KEY).toBeUndefined();
     expect(target.ELEVENLABS_VOICE_ID).toBe("voice");
     expect(target.OTHER).toBe("keep");
+  });
+});
+
+describe("readChangesPreferences", () => {
+  it("reads desktop preferences and handles missing, legacy and malformed settings", () => {
+    const home = mkdtempSync(join(tmpdir(), "changes-prefs-"));
+    const file = join(home, "settings.json");
+    const defaults = { gitSourceControl: false, commitMessageTier: "fast", autoCommitMessage: true };
+    try {
+      expect(readChangesPreferences(file)).toEqual(defaults);
+      writeFileSync(file, "null");
+      expect(readChangesPreferences(file)).toEqual(defaults);
+      writeFileSync(file, JSON.stringify({ chat: "not JSON" }));
+      expect(readChangesPreferences(file)).toEqual(defaults);
+      writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ showFullAnswers: false }) }));
+      expect(readChangesPreferences(file)).toEqual(defaults);
+      writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ gitSourceControl: "true", commitMessageTier: "other", autoCommitMessage: "false" }) }));
+      expect(readChangesPreferences(file)).toEqual(defaults);
+      const saved = { gitSourceControl: true, commitMessageTier: "smart", autoCommitMessage: false };
+      writeFileSync(file, JSON.stringify({ chat: JSON.stringify(saved) }));
+      expect(readChangesPreferences(file)).toEqual(saved);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
