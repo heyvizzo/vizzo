@@ -229,7 +229,7 @@ export interface ThreadOverlayOpts {
 export interface ThreadOverlay {
   setThreads(threads: ThreadInfo[], deleting?: string[], continuing?: string[], connected?: boolean): void;
   showDeletePreview(result: PageThreadDeletePreview): void;
-  setChangesStatus(status: PageChangesStatus): void;
+  setChangesStatus(status: PageChangesStatus, enabled: boolean): void;
   bubble(say: ThreadSay, ended: boolean, confirm?: BubbleConfirm): void;
   provisional(turnId: string, anchor?: ThreadAnchor): void;
   clearProvisional(turnId: string): void;
@@ -299,7 +299,7 @@ export function deleteConfirmation(preview: ThreadDeletePreview | "queued"): { t
   }
 }
 
-type DeleteConfirmation = { kind: "checking"; requestId: string } | { kind: "ready"; preview: ThreadDeletePreview | "queued" } | { kind: "error"; message: string };
+type DeleteConfirmation = { kind: "generic" } | { kind: "checking"; requestId: string } | { kind: "ready"; preview: ThreadDeletePreview | "queued" } | { kind: "error"; message: string };
 
 /** A finished thread (idle, pending) has no label: the marker's check says it. */
 export const STATE_LABEL: Record<ThreadState, string> = { running: "working", pending: "", idle: "", failed: "failed", queued: "not sent" };
@@ -409,6 +409,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   const markers = new Map<string, MarkerView>();
   const bubbles = new Map<string, BubbleView>();
   let changesStatus: PageChangesStatus = null;
+  let sourceControlEnabled = false;
   // Sizes belong to individual tasks (null is the conversation), across close/reopen and live updates.
   const panelSizes = new Map<string | null, { width: number; height: number }>();
   /** The provisional dot: where the pointer was on its element at release (bounds/point as in ThreadAnchor). */
@@ -980,6 +981,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   function beginDeleteConfirm(t: ThreadInfo): void {
     if (panel?.threadId !== t.threadId) return;
     if (t.state === "queued") panel.confirming = { kind: "ready", preview: "queued" };
+    else if (!sourceControlEnabled) panel.confirming = { kind: "generic" };
     else {
       const requestId = `${performance.timeOrigin}-${++nextDeletePreview}`;
       panel.confirming = { kind: "checking", requestId };
@@ -1008,21 +1010,26 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     foot.setAttribute("role", "alertdialog");
     foot.setAttribute("aria-label", "Confirm deletion");
     foot.setAttribute("aria-describedby", "th-delete-description");
+    const working = markers.get(threadId)?.thread.state === "running";
     const dialog = confirm.kind === "ready" ? deleteConfirmation(confirm.preview)
-      : { text: confirm.kind === "checking" ? "Checking thread changes…" : confirm.message, actions: [] };
+      : confirm.kind === "generic" ? {
+        text: working ? "Delete this thread and stop its work?" : "Delete this thread?",
+        actions: [{ label: working ? "Stop and delete" : "Delete", mode: "keep" as const }],
+      } : { text: confirm.kind === "checking" ? "Checking thread changes…" : confirm.message, actions: [] };
     const message = h("span", "th-confirm", dialog.text);
     message.id = "th-delete-description";
-    if (confirm.kind !== "ready") message.setAttribute("role", "status");
+    if (confirm.kind === "checking" || confirm.kind === "error") message.setAttribute("role", "status");
     const actions = h("div", "th-delete-actions");
     for (const { label, mode } of dialog.actions) {
       const button = h("button", "th-danger", label);
       button.type = "button";
       button.dataset.choice = mode;
-      button.disabled = deleting.has(threadId) || (confirm.kind === "ready" && confirm.preview !== "queued" && !connected);
+      const queued = confirm.kind === "ready" && confirm.preview === "queued";
+      button.disabled = deleting.has(threadId) || (!queued && !connected);
       button.onclick = () => {
-        if (panel?.threadId !== threadId) return;
+        if (panel?.threadId !== threadId || panel.confirming !== confirm || (mode === "commit" && !sourceControlEnabled)) return;
         opts.send({ type: "thread.delete", threadId, mode });
-        if (confirm.kind === "ready" && confirm.preview === "queued") closePanel();
+        if (queued) closePanel();
         else cancelDeleteConfirm();
       };
       actions.append(button);
@@ -1414,12 +1421,21 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     return status.ownedThreadIds.includes(threadId) ? null : "This thread has no uncommitted owned changes";
   }
 
-  function setChangesStatus(status: PageChangesStatus): void {
+  function setChangesStatus(status: PageChangesStatus, enabled: boolean): void {
     const before = changesStatus;
-    changesStatus = status;
+    const toggled = sourceControlEnabled !== enabled;
+    sourceControlEnabled = enabled;
+    changesStatus = enabled ? status : null;
     const threadId = panel?.threadId;
-    if (threadId && (before ? commitDisabledReason(threadId, before) : undefined)
-      !== (status ? commitDisabledReason(threadId, status) : undefined)) renderPanel();
+    if (!threadId || !panel) return;
+    if (toggled && panel.confirming && markers.get(threadId)?.thread.state !== "queued") {
+      if (enabled) return cancelDeleteConfirm();
+      panel.confirming = { kind: "generic" };
+      renderPanel();
+      return;
+    }
+    if ((before ? commitDisabledReason(threadId, before) : undefined)
+      !== (changesStatus ? commitDisabledReason(threadId, changesStatus) : undefined)) renderPanel();
   }
 
   function setDetails(on: boolean): void {

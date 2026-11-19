@@ -36,6 +36,8 @@ let view = { generation: 1, branch: 'refs/heads/feature/header', base: null, gro
 let status;
 let jobs = { jobs: [{ id: 'fix-me', commit, reason: 'Git’s staging area needs repair.', canFix: true }], restart: ['codex'] };
 let win, firstDraft, finishFix, finishCombined;
+let holdDraft = false;
+let pendingDraft;
 const errors = [];
 const calls = [];
 const socket = new WebSocketServer({ noServer: true });
@@ -92,6 +94,11 @@ async function serve(req, res) {
       return respond(jobs);
     case '/api/changes/message':
       if (!firstDraft) { firstDraft = () => respond({ message: 'Outdated prefill' }); return; }
+      if (holdDraft) {
+        holdDraft = false;
+        pendingDraft = message => respond({ message });
+        return;
+      }
       return respond({ message: 'Update project files' });
     case '/api/changes/commit':
       if (!body.separately) {
@@ -143,6 +150,14 @@ const waitForDom = (source, description) => waitFor(() => evaluate(source), desc
 const checked = id => evaluate(`[...document.querySelectorAll('input[data-component="${id}"]')].map(tick => tick.checked)`);
 const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
 const lastCall = route => calls.findLast(call => call.path === `/api/changes/${route}`);
+const messageCalls = () => calls.filter(call => call.path === '/api/changes/message').length;
+const messageText = () => evaluate('document.querySelector("#commit-message").value');
+const typeMessage = text => evaluate(`{
+  const input = document.querySelector('#commit-message');
+  input.value = ${JSON.stringify(text)};
+  input.dispatchEvent(new Event('input'));
+}`);
+const allowPrefillTime = () => new Promise(resolve => setTimeout(resolve, 300));
 
 async function key(selector, value, code, virtualCode) {
   await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
@@ -183,9 +198,16 @@ async function main() {
   assert.equal(await evaluate('document.querySelector("input[data-component=working]").disabled'), true);
   assert.match(await evaluate('document.querySelector("input[data-component=mixed]").parentElement.textContent'), /Needs your call/);
 
+  assert.equal(await evaluate('document.querySelector("#auto-commit-message").checked'), true);
+  assert.equal(await evaluate('document.querySelector("#auto-commit-message").labels[0].textContent.trim()'), 'Automatically generate commit message');
+  assert.equal(await evaluate('document.querySelector("#generate-message").hidden'), true);
   await waitFor(() => !!firstDraft, 'Scoped selection requests a prefill');
-  await evaluate('const input = document.querySelector("#commit-message"); input.value = "Edit the header by hand"; input.dispatchEvent(new Event("input"));');
+  await click('#auto-commit-message');
+  assert.equal(await evaluate('document.querySelector("#generate-message").hidden'), false);
   firstDraft();
+  await allowPrefillTime();
+  assert.equal(await messageText(), '', 'Switching off auto discards an in-flight prefill');
+  await typeMessage('Edit the header by hand');
   await key('input[data-component=tied]', ' ', 'Space', 32);
   assert.deepEqual(await checked('tied'), [true, true], 'Keyboard tick updates both tied rows');
   await key('.component:has(input[data-component=tied]) summary', ' ', 'Space', 32);
@@ -202,6 +224,8 @@ async function main() {
   assert.deepEqual(await checked('other-new'), [false], 'Changed Other never inherits an earlier tick');
   assert.deepEqual(await checked('tied'), [true, true]);
   assert.deepEqual(await checked('own'), [true]);
+  await allowPrefillTime();
+  assert.equal(messageCalls(), 1, 'Selection changes and live refresh do not generate while auto is off');
 
   if (process.env.CHANGES_UI_SCREENSHOT) {
     writeFileSync(`${process.env.CHANGES_UI_SCREENSHOT}.light.png`, (await win.webContents.capturePage({ stayHidden: true })).toPNG());
@@ -234,16 +258,63 @@ async function main() {
   assert.deepEqual(lastCall('restart').body, { project, generation: 3, harness: 'codex' });
 
   await evaluate('dispatchEvent(new HashChangeEvent("hashchange"))');
-  await waitForDom('document.querySelector("input[data-component=own]").checked', 'Reopening the same scope resets the selection');
-  await waitForDom('document.querySelector("#commit-message").value === "Update project files"', 'A fresh scope gets a new prefill');
+  await waitForDom('document.querySelector("input[data-component=own]")?.checked', 'Reopening the same scope resets the selection');
+  const reloaded = once(win.webContents, 'did-finish-load');
+  win.webContents.reload();
+  await reloaded;
+  await waitForDom('document.querySelector("input[data-component=own]")?.checked', 'The scoped selection returns after reloading');
+  assert.equal(await evaluate('document.querySelector("#auto-commit-message").checked'), false, 'Auto setting persists across reload');
+  await allowPrefillTime();
+  assert.equal(await messageText(), '');
+  assert.equal(messageCalls(), 1, 'A fresh scope stays quiet in manual mode');
+
+  await typeMessage('Keep this draft while generating');
+  await click('#auto-commit-message');
+  await allowPrefillTime();
+  assert.equal(await messageText(), 'Keep this draft while generating');
+  assert.equal(messageCalls(), 1, 'Returning to auto preserves the custom draft');
+  await click('#auto-commit-message');
+
+  holdDraft = true;
+  await click('#generate-message');
+  await waitFor(() => !!pendingDraft, 'Generate sends a request for the current selection');
+  assert.deepEqual(lastCall('message').body, { project, generation: 3, components: ['own'] });
+  assert.equal(await messageText(), 'Keep this draft while generating');
+  assert.equal(await evaluate('document.querySelector("#generate-message").disabled'), true);
+  await typeMessage('Typed while generating');
+  pendingDraft('Outdated manual reply');
+  pendingDraft = undefined;
+  await allowPrefillTime();
+  assert.equal(await messageText(), 'Typed while generating');
+  assert.equal(messageCalls(), 2, 'An explicit click issues exactly one request');
+
+  holdDraft = true;
+  await click('#generate-message');
+  await waitFor(() => !!pendingDraft, 'Generate accepts another request');
+  await click('input[data-component=tied]');
+  pendingDraft('Reply for an old selection');
+  pendingDraft = undefined;
+  await allowPrefillTime();
+  assert.equal(await messageText(), 'Typed while generating');
+  assert.equal(messageCalls(), 3, 'Changing the selection discards the request without generating again');
+
+  await click('#generate-message');
+  await waitForDom('document.querySelector("#commit-message").value === "Update project files"', 'Successful manual generation replaces the draft');
+  assert.deepEqual(lastCall('message').body, { project, generation: 3, components: ['own', 'tied'] });
+  assert.equal(messageCalls(), 4);
+
   await evaluate('location.hash = ""');
-  await waitForDom('!document.querySelector(".other-threads") && !document.querySelector("input:checked")', 'Opening unscoped clears the selection');
+  await waitForDom('!document.querySelector(".other-threads") && !document.querySelector("input[data-component]:checked")', 'Opening unscoped clears the selection');
+  assert.equal(await evaluate('document.querySelector("#generate-message").disabled'), true);
   await click('input[data-component=other-new]');
-  await waitForDom('!document.querySelector("#commit-separately").disabled', 'An explicit Other-only selection can be committed separately');
+  await typeMessage('Commit Other by hand');
+  await waitForDom('!document.querySelector("#commit-separately").disabled', 'An explicit Other-only selection can be committed separately with a typed message');
   await click('#commit-separately');
   await waitForDom('document.querySelector("#result").textContent.startsWith("Committed ") && !document.querySelector("input[data-component=other-new]")', 'Other-only commit succeeds');
-  assert.deepEqual(lastCall('commit').body, { project, generation: 3, components: ['other-new'], message: 'Update project files', separately: true });
+  assert.deepEqual(lastCall('commit').body, { project, generation: 3, components: ['other-new'], message: 'Commit Other by hand', separately: true });
+  assert.equal(messageCalls(), 4, 'A typed message can be committed without generating');
 
+  await click('#auto-commit-message');
   await evaluate(`location.hash = ${JSON.stringify(scope)}`);
   await waitForDom('document.querySelector(".other-threads") && document.querySelector("#select-all").indeterminate', 'Scoped review selects only its own work by default');
   const priorCommits = calls.filter(call => call.path === '/api/changes/commit').length;
@@ -258,7 +329,7 @@ async function main() {
   assert.deepEqual(await checked('working'), [false], 'Bulk selection skips work in progress');
 
   await key('#select-all', ' ', 'Space', 32);
-  assert.equal(await evaluate('document.querySelectorAll("input:checked").length'), 0, 'The checked bulk control clears every tick');
+  assert.equal(await evaluate('document.querySelectorAll("input[data-component]:checked").length'), 0, 'The checked bulk control clears every tick');
   assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), false);
   await key('#select-all', ' ', 'Space', 32);
   await waitForDom('!document.querySelector("#commit").disabled', 'Bulk selection gets a commit message');
@@ -289,7 +360,7 @@ async function main() {
   broadcast({ type: 'changes.updated', project, generation: 7 });
   await waitForDom('document.querySelector("#availability").textContent === "No changes to review." && document.querySelector("#selection-controls").hidden', 'Empty review hides bulk selection');
   assert.deepEqual(errors, []);
-  console.log('Changes UI smoke passed: scoped selection and reset, keyboard ticks and diffs, bulk selection and one combined commit, Other review, message races, partial conflicts, hooks, Fix and Restart, unavailable status, and Git branch states.');
+  console.log('Changes UI smoke passed: scoped selection and reset, keyboard diffs, bulk commits, automatic and manual message generation, saved preference, message races, typed commits, partial conflicts, Fix and Restart, and project states.');
 }
 
 async function finish(code) {

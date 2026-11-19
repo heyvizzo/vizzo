@@ -94,7 +94,7 @@ export class ChangesReview {
   }
 }
 
-/** The current selection owns an automatic draft. A user edit takes precedence even if it blanks the field. */
+/** Generated text belongs to the selection. A user edit is kept even if it blanks the field. */
 export class MessageDraft {
   text = "";
   private edited = false;
@@ -114,18 +114,24 @@ export class MessageDraft {
     this.version++;
   }
 
-  update(selection: ChangesSelectionRequest | undefined): number | undefined {
+  update(selection: ChangesSelectionRequest | undefined): boolean {
     const key = selection ? JSON.stringify(selection) : "";
-    if (this.edited || key === this.selectionKey) return;
+    if (key === this.selectionKey) return false;
     this.selectionKey = key;
     this.version++;
-    this.text = "";
-    return selection ? this.version : undefined;
+    if (!this.edited) this.text = "";
+    return true;
+  }
+
+  begin(manual: boolean): number | undefined {
+    if (!this.selectionKey || (!manual && (this.edited || this.text))) return;
+    return ++this.version;
   }
 
   resolve(version: number, text: string): boolean {
     if (version !== this.version) return false;
     this.text = text;
+    this.edited = false;
     return true;
   }
 }

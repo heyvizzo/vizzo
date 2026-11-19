@@ -39,6 +39,10 @@
           <span id="message-status" class="hint" role="status"></span>
         </div>
         <textarea id="commit-message" rows="2" spellcheck="false"></textarea>
+        <div class="message-tools">
+          <label><input type="checkbox" id="auto-commit-message" checked /> Automatically generate commit message</label>
+          <button type="button" id="generate-message" hidden disabled>Generate</button>
+        </div>
         <p id="selection-note" class="hint" role="status" hidden></p>
         <div class="commit-actions">
           <p class="hint">Pre-commit and commit-msg hooks don’t run.</p>

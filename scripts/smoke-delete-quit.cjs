@@ -12,6 +12,8 @@ const home = mkdtempSync(join(tmpdir(), 'vizzo-delete-quit-'));
 app.setPath('userData', home);
 const config = join(home, 'config');
 const threads = join(config, 'threads.json');
+const settings = join(config, 'settings.json');
+const setSourceControl = gitSourceControl => writeFileSync(settings, JSON.stringify({ chat: JSON.stringify({ gitSourceControl }) }));
 const journal = join(config, 'ledger.json');
 const repo = join(home, 'repo');
 const index = join(repo, '.git', 'index');
@@ -29,7 +31,7 @@ async function wait(test, label) {
 }
 async function boot() {
   const child = active = utilityProcess.fork(join(root, 'dist-electron/server.mjs'), [], { env: {
-    ...process.env, VIZZO_THREADS_FILE: threads, PROJECT_DIR: repo, PORT: '0', WARM_AGENTS: '0', LOCAL_TTS: '0', LOCAL_STT: '0', FAKE_VENDORS: '1',
+    ...process.env, VIZZO_THREADS_FILE: threads, VIZZO_SETTINGS_FILE: settings, PROJECT_DIR: repo, PORT: '0', WARM_AGENTS: '0', LOCAL_TTS: '0', LOCAL_STT: '0', FAKE_VENDORS: '1',
     LLM_SELECTION_FILE: join(config, 'llm-selection.json'), SPEECH_SELECTION_FILE: join(config, 'speech-selection.json'), APP_ROOT: `${root}/`,
   }, stdio: 'inherit' });
   const messages = [];
@@ -52,6 +54,7 @@ async function quit(server) {
 async function main() {
   await app.whenReady();
   const threadId = execFileSync(join(root, 'node_modules/.bin/tsx'), [join(__dirname, 'smoke-delete-quit-seed.ts'), home], { encoding: 'utf8' }).trim();
+  setSourceControl(true);
   const base = git('rev-parse', 'HEAD');
   const oldIndex = readFileSync(index);
   const first = await boot();
@@ -72,6 +75,7 @@ async function main() {
   assert(!first.messages.some(m => /commit/i.test(m.finished?.title ?? '')));
   await quit(first);
 
+  setSourceControl(false);
   const recovered = await boot();
   const snapshot = await wait(() => recovered.received.find(m => m.type === 'threads.snapshot'), 'recovered thread snapshot');
   assert.deepEqual(snapshot.threads, []);

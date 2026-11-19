@@ -309,8 +309,8 @@ function init(): void {
   ipcRenderer.on("page:open-thread", (_e, threadId: unknown) => {
     if (typeof threadId === "string") threads.open(threadId);
   });
-  ipcRenderer.on("changes:page-status", (_e, status: PageChangesStatus) => {
-    threads.setChangesStatus(status);
+  ipcRenderer.on("changes:page-status", (_e, status: PageChangesStatus, enabled: unknown) => {
+    threads.setChangesStatus(status, enabled === true);
   });
 
   ipcRenderer.on("page:cmd", (_e, cmd: PageCmd) => {

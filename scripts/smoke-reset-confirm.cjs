@@ -23,7 +23,7 @@ const threads = [
   { ...base, threadId: 't4', title: 'four', state: 'idle' },
 ];
 ipcMain.on('hotkeys:get', e => { e.returnValue = null; });
-ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false }); });
+ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false, gitSourceControl: true }); });
 ipcMain.handle('attention:get', () => null);
 ipcMain.handle('project:get', () => null);
 ipcMain.handle('page:url', () => base.pageUrl);
@@ -212,6 +212,28 @@ async function main() {
   await clickReset();
   await until(() => resets() === 2, 'reset sent without asking');
   assert.equal(await confirmText(), null);
+  send({ type: 'conversation.reset.done', requestId: mutations().at(-1).requestId });
+  await until(() => evaluate('!document.getElementById("reset").disabled'), 'empty reset acknowledged');
+  // Opting out during a pending Git preview replaces it with a generic Keep-only confirmation.
+  send({ type: 'threads.snapshot', threads });
+  await until(async () => await listed() === 4, 'threads restored for opt-out');
+  await clickReset();
+  await until(() => previews().length === 8, 'old preview in flight');
+  const setSourceControl = gitSourceControl => chat.webContents.send('chat-settings:changed', JSON.stringify({ gitSourceControl }));
+  setSourceControl(false);
+  await until(confirmReady, 'generic confirmation is immediately usable');
+  assert.doesNotMatch(await confirmText(), /commit|changes/i);
+  reply(previews()[7], states);
+  setSourceControl(true);
+  await until(async () => await confirmText() === null, 're-enable dismisses generic confirmation');
+  setSourceControl(false);
+  await clickReset();
+  await until(confirmReady, 'New conversation works without a Git preview');
+  assert.doesNotMatch(await confirmText(), /commit|changes/i);
+  await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
+  await until(() => resets() === 3, 'generic reset sent once');
+  assert.deepEqual(mutations().at(-1).threads, choices.map(choice => ({ ...choice, mode: 'keep' })));
+  assert.equal(previews().length, 8, 'disabled reset can never request a Git review');
   assert.deepEqual(errors, []);
   console.log('Reset confirm smoke passed: batches count tied and working threads, refresh when work starts, preserve Keep choices and markers, and reset without a preceding cancellation.');
 }

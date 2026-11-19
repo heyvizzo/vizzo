@@ -3,6 +3,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { changesPreferences, type ChangesPreferences } from "../shared/changesPreferences.ts";
 import { keychainCipher, keychainService, openEnv, type Cipher, type StoredEnv } from "./secrets.ts";
 
 export interface EnvField {
@@ -38,6 +39,16 @@ export const DEV_APP_NAME = "vizzo";
 /** Unpackaged Electron stores this under ~/Library/Application Support/. `npm run dev` reads the same file. */
 export function desktopSettingsPath(): string {
   return join(homedir(), "Library", "Application Support", DEV_APP_NAME, "settings.json");
+}
+
+/** Reads the source-control preferences from the saved chat settings. */
+export function readChangesPreferences(file = process.env.VIZZO_SETTINGS_FILE ?? desktopSettingsPath()): ChangesPreferences {
+  try {
+    const chat: unknown = JSON.parse(readFileSync(file, "utf8"))?.chat;
+    return changesPreferences(typeof chat === "string" ? JSON.parse(chat) : null);
+  } catch {
+    return changesPreferences(null);
+  }
 }
 
 /** Keeps only known settings keys. Blank strings clear a key. */

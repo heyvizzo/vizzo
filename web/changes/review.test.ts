@@ -126,30 +126,56 @@ describe("message draft", () => {
 
   it("ignores an out-of-date prefill and preserves user edits, even an empty message", () => {
     const draft = new MessageDraft();
-    const first = draft.update(selection)!;
-    const second = draft.update({ ...selection, generation: 2 })!;
+    expect(draft.update(selection)).toBe(true);
+    const first = draft.begin(false)!;
+    expect(draft.update(selection)).toBe(false);
+    draft.update({ ...selection, generation: 2 });
+    const second = draft.begin(false)!;
     expect(draft.resolve(first, "Old selection")).toBe(false);
     expect(draft.resolve(second, "Current selection")).toBe(true);
-    const third = draft.update({ ...selection, generation: 3 })!;
+    draft.update({ ...selection, generation: 3 });
+    const third = draft.begin(false)!;
     draft.edit("My draft");
     expect(draft.resolve(third, "Late prefill")).toBe(false);
-    expect(draft.update(undefined)).toBeUndefined();
+    draft.update(undefined);
     expect(draft.text).toBe("My draft");
     draft.edit("");
-    expect(draft.update({ ...selection, generation: 4 })).toBeUndefined();
+    draft.update({ ...selection, generation: 4 });
+    expect(draft.begin(false)).toBeUndefined();
     expect(draft.text).toBe("");
   });
 
   it("starts a fresh prefill after reset and invalidates a request for cleared ticks", () => {
     const draft = new MessageDraft();
-    const first = draft.update(selection)!;
+    draft.update(selection);
+    const first = draft.begin(false)!;
     draft.update(undefined);
     expect(draft.resolve(first, "Cleared selection")).toBe(false);
     draft.edit("Old scope");
     draft.reset();
     expect(draft.text).toBe("");
-    const latest = draft.update(selection)!;
+    draft.update(selection);
+    const latest = draft.begin(false)!;
     expect(draft.resolve(latest, "New scope")).toBe(true);
     expect(draft.text).toBe("New scope");
+  });
+
+  it("only replaces custom text after a manual request for the current selection succeeds", () => {
+    const draft = new MessageDraft();
+    expect(draft.begin(true)).toBeUndefined();
+    draft.update(selection);
+    draft.edit("Custom draft");
+    expect(draft.begin(false)).toBeUndefined();
+    const outdated = draft.begin(true)!;
+    draft.update({ ...selection, generation: 2 });
+    expect(draft.resolve(outdated, "Old selection")).toBe(false);
+    const current = draft.begin(true)!;
+    expect(draft.text).toBe("Custom draft");
+    expect(draft.resolve(current, "New message")).toBe(true);
+    expect(draft.text).toBe("New message");
+    expect(draft.begin(false)).toBeUndefined();
+    draft.update(selection);
+    expect(draft.text).toBe("");
+    expect(draft.begin(false)).toBeTypeOf("number");
   });
 });

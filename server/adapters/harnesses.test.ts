@@ -223,6 +223,32 @@ describe("harness toggles", () => {
     expect(opencodeSetup(solver)).toEqual({ pure: false, env: {} });
   });
 
+  it("isolates commit drafting from harness tools and custom agents", () => {
+    const commit = spec({ commitMessage: true, toggles: { shell: true, plugins: true, instructions: true, mcp: true } });
+    const claude = claudeArgs(commit, plugins);
+    expect(claude).toEqual(expect.arrayContaining(["--safe-mode", "--strict-mcp-config", "--disable-slash-commands"]));
+    expect(after(claude, "--tools")).toBe("");
+    expect(grokArgs({ ...commit, harness: "grok" }, "Draft a message")).toContain("--tools=");
+    const codex = { ...commit, harness: "codex" as const };
+    expect(codexConfig(codex, ["custom"])).toMatchObject({
+      features: { shell_tool: false, plugins: false, view_image: false, goals: false, default_mode_request_user_input: false,
+        code_mode: false, code_mode_only: false, request_permissions_tool: false },
+      mcp_servers: { custom: { enabled: false } }, project_doc_max_bytes: 0,
+      tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false } },
+    });
+    expect(describeAgent(codex)).toContain("sandbox: read-only, approvalPolicy: never, baseInstructions");
+    for (const harness of ["pi", "omp"] as const) {
+      expect(rpcArgs({ ...commit, harness })).toEqual(expect.arrayContaining(["--no-session", "--no-extensions", "--no-tools", "--no-skills"]));
+    }
+    const opencode = { ...commit, harness: "opencode" as const };
+    const setup = opencodeSetup(opencode);
+    expect(setup).toMatchObject({ pure: true, env: { OPENCODE_DISABLE_PROJECT_CONFIG: "true", OPENCODE_EXPERIMENTAL_CODE_MODE: "false" } });
+    expect(JSON.parse(setup.config!)).toMatchObject({
+      agent: { "vizzo-commit-message": { mode: "primary", permission: { "*": "deny" }, steps: 1 } }, share: "disabled",
+    });
+    expect(describeAgent(opencode)).toContain("tools: none } · permissions: deny all");
+  });
+
   it("Pi and OhMyPi: discovery flags drop when toggled on; tools join the allowlist", () => {
     const pi = rpcArgs(spec({ harness: "pi", toggles: { shell: true, skills: true, plugins: true, instructions: true } }));
     expect(pi).not.toEqual(expect.arrayContaining(["--no-skills"]));

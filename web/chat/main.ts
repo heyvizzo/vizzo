@@ -81,6 +81,7 @@ const BOT_LABEL = "Assistant";
 // sidebar saves only its own (SIDEBAR_KEYS).
 const settings = loadSettings(shell?.chatSettings);
 const saveSettings = () => saveSettingsKeys(shell?.chatSettings, settings, SIDEBAR_KEYS);
+let sourceControlRevision = 0;
 
 // ── layout ─────────────────────────────────────────
 const app = document.getElementById("app")!;
@@ -224,6 +225,11 @@ shell?.chatSettings?.onChanged?.((json) => {
   const prev = { ...settings };
   if (JSON.stringify(next.llm) !== JSON.stringify(settings.llm)) llmSelectionChanged = true;
   Object.assign(settings, Object.fromEntries(PANEL_KEYS.map((key) => [key, next[key]])));
+  if (settings.gitSourceControl !== prev.gitSourceControl) {
+    sourceControlRevision++;
+    for (const finish of deletePreviews.values()) finish(new Error("Review the deletion again."));
+    refreshDeleteConfirm();
+  }
   publishDrawingAvailability();
   if (settings.sttModel !== prev.sttModel) for (const q of queue) transcribeQueued(q); // an on-device model: transcribe what's queued
   if (settings.debugOutlines !== prev.debugOutlines || settings.hoverOutline !== prev.hoverOutline || settings.showDebug !== prev.showDebug || settings.showSolverSession !== prev.showSolverSession || settings.showFullAnswers !== prev.showFullAnswers) sendDebug();
@@ -1026,6 +1032,10 @@ function localThreadWorking(threadId: string): boolean {
 function previewDelete(threadIds: string[]): Promise<ThreadDeletePreview[]> {
   if (!threadIds.length) return Promise.resolve([]);
   if (!sock.isOpen) return Promise.reject(new Error("Server not connected."));
+  if (!settings.gitSourceControl) return Promise.resolve(threadIds.map((threadId) => ({
+    threadId, defaultMode: "keep", state: localThreadWorking(threadId) || threads.get(threadId)?.state === "running" ? "working" : "none",
+  })));
+  const revision = sourceControlRevision;
   const requestId = crypto.randomUUID();
   const working = new Set(threadIds.filter(localThreadWorking));
   return new Promise((resolve, reject) => {
@@ -1033,6 +1043,7 @@ function previewDelete(threadIds: string[]): Promise<ThreadDeletePreview[]> {
     function finish(result: ThreadDeletePreview[] | Error): void {
       clearTimeout(timeout);
       deletePreviews.delete(requestId);
+      if (revision !== sourceControlRevision) { reject(new Error("Review the deletion again.")); return; }
       if (result instanceof Error) { reject(result); return; }
       const previews = new Map(result.map((item) => [item.threadId, item]));
       if (previews.size !== threadIds.length || threadIds.some((id) => !previews.has(id))) {
@@ -1053,6 +1064,7 @@ function previewDelete(threadIds: string[]): Promise<ThreadDeletePreview[]> {
 function submitDelete(type: "thread.delete" | "threads.delete" | "conversation.reset", choices: ThreadDeleteChoice[]): void {
   if (pendingDelete) return setStatus("A deletion is already in progress.", true);
   if (!sock.isOpen) return setStatus("Server not connected.", true);
+  if (!settings.gitSourceControl && choices.some(({ mode }) => mode === "commit")) return setStatus("Review the deletion again.", true);
   const requestId = crypto.randomUUID();
   const modes = choices.map((choice): ThreadDeleteChoice => localThreadWorking(choice.threadId) ? { ...choice, mode: "keep" } : choice);
   pendingDelete = { requestId, waiting: new Set(choices.map((c) => c.threadId)), reset: type === "conversation.reset" };
@@ -1085,11 +1097,12 @@ async function deleteThread(threadId: string): Promise<void> {
   if (pendingDelete || previewingDeletes.has(threadId)) return;
   previewingDeletes.add(threadId);
   renderThreadList();
+  const revision = sourceControlRevision;
   try {
     const [preview] = await previewDelete([threadId]);
-    if (preview && threads.has(threadId)) submitDelete("thread.delete", [{ threadId, mode: preview.state === "complete" ? preview.defaultMode : "keep" }]);
+    if (revision === sourceControlRevision && preview && threads.has(threadId)) submitDelete("thread.delete", [{ threadId, mode: preview.state === "complete" ? preview.defaultMode : "keep" }]);
   } catch (error) {
-    setStatus((error as Error).message, true);
+    if (revision === sourceControlRevision) setStatus((error as Error).message, true);
   } finally {
     previewingDeletes.delete(threadId);
     renderThreadList();
@@ -2764,7 +2777,7 @@ function deleteBatchLines(previews: ThreadDeletePreview[], committed: number, re
   const lines: string[] = [];
   if (previews.length) {
     lines.push(`${plural(previews.length, "thread")} will be deleted${page ? " on this page" : ", on every page"}.`);
-    lines.push(`${plural(committed, "thread")} will be committed, ${kept} kept uncommitted.`);
+    if (settings.gitSourceControl) lines.push(`${plural(committed, "thread")} will be committed, ${kept} kept uncommitted.`);
     lines.push(working
       ? `${working === 1 ? "1 thread is" : `${working} threads are`} still working and will be stopped.`
       : "None of them are working, so nothing will be stopped.");
@@ -2773,13 +2786,21 @@ function deleteBatchLines(previews: ThreadDeletePreview[], committed: number, re
   return lines;
 }
 
-let batchConfirm: { box: HTMLElement; anchor: () => HTMLButtonElement | undefined } | null = null;
+let batchConfirm: { box: HTMLElement; anchor: () => HTMLButtonElement | undefined; page?: string } | null = null;
 
 function closeDeleteConfirm(restoreFocus = false): void {
   const dialog = batchConfirm;
   batchConfirm = null;
   dialog?.box.remove();
   if (restoreFocus) dialog?.anchor()?.focus();
+}
+
+function refreshDeleteConfirm(): void {
+  const dialog = batchConfirm;
+  if (!dialog) return;
+  closeDeleteConfirm(true);
+  const button = dialog.anchor();
+  if (!settings.gitSourceControl && button) void openDeleteConfirm(button, dialog.page);
 }
 
 async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep: ReadonlySet<string> = new Set()): Promise<void> {
@@ -2806,7 +2827,7 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep:
   const description = el("div");
   description.id = "batch-delete-description";
   description.setAttribute("aria-live", "polite");
-  if (ids.length) description.append(el("p", "", "Checking thread changes…"));
+  if (ids.length && settings.gitSourceControl) description.append(el("p", "", "Checking thread changes…"));
   const cancel = el("button", "", "Cancel");
   const ok = el("button", "danger", reset ? "Clear conversation" : "Delete threads");
   cancel.type = ok.type = "button";
@@ -2828,7 +2849,7 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep:
   actions.append(cancel);
   box.append(el("strong", "", title), description, actions);
   (reset ? button : $("threads-clear").parentElement!).after(box);
-  const dialog = { box, anchor };
+  const dialog = { box, anchor, page };
   batchConfirm = dialog;
   cancel.focus();
 
@@ -2842,6 +2863,7 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep:
     const committed = choices.filter((c) => c.mode === "commit").length;
     description.replaceChildren(...deleteBatchLines(previews, committed, reset, page !== undefined, tasks).map((l) => el("p", "", l)));
     ok.onclick = () => {
+      if (batchConfirm !== dialog) return;
       const current = scope();
       const next = anchor();
       const nowWorking = choices.filter(({ threadId, mode }) => mode === "commit"
