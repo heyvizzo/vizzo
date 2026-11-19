@@ -67,18 +67,20 @@
             <div class="tier">
               <label for="commit-message-tier" class="label">Commit message model</label>
               <span id="commit-message-tier-hint" class="hint">Uses the model configured for the selected tier.</span>
-              <div class="tier-row">
+              <div class="tier-row commit-message-row">
                 <select id="commit-message-tier" aria-describedby="commit-message-tier-hint">
                   <option value="fast">Fast</option>
                   <option value="smart">Smart</option>
                 </select>
+                <div class="tier commit-message-timeout">
+                  <label>
+                    <span id="commit-message-timeout-label" class="label">Fast timeout (seconds)</span>
+                    <input id="commit-message-timeout" type="number" min="1" step="1" inputmode="numeric" class="num" aria-labelledby="commit-message-timeout-label" aria-describedby="commit-message-timeout-error" />
+                  </label>
+                  <span id="commit-message-timeout-error" class="field-error" role="alert" hidden></span>
+                </div>
               </div>
             </div>
-            <label>
-              <span id="commit-message-timeout-label" class="label">Fast timeout (seconds)</span>
-              <input id="commit-message-timeout" type="number" min="1" step="1" inputmode="numeric" class="num" aria-labelledby="commit-message-timeout-label" aria-describedby="commit-message-timeout-error" />
-              <span id="commit-message-timeout-error" class="field-error" role="alert" hidden></span>
-            </label>
           </div>
         </div>
         <h3 class="sub-head">Turns</h3>
