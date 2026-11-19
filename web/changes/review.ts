@@ -1,4 +1,4 @@
-import type { ChangeComponent, ChangeGroup, ChangesSelectionRequest, ChangesView } from "../../shared/changes.ts";
+import type { ChangeComponent, ChangeGroup, ChangesMessageResult, ChangesSelectionRequest, ChangesView } from "../../shared/changes.ts";
 
 export function scopeFromHash(hash: string): string | null {
   return new URLSearchParams(hash.slice(1)).get("thread") || null;
@@ -128,10 +128,11 @@ export class MessageDraft {
     return ++this.version;
   }
 
-  resolve(version: number, text: string): boolean {
-    if (version !== this.version) return false;
-    this.text = text;
+  resolve(version: number, result: ChangesMessageResult): "filled" | "kept" | undefined {
+    if (version !== this.version) return;
+    if (result.status === "fallback" && this.text.trim()) return "kept";
+    this.text = result.message;
     this.edited = false;
-    return true;
+    return "filled";
   }
 }

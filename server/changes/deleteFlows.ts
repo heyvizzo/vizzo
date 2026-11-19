@@ -344,7 +344,7 @@ export class ThreadDeletes {
       const groups = review.view.groups.map((group) =>
         request.writerIds.includes(changeWriterId(group.writer)) ? { ...group, title: job.title } : group);
       const threads = new Map([[job.threadId, job.messages]]);
-      const message = await prepareCommitMessage({ ...review, view: { ...review.view, groups } },
+      const { message } = await prepareCommitMessage({ ...review, view: { ...review.view, groups } },
         review.view.components.filter(({ id }) => selected.has(id)),
         await writers.snapshot(review.project.id), { tier: commitMessageTier, fallback: request.message, threads });
       request = { ...request, message };

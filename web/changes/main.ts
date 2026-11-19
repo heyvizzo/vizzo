@@ -1,4 +1,4 @@
-import type { ChangesActionResult, ChangesJobs, ChangesRestartHarness, ChangesSelectionRequest, ChangesStatus } from "../../shared/changes.ts";
+import type { ChangesActionResult, ChangesJobs, ChangesMessageFailure, ChangesRestartHarness, ChangesSelectionRequest, ChangesStatus } from "../../shared/changes.ts";
 import type { ServerMsg } from "../../shared/protocol.ts";
 import { changesApi, ChangesError } from "./api.ts";
 import { ChangesList, element } from "./list.ts";
@@ -42,6 +42,11 @@ try { autoMessage.checked = preferences?.getAuto() ?? (localStorage.getItem(auto
 
 const activeProject = () => "project" in status ? status.project : undefined;
 const errorText = (error: unknown): string => error instanceof ChangesError ? error.message : "Couldn’t reach source control.";
+const draftFailure: Record<ChangesMessageFailure, string> = {
+  timeout: "The model timed out.",
+  "missing-model": "Choose a model in Settings.",
+  "provider-error": "The model couldn’t draft a message.",
+};
 
 function renderReview(): void {
   const { view, scope, scopedGroup } = review;
@@ -132,8 +137,12 @@ function requestMessage(selection: ChangesSelectionRequest, manual: boolean): vo
     try {
       const response = await changesApi.message(selection, controller.signal);
       if (controller.signal.aborted) return;
-      if (draft.resolve(version, response.message)) message.value = draft.text;
-      messageStatus.textContent = "";
+      const applied = draft.resolve(version, response);
+      if (applied === undefined) return;
+      if (applied === "filled") message.value = draft.text;
+      messageStatus.textContent = response.status === "fallback"
+        ? `${draftFailure[response.reason]} ${applied === "kept" ? "Kept your draft." : "Using a fallback message."}`
+        : "";
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof ChangesError && error.status === 409) requireReview(error);

@@ -30,7 +30,14 @@ export function startWebServer(root: string, backendPort: number, port = 0): Pro
         res.writeHead(up.statusCode ?? 502, up.headers);
         up.pipe(res);
       });
-      upstream.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      if (url.split("?")[0] === "/api/changes/message") {
+        res.on("close", () => { if (!res.writableFinished) upstream.destroy(); });
+      }
+      upstream.on("error", () => {
+        if (res.destroyed) return;
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      });
       req.pipe(upstream);
       return;
     }

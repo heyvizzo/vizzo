@@ -38,6 +38,7 @@ let jobs = { jobs: [{ id: 'fix-me', commit, reason: 'Git’s staging area needs 
 let win, firstDraft, finishFix, finishCombined;
 let holdDraft = false;
 let pendingDraft;
+let nextDraft;
 const errors = [];
 const calls = [];
 const socket = new WebSocketServer({ noServer: true });
@@ -93,13 +94,18 @@ async function serve(req, res) {
       assert.equal(url.searchParams.get('project'), project);
       return respond(jobs);
     case '/api/changes/message':
-      if (!firstDraft) { firstDraft = () => respond({ message: 'Outdated prefill' }); return; }
+      if (!firstDraft) { firstDraft = () => respond({ status: 'generated', message: 'Outdated prefill' }); return; }
+      if (nextDraft) {
+        const draft = nextDraft;
+        nextDraft = undefined;
+        return respond(draft);
+      }
       if (holdDraft) {
         holdDraft = false;
-        pendingDraft = message => respond({ message });
+        pendingDraft = message => respond({ status: 'generated', message });
         return;
       }
-      return respond({ message: 'Update project files' });
+      return respond({ status: 'generated', message: 'Update project files' });
     case '/api/changes/commit':
       if (!body.separately) {
         finishCombined = () => {
@@ -298,10 +304,16 @@ async function main() {
   assert.equal(await messageText(), 'Typed while generating');
   assert.equal(messageCalls(), 3, 'Changing the selection discards the request without generating again');
 
+  nextDraft = { status: 'fallback', reason: 'timeout', message: 'Fix the header' };
+  await click('#generate-message');
+  await waitForDom('document.querySelector("#message-status").textContent === "The model timed out. Kept your draft."', 'A timeout is shown alongside an unchanged typed draft');
+  assert.equal(await messageText(), 'Typed while generating');
+
   await click('#generate-message');
   await waitForDom('document.querySelector("#commit-message").value === "Update project files"', 'Successful manual generation replaces the draft');
   assert.deepEqual(lastCall('message').body, { project, generation: 3, components: ['own', 'tied'] });
-  assert.equal(messageCalls(), 4);
+  assert.equal(messageCalls(), 5);
+  assert.equal(await evaluate('document.querySelector("#message-status").textContent'), '');
 
   await evaluate('location.hash = ""');
   await waitForDom('!document.querySelector(".other-threads") && !document.querySelector("input[data-component]:checked")', 'Opening unscoped clears the selection');
@@ -312,7 +324,7 @@ async function main() {
   await click('#commit-separately');
   await waitForDom('document.querySelector("#result").textContent.startsWith("Committed ") && !document.querySelector("input[data-component=other-new]")', 'Other-only commit succeeds');
   assert.deepEqual(lastCall('commit').body, { project, generation: 3, components: ['other-new'], message: 'Commit Other by hand', separately: true });
-  assert.equal(messageCalls(), 4, 'A typed message can be committed without generating');
+  assert.equal(messageCalls(), 5, 'A typed message can be committed without generating');
 
   await click('#auto-commit-message');
   await evaluate(`location.hash = ${JSON.stringify(scope)}`);
@@ -331,8 +343,10 @@ async function main() {
   await key('#select-all', ' ', 'Space', 32);
   assert.equal(await evaluate('document.querySelectorAll("input[data-component]:checked").length'), 0, 'The checked bulk control clears every tick');
   assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), false);
+  nextDraft = { status: 'fallback', reason: 'provider-error', message: 'Commit selected changes' };
   await key('#select-all', ' ', 'Space', 32);
-  await waitForDom('!document.querySelector("#commit").disabled', 'Bulk selection gets a commit message');
+  await waitForDom('!document.querySelector("#commit").disabled && document.querySelector("#message-status").textContent.endsWith("Using a fallback message.")', 'An automatic fallback is labeled and can be committed');
+  assert.equal(await messageText(), 'Commit selected changes');
   assert.equal(calls.filter(call => call.path === '/api/changes/commit').length, priorCommits, 'Selecting all never commits by itself');
 
   await click('#commit');
@@ -340,7 +354,7 @@ async function main() {
   assert.equal(await evaluate('document.querySelector("#select-all").disabled'), true, 'Bulk selection stays disabled during Commit');
   assert.deepEqual(lastCall('commit').body, {
     project, generation: 4, components: ['job-own', 'mixed', 'other-later', 'own', 'tied'],
-    message: 'Update project files', separately: false, scopeThreadId: thread.id,
+    message: 'Commit selected changes', separately: false, scopeThreadId: thread.id,
   });
   finishCombined();
   await waitForDom('document.querySelector("#result").textContent.startsWith("Committed ") && !document.querySelector("input[data-component=other-later]")', 'Bulk commit succeeds');
