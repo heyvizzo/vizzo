@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { readChangesPreferences } from "../../electron/settings.ts";
 import { beginTask } from "../activity.ts";
 import type { CommitScan } from "./changesService.ts";
 import type { CommitRequest, CommitResult } from "./commitTransaction.ts";
@@ -8,6 +9,7 @@ import { carryChangesAfterPublication, changeWriterId, writerWork, type ChangeOw
 import type { ThreadDeleteContext, ThreadDeleteHandoff } from "./ledger.ts";
 import { isLedgerCommitPinned, type LedgerWorkerClient } from "./ledgerWorkerClient.ts";
 import { prepareCommitMessage } from "./message.ts";
+import { closedMessageContext, type CommitContextMessage } from "./messageContext.ts";
 import type { LedgerProject } from "./project.ts";
 import { isGitScanUnavailable, REVIEW_AGAIN, type ScanGroupState, type ScanReview, type ScanRuntime } from "./scanRuntime.ts";
 import type { ProjectWriterSnapshot, WriterRegistry } from "./writers.ts";
@@ -18,6 +20,7 @@ export interface ThreadDeleteTarget {
   folder: string | null;
   requests: readonly string[];
   summary?: string;
+  messageContext?: readonly CommitContextMessage[];
   mode: "commit" | "keep";
   working?: boolean;
   interruptedExecutionId?: string;
@@ -38,6 +41,7 @@ export interface ThreadDeletePreview {
 
 export interface ThreadDeletePorts {
   prepare?(): void | Promise<void>;
+  verifyCommit?(): void;
   stop(threadId: string): void | Promise<void>;
   /** Flush the thread store durably and throw on failure. */
   remove(threadIds: readonly string[]): void | Promise<void>;
@@ -63,7 +67,9 @@ interface Preflight {
 }
 
 interface DeleteJob {
+  threadId: string;
   title: string;
+  messages: readonly CommitContextMessage[];
   review: ScanReview;
   request: CommitRequest;
   persisted: CommitRequest;
@@ -139,6 +145,7 @@ function handoff(target: ThreadDeleteTarget, preview: ThreadDeletePreview, revie
     : preview.reason ?? tied ?? (preview.owned && !request ? "Kept uncommitted" : undefined);
   return {
     project: review.project, threadId: target.threadId, title: target.title, requests: [...target.requests], summary: target.summary,
+    messageContext: target.messageContext,
     reason, notice: !!preview.owned && !request && preview.state === "complete" && !!preview.reason, request,
   };
 }
@@ -155,6 +162,7 @@ function unreviewed(target: ThreadDeleteTarget, project: LedgerProject, initial:
     },
     handoff: closed ? undefined : {
       project, threadId: target.threadId, title: target.title, requests: [...target.requests], summary: target.summary,
+      messageContext: target.messageContext,
       reason: explanation, notice: true,
     },
   };
@@ -277,14 +285,17 @@ export class ThreadDeletes {
           : { ...entry.preview, state: "working" };
         if (entry.handoff && entry.review) entry.handoff = handoff(entry.target, entry.preview, entry.review);
       }
+      ports.verifyCommit?.();
       await ports.prepare?.();
       await Promise.all(preflight.filter(({ preview }) => preview.state === "working").map(({ target }) => ports.stop(target.threadId)));
+      ports.verifyCommit?.();
       const handoffs = preflight.flatMap(({ handoff }) => handoff ? [handoff] : []);
       const queued = new Set(handoffs.length ? (await ledger.handoffThreadDeletes(handoffs)).jobIds : []);
       for (const { handoff, review } of preflight) {
         const request = handoff?.request;
         if (review && request && queued.has(request.jobId)) jobs.push({
-          title: handoff.title, request, persisted: request, review, finish: beginTask(`Commit ${handoff.title}`),
+          threadId: handoff.threadId, title: handoff.title, messages: closedMessageContext(handoff),
+          request, persisted: request, review, finish: beginTask(`Commit ${handoff.title}`),
         });
       }
       const ids = preflight.map(({ target }) => target.threadId);
@@ -326,13 +337,18 @@ export class ThreadDeletes {
   private async runJob(job: DeleteJob): Promise<{ result: CommitResult; receipt?: ChangeOwnershipReceipt }> {
     const { ledger, writers, commit } = this.services;
     const { review, persisted } = job;
-    const selected = new Set(job.request.componentIds);
-    const groups = review.view.groups.map((group) =>
-      job.request.writerIds.includes(changeWriterId(group.writer)) ? { ...group, title: job.title } : group);
-    const message = await prepareCommitMessage({ ...review, view: { ...review.view, groups } },
-      review.view.components.filter(({ id }) => selected.has(id)),
-      await writers.snapshot(review.project.id));
-    const request = { ...job.request, message };
+    let request = job.request;
+    const { autoCommitMessage, commitMessageTier } = readChangesPreferences();
+    if (autoCommitMessage) {
+      const selected = new Set(request.componentIds);
+      const groups = review.view.groups.map((group) =>
+        request.writerIds.includes(changeWriterId(group.writer)) ? { ...group, title: job.title } : group);
+      const threads = new Map([[job.threadId, job.messages]]);
+      const message = await prepareCommitMessage({ ...review, view: { ...review.view, groups } },
+        review.view.components.filter(({ id }) => selected.has(id)),
+        await writers.snapshot(review.project.id), { tier: commitMessageTier, fallback: request.message, threads });
+      request = { ...request, message };
+    }
     const key = { projectId: request.projectId, jobId: request.jobId };
     if (!isDeepStrictEqual(request, persisted) && !await ledger.carryThreadDeleteCommit(key, persisted, request)) throw new Error(REVIEW_AGAIN);
     let receipt: ChangeOwnershipReceipt | undefined;

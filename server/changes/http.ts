@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
+import { readChangesPreferences } from "../../electron/settings.ts";
 import type { ChangesJobs, ChangesRestartHarness, ChangesSelectionRequest, ChangesStatus } from "../../shared/changes.ts";
 import { beginTask } from "../activity.ts";
 import { restartSharedHarness } from "../adapters/harnesses.ts";
@@ -141,10 +142,14 @@ function stillCurrent(isCurrent: () => boolean): void {
 
 export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions = {}) {
   const { model, restart = restartSharedHarness } = opts;
-  return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> => {
+  return async (req: IncomingMessage, res: ServerResponse, url: URL, isEnabled: () => boolean = () => true): Promise<void> => {
     const path = url.pathname;
+    const verifyEnabled = () => {
+      if (!isEnabled()) throw new RequestError(404, "Git source control is disabled");
+    };
     try {
       if (!isLocalChangesRequest(req)) throw new RequestError(403, "Source control requires the local Vizzo window");
+      verifyEnabled();
       if (req.method === "GET") {
         if (path === "/api/changes/status") return respond(res, 200, changesStatus(service));
         if (!["/api/changes", "/api/changes/diff", "/api/changes/jobs"].includes(path)) throw new RequestError(404, "Unknown source-control route");
@@ -164,6 +169,7 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
         const [jobs, restart] = await Promise.all([
           service.jobs(project), pendingRestarts(service, context.project).catch(() => []),
         ]);
+        verifyEnabled();
         stillCurrent(context.isCurrent);
         return respond(res, 200, {
           jobs: visibleJobs(jobs).map(({ jobId, commit, reason, canFix, project: jobProject }) => {
@@ -182,13 +188,19 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
         throw new RequestError(404, "Unknown source-control route");
       }
       const body = await readJson(req);
+      verifyEnabled();
       if (path === "/api/changes/message" || path === "/api/changes/commit") {
         if (!validSelection(body)) throw new RequestError(400, "Select at least one change from a valid review");
         const chosen = selection(service, body);
         if (path === "/api/changes/message") {
-          const writers = await service.writerSnapshot(body.project);
+          const [writers, threads] = await Promise.all([
+            service.writerSnapshot(body.project), service.threadMessageContexts(chosen.review.project, chosen.components),
+          ]);
+          verifyEnabled();
           data(service.scanner.reviewCurrent(body.project, body.generation));
-          const message = await prepareCommitMessage(chosen.review, chosen.components, writers, model);
+          const { commitMessageTier } = readChangesPreferences();
+          const message = await prepareCommitMessage(chosen.review, chosen.components, writers, { tier: commitMessageTier, model, threads });
+          verifyEnabled();
           data(service.scanner.reviewCurrent(body.project, body.generation));
           return respond(res, 200, { message });
         }
@@ -210,11 +222,12 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
         if (!identifier(body.jobId)) throw new RequestError(400, "Invalid commit job");
         const context = data(service.scanner.projectContext(body.project));
         const jobs = visibleJobs(await service.jobs(body.project));
+        verifyEnabled();
         stillCurrent(context.isCurrent);
         if (!jobs.some(({ jobId, canFix, project }) => jobId === body.jobId && canFix && contains(context.project.scope, project.scope))) {
           throw new RequestError(409, "This commit job cannot be fixed in the current project");
         }
-        const result = await service.fix(body.project, body.jobId, context.isCurrent);
+        const result = await service.fix(body.project, body.jobId, () => isEnabled() && context.isCurrent());
         if (result.status !== "done") throw new RequestError(409, "message" in result ? result.message : REVIEW_AGAIN);
       } else {
         if ((body.harness !== "codex" && body.harness !== "opencode") ||
@@ -224,6 +237,7 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
         if (body.generation === undefined && service.scanner.status().kind === "ready") throw new RequestError(409, REVIEW_AGAIN);
         const context = data(service.scanner.projectContext(body.project, body.generation));
         const harnesses = await pendingRestarts(service, context.project);
+        verifyEnabled();
         stillCurrent(context.isCurrent);
         if (!harnesses.includes(body.harness)) throw new RequestError(409, "No matching writer is waiting for confirmation");
         await restart(body.harness);

@@ -79,6 +79,7 @@ export interface ClosedThread {
   title: string;
   requests: readonly string[];
   summary?: string;
+  messageContext?: readonly import("./messageContext.ts").CommitContextMessage[];
   reason?: string;
   notice?: boolean;
   commitJobId?: string;
