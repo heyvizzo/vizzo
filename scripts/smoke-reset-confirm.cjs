@@ -212,6 +212,8 @@ async function main() {
   await clickReset();
   await until(() => resets() === 2, 'reset sent without asking');
   assert.equal(await confirmText(), null);
+  send({ type: 'conversation.reset.done', requestId: mutations().at(-1).requestId });
+  await until(() => evaluate('!document.getElementById("reset").disabled'), 'empty reset acknowledged');
   // Opting out during a pending Git preview replaces it with a generic Keep-only confirmation.
   send({ type: 'threads.snapshot', threads });
   await until(async () => await listed() === 4, 'threads restored for opt-out');
