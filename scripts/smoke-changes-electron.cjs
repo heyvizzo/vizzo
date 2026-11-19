@@ -174,9 +174,10 @@ async function run() {
   const sidebar = await until(() => byUrl("/chat.html"), "sidebar");
   const page = await until(() => byUrl("/page.html"), "browser pane");
   const bar = (code) => toolbar.executeJavaScript(code);
-  const commitButton = () => panelNode(page, ".th-panel .th-commit");
-  const commitDisabled = () => inspect(page, ".th-panel .th-commit", "function() { return this.disabled; }");
-  page.debugger.attach("1.3");
+  const panel = await until(() => byUrl("/shell/thread-panel.html"), "native thread panel");
+  const commitButton = () => panelNode(panel, ".th-panel .th-commit");
+  const commitDisabled = () => inspect(panel, ".th-panel .th-commit", "function() { return this.disabled; }");
+  panel.debugger.attach("1.3");
   await until(() => sidebar.executeJavaScript('document.querySelectorAll(".thread-item").length === 1'), "thread snapshot");
   page.send("page:open-thread", threadId);
   const chatSettings = () => JSON.parse(JSON.parse(readFileSync(settings)).chat ?? "{}");
@@ -247,22 +248,22 @@ async function run() {
   await until(commitButton, "owned thread's Commit button");
   assert.equal(await commitDisabled(), false);
   const button = await commitButton();
-  const { object } = await page.debugger.sendCommand("DOM.resolveNode", { nodeId: button });
-  await page.debugger.sendCommand("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: "function() { this.click(); }" });
+  const { object } = await panel.debugger.sendCommand("DOM.resolveNode", { nodeId: button });
+  await panel.debugger.sendCommand("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: "function() { this.click(); }" });
   assert.equal(await evaluate("location.hash"), "", "synthetic overlay clicks do not open Changes");
-  await clickCommit(page, button);
+  await clickCommit(panel, button);
   const hash = `#thread=${encodeURIComponent(threadId)}`;
   await until(async () => await evaluate("location.hash") === hash, "encoded thread scope");
   const resets = await evaluate("scopeResets");
-  await clickCommit(page, await commitButton());
+  await clickCommit(panel, await commitButton());
   await until(async () => await evaluate("scopeResets") === resets + 1, "same scope resets");
   await bar('document.querySelector("#changes").click()');
   await until(async () => await evaluate("location.hash") === "", "toolbar clears scope");
   assert.deepEqual(changesWindows().map((w) => w.id), [window.id]);
 
-  await clickCommit(page, await commitButton());
+  await clickCommit(panel, await commitButton());
   await until(async () => await evaluate("location.hash") === hash, "scope opens again");
-  await inspect(page, ".th-panel textarea", `function() {
+  await inspect(panel, ".th-panel textarea", `function() {
     this.value = "A draft";
     this.dispatchEvent(new Event("input", { bubbles: true }));
     this.focus();
@@ -272,7 +273,7 @@ async function run() {
   publish({ ...ready, changedFiles: 99 }, 0);
   await until(() => bar('document.querySelector("#changes-count").textContent === "1"'), "project switch replaces status");
   await until(async () => await evaluate("location.hash") === "" && await commitDisabled(), "old project's scope clears and its Commit becomes disabled");
-  assert.deepEqual(await inspect(page, ".th-panel textarea", `function() {
+  assert.deepEqual(await inspect(panel, ".th-panel textarea", `function() {
     return { text: this.value, start: this.selectionStart, end: this.selectionEnd, focused: this.getRootNode().activeElement === this };
   }`), { text: "A draft", start: 2, end: 5, focused: true });
   assert(window.isVisible());
@@ -305,22 +306,22 @@ async function run() {
   await until(() => bar('!document.querySelector("#changes").hidden'), "outdated Git shows the unavailable button");
   assert.match(await bar('document.querySelector("#changes").getAttribute("aria-label")'), /requires Git 2\.41 or later/);
   await until(commitDisabled, "outdated Git disables thread Commit");
-  assert.match(await inspect(page, ".th-panel .th-commit", 'function() { return this.getAttribute("aria-label"); }'), /requires Git 2\.41 or later/);
+  assert.match(await inspect(panel, ".th-panel .th-commit", 'function() { return this.getAttribute("aria-label"); }'), /requires Git 2\.41 or later/);
   publish(ready);
   await until(() => bar('!document.querySelector("#changes").hidden'), "Git is ready for live toggle");
   await bar("shell.changes.open()");
   await until(() => changesWindows().find((w) => w.isVisible()), "Changes open before the live toggle");
-  await inspect(page, ".th-panel .th-trash", "function() { this.click(); }");
-  const oldAction = await until(() => panelNode(page, '.th-delete-actions [data-choice="commit"]'), "live Commit-and-delete offer");
-  const { object: stale } = await page.debugger.sendCommand("DOM.resolveNode", { nodeId: oldAction });
+  await inspect(panel, ".th-panel .th-trash", "function() { this.click(); }");
+  const oldAction = await until(() => panelNode(panel, '.th-delete-actions [data-choice="commit"]'), "live Commit-and-delete offer");
+  const { object: stale } = await panel.debugger.sendCommand("DOM.resolveNode", { nodeId: oldAction });
   await clickPreference();
   await until(() => bar('document.querySelector("#changes").hidden'), "live opt-out hides toolbar Changes");
   await until(() => changesWindows().length === 0, "live opt-out closes the Changes window");
   await until(async () => !(await commitButton()), "live opt-out removes thread Commit");
-  const generic = await until(() => inspect(page, ".th-foot", "function() { return this.innerText; }"), "generic delete confirmation");
+  const generic = await until(() => inspect(panel, ".th-foot", "function() { return this.innerText; }"), "generic delete confirmation");
   assert.match(generic, /Delete this thread/);
   assert.doesNotMatch(generic, /commit|changes/i);
-  assert.equal(await panelNode(page, '.th-delete-actions [data-choice="commit"]'), 0);
+  assert.equal(await panelNode(panel, '.th-delete-actions [data-choice="commit"]'), 0);
   assert.equal(chatSettings().gitSourceControl, false);
   assert.equal(chatSettings().autoCommitMessage, false);
   publish(ready); // An already-running scan can still report results after the setting is turned off.
@@ -330,10 +331,10 @@ async function run() {
   assert.equal(changesWindows().length, 0, "both native entry points refuse opens while off");
   await clickPreference();
   await until(commitButton, "live re-enable restores thread Commit");
-  assert.equal(await panelNode(page, ".th-foot"), 0, "old confirmation dismissed on re-enable");
-  await page.debugger.sendCommand("Runtime.callFunctionOn", { objectId: stale.objectId, functionDeclaration: "function() { this.click(); }" });
-  await inspect(page, ".th-panel .th-trash", "function() { this.click(); }");
-  await until(() => panelNode(page, '.th-delete-actions [data-choice="commit"]'), "new review after re-enable");
+  assert.equal(await panelNode(panel, ".th-foot"), 0, "old confirmation dismissed on re-enable");
+  await panel.debugger.sendCommand("Runtime.callFunctionOn", { objectId: stale.objectId, functionDeclaration: "function() { this.click(); }" });
+  await inspect(panel, ".th-panel .th-trash", "function() { this.click(); }");
+  await until(() => panelNode(panel, '.th-delete-actions [data-choice="commit"]'), "new review after re-enable");
   assert.equal(received.filter((msg) => msg.type === "thread.delete.preview").length, 2);
   assert.equal(received.some((msg) => msg.type === "thread.delete"), false, "stale Commit cannot be replayed after re-enable");
   assert.equal(lifecycle.filter(({ type }) => type === "changes-preference").length, 2);

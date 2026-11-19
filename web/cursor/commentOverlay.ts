@@ -7,7 +7,8 @@
 // Runs in the page preload, in the overlay's closed shadow root (electron/page-preload.ts); `layer` sits at document
 // (0,0), so everything is placed in document coords. While the mode is on, clicks on the page are swallowed.
 import type { CursorSample } from "../../shared/protocol.ts";
-import { talkHint, type FormHub, type InlineForm } from "./inlineForm.ts";
+import { talkHint, type FormDraft, type FormHub, type InlineForm } from "./inlineForm.ts";
+import { findPath } from "./overlay.ts";
 import { enablePanelDrag } from "./panelDrag.ts";
 
 export { insertAtCaret } from "./inlineForm.ts";
@@ -61,7 +62,17 @@ export interface CommentOverlayOpts {
   requestMode(on: boolean): void;
 }
 
+export interface CommentSnapshot {
+  sample: CursorSample;
+  x: number;
+  y: number;
+  position: { left: number; top: number } | null;
+  draft: FormDraft;
+}
+
 export interface CommentOverlay {
+  snapshot(): CommentSnapshot | null;
+  restore(saved: CommentSnapshot): void;
   /** keepDraft: leaving the mode keeps an empty bubble open (the comment key let go after clicking an element). */
   setMode(on: boolean, keepDraft?: boolean): void;
   /** The queue or the dictation changed: redraw the open bubble. */
@@ -110,7 +121,7 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: s
 
 interface Draft {
   sample: CursorSample;
-  el: Element;
+  el: Element | null;
   /** Pin, document coords. */
   x: number;
   y: number;
@@ -270,13 +281,17 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     const hit = opts.sampleAt(x, y);
     if (!hit) return;
     if (draft) closeDraft();
-    opts.attach();
     hit.sample.t += performance.timeOrigin; // crosses the bridge as epoch ms
+    mountDraft(hit.sample, hit.el, x + scrollX, y + scrollY);
+  }
+
+  function mountDraft(sample: CursorSample, el: Element | null, x: number, y: number, saved?: CommentSnapshot): void {
+    opts.attach();
     const pin = h("div", "cm-pin");
     pin.setAttribute("aria-hidden", "true");
     const bubble = h("div", "cm-bubble");
     bubble.setAttribute("role", "dialog");
-    const name = targetName(hit.sample);
+    const name = targetName(sample);
     bubble.setAttribute("aria-label", `Comment on ${name}`);
     const title = h("div", "cm-title");
     title.append("Comment on ", h("b", undefined, name));
@@ -290,8 +305,9 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     head.append(title, close);
     const queued = h("div", "cm-queued");
     const d: Draft = {
-      sample: hit.sample, el: hit.el, x: x + scrollX, y: y + scrollY, pin, bubble, queued, position: null,
+      sample, el, x, y, pin, bubble, queued, position: saved?.position ?? null,
       form: forms.create({
+        draft: saved?.draft,
         placeholder: `What should change? Type, or ${talkHint()} to talk`,
         submit: (text) => submit(d, text),
         escape: (empty) => { if (empty) closeDraft(); else d.form.field.blur(); },
@@ -308,7 +324,7 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     pin.style.top = `${d.y}px`;
     renderQueued(d);
     placeBubble(d);
-    d.form.focus();
+    if (!saved || saved.draft.focused) d.form.focus();
   }
 
   function submit(d: Draft, text: string): void {
@@ -338,6 +354,12 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
   window.addEventListener("resize", () => { if (draft) placeBubble(draft); });
 
   return {
+    snapshot: () => draft && ({
+      sample: draft.sample, x: draft.x, y: draft.y, position: draft.position, draft: draft.form.snapshot(),
+    }),
+    restore(saved) {
+      if (!draft) mountDraft(saved.sample, findPath(saved.sample.elementPath), saved.x, saved.y, saved);
+    },
     setMode,
     refresh() {
       if (!draft) return;
@@ -346,7 +368,7 @@ export function createCommentOverlay(opts: CommentOverlayOpts): CommentOverlay {
     },
     anchorFor(node) {
       if (!draft || !(draft.bubble.contains(node) || draft.pin.contains(node))) return null;
-      return draft.el.isConnected ? draft.el : null;
+      return draft.el?.isConnected ? draft.el : null;
     },
     openAt: openDraft,
     setAlwaysHover(next) {

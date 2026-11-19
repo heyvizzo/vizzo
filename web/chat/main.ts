@@ -22,7 +22,7 @@ import { createPlayer, type Player } from "../audio/player.ts";
 import { bindPushToTalk, isPttKey, isTypingTarget } from "../audio/ptt.ts";
 import { hotkeyLabel, hotkeys, setHotkeys } from "../../shared/hotkeys.ts";
 import { mountAlwaysListen, type AlwaysListenHandle } from "./alwaysListen.ts";
-import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageHeldAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type CommentState, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type PageCommentAction, type RemotePage } from "../cursor/pageBridge.ts";
+import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageHeldAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type CommentState, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type PageCmd, type PageCommentAction, type RemotePage } from "../cursor/pageBridge.ts";
 import { typedSpanMs } from "../../shared/comment.ts";
 import { createFormHub, INLINE_FORM_CSS } from "../cursor/inlineForm.ts";
 import { themeCss } from "../../shared/theme.ts";
@@ -917,6 +917,7 @@ const deletePreviews = new Map<string, (result: ThreadDeletePreview[] | Error) =
 const previewingDeletes = new Set<string>();
 const continuingThreads = new Map<string, string>();
 let pendingDelete: { requestId: string; waiting: Set<string>; reset: boolean } | null = null;
+let receivedThreads = false;
 let conversationSession: HarnessSessionInfo | null = null;
 async function copyNativeSession(info: HarnessSessionInfo): Promise<void> {
   if (!info.resumeCommand || !info.id) throw new Error("Session unavailable");
@@ -954,7 +955,7 @@ let pageWorkingThread: string | null = null;
 function sendPageThreads(): void {
   pageWorkingThread = workingTurn()?.threadId ?? null;
   const list = threadsOnPage([...threads.values(), ...queuedThreads()], pageUrl);
-  bridge.send({ type: "threads", threads: list.map((t) => t.threadId === pageWorkingThread ? { ...t, state: "running" } : t),
+  bridge.send({ type: "threads", loading: !receivedThreads, threads: list.map((t) => t.threadId === pageWorkingThread ? { ...t, state: "running" } : t),
     deleting: list.filter((t) => pendingDelete?.waiting.has(t.threadId)).map((t) => t.threadId),
     continuing: list.filter((t) => continuingThreads.has(t.threadId)).map((t) => t.threadId), connected: sock.isOpen });
 }
@@ -969,8 +970,8 @@ function threadsChanged(): void {
 }
 
 function onPageUrl(url: string): void {
+  if (pageUrl && normalizePageUrl(pageUrl) !== normalizePageUrl(url)) panelThreadId = null;
   pageUrl = url;
-  panelThreadId = null; // a new document has no panel open
   sendDebug(); // a new document starts with outlines off
   threadsChanged();
   orbChanged(true);
@@ -1589,7 +1590,7 @@ function cancelTurn(t: Turn, reason: "interrupt" | "stop"): void {
 function press(how: "manual" | "vad" = "manual"): void {
   if (pendingDelete?.reset || (panelThreadId && pendingDelete?.waiting.has(panelThreadId))) return;
   if (!player) return setStatus("Click “Enable mic & audio” first.", true);
-  if (commentOpen()) return startDictation(how, chatDraftOpen ? "chat" : "page"); // a form is open: talking fills it in
+  if (commentOpen()) return startDictation(how, chatDraftOpen ? "chat" : activePageDraft()); // a form is open: talking fills it in
   const queued = !settings.instant;
   if (!queued && !sock.isOpen) return setStatus("Server not connected.", true);
   const now = performance.now();
@@ -1878,12 +1879,18 @@ const commentStatus = () => `Comment open: type, or hold ${talkKeyLabel()} / pre
 const DICTATION_TIMEOUT_MS = 30_000;
 /** A comment bubble or a thread panel's form is open on the page. */
 let pageDraftOpen = false;
+let pageFormId: string | undefined;
+let panelFormId: string | undefined;
+let lastDraft: "page" | "panel" = "page";
+const activePageDraft = () => panelFormId && (!pageDraftOpen || lastDraft === "panel") ? "panel" : "page";
+// A full reload can take out the receiving document between the final words and their insertion.
+const undelivered = new Map<string, Extract<PageCmd, { type: "comment.insert" }>>();
 /** The message box (below the conversation) has focus or is dictating. */
 let chatDraftOpen = false;
 /** A form wants dictation: talking fills it in. */
-const commentOpen = (): boolean => pageDraftOpen || chatDraftOpen;
+const commentOpen = (): boolean => pageDraftOpen || !!panelFormId || chatDraftOpen;
 /** Where a dictation's words go: the page's open form or the message box. */
-type DictationTo = "page" | "chat";
+type DictationTo = "page" | "panel" | "chat";
 interface Dictation {
   turnId: string;
   startedAt: number;
@@ -1895,6 +1902,7 @@ interface Dictation {
   /** Words heard so far (stt.partial). */
   partial: string;
   to: DictationTo;
+  formId?: string;
   timeout?: ReturnType<typeof setTimeout>;
 }
 let dictation: Dictation | null = null;
@@ -1902,7 +1910,7 @@ let dictation: Dictation | null = null;
 const dictationIds = new Set<string>();
 /** The message box's forms (see "message box" below). */
 const chatForms = createFormHub({
-  send: (a) => { if (a.type !== "comment.send") onDraftAction(a, "chat"); },
+  send: (a) => { if (a.type === "comment.record" || a.type === "comment.draft") onDraftAction(a, "chat"); },
   ptt: (down) => { if (down) press("manual"); else if (isRecording()) void release(); },
 });
 
@@ -1912,9 +1920,10 @@ function publishComment(): void {
   // Each side sees only its own dictation.
   const stateFor = (to: DictationTo): CommentState => {
     const mine = d?.to === to ? d : null;
-    return { instant: settings.instant, recording: !!mine && !mine.released, transcribing: !!mine?.released, partial: mine && !mine.released ? mine.partial : "", listening, ...(mine ? { dictationId: mine.turnId, startedAt: mine.startedAt } : {}) };
+    return { instant: settings.instant, recording: !!mine && !mine.released, transcribing: !!mine?.released, partial: mine && !mine.released ? mine.partial : "", listening, ...(mine ? { dictationId: mine.turnId, startedAt: mine.startedAt, formId: mine.formId } : {}) };
   };
   bridge.send({ type: "comment.state", state: stateFor("page") });
+  bridge.send({ type: "comment.state", surface: "panel", state: stateFor("panel") });
   // The message box always sends now (Instant off only queues feedback on the page).
   chatForms.update({ ...stateFor("chat"), instant: true });
 }
@@ -1950,7 +1959,7 @@ function startDictation(how: "manual" | "vad" | "button", to: DictationTo): void
   playback.reset();
   const turnId = crypto.randomUUID();
   const tPress = performance.now();
-  const d: Dictation = { turnId, startedAt: performance.timeOrigin + tPress, released: false, audioStarted: Promise.resolve(), partial: "", to };
+  const d: Dictation = { turnId, startedAt: performance.timeOrigin + tPress, released: false, audioStarted: Promise.resolve(), partial: "", to, formId: to === "panel" ? panelFormId : to === "page" ? pageFormId : undefined };
   dictation = d;
   dictationIds.add(turnId);
   sock.send({ type: "turn.start", turnId, config: dictationConfig(), tPress });
@@ -2020,7 +2029,7 @@ function endDictation(d: Dictation, error?: string, cancel = !!error): void {
   publishComment();
   refreshBusy();
   if (error) setStatus(error, true);
-  else if (!isRecording() && !turnBusy()) setStatus(pageDraftOpen ? commentStatus() : readyStatus());
+  else if (!isRecording() && !turnBusy()) setStatus((pageDraftOpen || panelFormId) ? commentStatus() : readyStatus());
 }
 
 function onDictationMsg(msg: ServerMsg): void {
@@ -2032,10 +2041,15 @@ function onDictationMsg(msg: ServerMsg): void {
   } else if (msg.type === "stt.final") {
     if (msg.text.trim()) {
       const transcript = {
-        id: d.turnId, startedAt: d.startedAt, endedAt: Math.max(d.startedAt, d.endedAt ?? performance.timeOrigin + performance.now()), words: msg.words,
+        id: d.turnId, formId: d.formId, startedAt: d.startedAt, endedAt: Math.max(d.startedAt, d.endedAt ?? performance.timeOrigin + performance.now()), words: msg.words,
       };
       if (d.to === "chat") chatForms.insert(msg.text, transcript);
-      else bridge.send({ type: "comment.insert", text: msg.text, dictation: transcript });
+      else if (d.to === "panel") bridge.send({ type: "comment.insert", surface: "panel", text: msg.text, dictation: transcript });
+      else {
+        const insert = { type: "comment.insert", text: msg.text, dictation: transcript } as const;
+        if (d.formId) undelivered.set(d.turnId, insert);
+        bridge.send(insert);
+      }
     }
     endDictation(d);
   } else if (msg.type === "error") {
@@ -2182,19 +2196,33 @@ function publishHeld(): void {
 /** A form opened or closed, or its mic was pressed: on the page (`page`) or in the message box (`chat`). */
 function onDraftAction(a: Extract<PageCommentAction, { type: "comment.draft" | "comment.record" }>, to: DictationTo): void {
   if (a.type === "comment.draft") {
-    if (to === "page") pageDraftOpen = a.open; else chatDraftOpen = a.open;
+    if (to === "page") {
+      pageDraftOpen = a.open;
+      pageFormId = a.formId;
+    } else if (to === "panel") panelFormId = a.open ? a.formId : undefined;
+    else chatDraftOpen = a.open;
+    if (to !== "chat" && a.open) lastDraft = to;
     if (!a.open && dictation?.to === to) endDictation(dictation, undefined, true);
-    if (!isRecording() && !turnBusy() && !noticeJobId) setStatus(pageDraftOpen ? commentStatus() : readyStatus());
+    if (!isRecording() && !turnBusy() && !noticeJobId) setStatus((pageDraftOpen || panelFormId) ? commentStatus() : readyStatus());
     publishComment();
   } else if (!a.on) void stopDictation();
   else if (!player) setStatus("Click “Enable mic & audio” first.", true);
   else startDictation("button", to);
 }
 
-bridge.onComment?.((a) => {
+bridge.onComment?.((a, source = "page") => {
   if (!isPageCommentAction(a)) return;
+  if (a.type === "comment.received") { undelivered.delete(a.id); return; }
+  if (a.type === "comment.restored") {
+    if (dictation?.to === "page" && !a.formIds.includes(dictation.formId ?? "")) endDictation(dictation, undefined, true);
+    for (const [id, insert] of undelivered) {
+      if (a.formIds.includes(insert.dictation?.formId ?? "")) bridge.send(insert);
+      else undelivered.delete(id);
+    }
+    return;
+  }
   if (a.type === "comment.send") sendComment(a.text, a.sample, a.threadId, a.annotation); // the bubble says when it closes (with Instant off it stays open for more)
-  else onDraftAction(a, "page");
+  else onDraftAction(a, source);
 });
 
 // ── message box ────────────────────────────────────
@@ -2492,6 +2520,7 @@ sock.on((msg: ServerMsg) => {
   if (msg.type === "job") return upsertJob(msg.job);
   if (msg.type === "notice") return onNotice(msg);
   if (msg.type === "threads.snapshot") {
+    receivedThreads = true;
     threads.clear();
     for (const t of msg.threads) threads.set(t.threadId, t);
     if (pendingDelete) for (const id of pendingDelete.waiting) if (!threads.has(id)) threadRemovalConfirmed(id);

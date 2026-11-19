@@ -152,6 +152,6 @@ contextBridge.exposeInMainWorld("shell", {
     openThread: (threadId: string) => ipcRenderer.send("page:open-thread", threadId),
     onThreadAction: (cb: (action: unknown) => void) => ipcRenderer.on("page:thread", (_e, action) => cb(action)),
     // Comment mode: the bubble's actions (open / record / send).
-    onComment: (cb: (action: unknown) => void) => ipcRenderer.on("page:comment", (_e, action) => cb(action)),
+    onComment: (cb: (action: unknown, source: "panel" | "page") => void) => ipcRenderer.on("page:comment", (_e, action, source) => cb(action, source === "panel" ? "panel" : "page")),
   },
 });

@@ -7,6 +7,15 @@ import type { CursorRest, CursorSample, ElementDetails, PageEvents, PointingTarg
 import type { ThreadAnchor, ThreadDeleteMode, ThreadDeletePreview, ThreadInfo, ThreadSay } from "../../shared/threads.ts";
 import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
 
+export interface PageThreads {
+  type: "threads";
+  threads: ThreadInfo[];
+  loading?: boolean;
+  deleting?: string[];
+  continuing?: string[];
+  connected?: boolean;
+}
+
 /** Chat → page. `start.t` is epoch ms. */
 export type PageCmd =
   | { type: "start"; t: number }
@@ -14,7 +23,7 @@ export type PageCmd =
   | { type: "clear" }
   | { type: "overlay"; targets: PointingTarget[]; rests: CursorRest[]; visible: string[] }
   /** Element threads on this page (already filtered by normalizePageUrl): draw/update their markers. */
-  | { type: "threads"; threads: ThreadInfo[]; deleting?: string[]; continuing?: string[]; connected?: boolean }
+  | PageThreads
   | PageThreadDeletePreview
   /**
    * A thread's spoken line: show a bubble from its marker. `ended`: its audio finished (the fade may start).
@@ -38,9 +47,9 @@ export type PageCmd =
    */
   | { type: "debug"; outlines: boolean; hover: boolean; details: boolean; session: boolean; fullAnswers: boolean }
   /** The comment bubble (web/cursor/commentOverlay.ts): Send or Add to list, dictation running, its live words. */
-  | { type: "comment.state"; state: CommentState }
+  | { type: "comment.state"; surface?: "panel"; state: CommentState }
   /** Dictated words to insert at the comment field's caret. */
-  | { type: "comment.insert"; text: string; dictation?: DictationTranscript };
+  | { type: "comment.insert"; surface?: "panel"; text: string; dictation?: DictationTranscript };
 
 export interface BubbleConfirm { confirmId: string; ms: number }
 
@@ -87,12 +96,14 @@ export interface HeldComment {
 /** One speech recording; word offsets remain seconds relative to the first audio sample. */
 export interface DictationTranscript {
   id: string;
+  formId?: string;
   startedAt: number;
   endedAt: number;
   words: Word[];
 }
 
 export interface CommentState {
+  formId?: string;
   /** Locks the receiving form when this recording starts. Times are absolute epoch ms. */
   dictationId?: string;
   startedAt?: number;
@@ -110,7 +121,10 @@ export interface CommentState {
 
 /** Page → chat: the comment bubble. `draft`: one is open (Shift and always-listen dictate into it instead of a turn). */
 export type PageCommentAction =
-  | { type: "comment.draft"; open: boolean }
+  | { type: "comment.draft"; open: boolean; formId?: string }
+  /** The replacement document has mounted its forms. Redeliver any transcript that arrived during reload. */
+  | { type: "comment.restored"; formIds: string[] }
+  | { type: "comment.received"; id: string }
   | { type: "comment.record"; on: boolean }
   /**
    * Send the comment (or add it to the list). `sample`: the clicked element, `t` in epoch ms. `threadId`: from that
@@ -119,9 +133,11 @@ export type PageCommentAction =
   | { type: "comment.send"; text: string; sample: CursorSample | null; threadId?: string; annotation?: DrawingAnnotation };
 
 export function isPageCommentAction(m: unknown): m is PageCommentAction {
-  const a = m as { type?: unknown; open?: unknown; on?: unknown; text?: unknown; sample?: { elementPath?: unknown }; threadId?: unknown; annotation?: unknown } | null;
+  const a = m as { type?: unknown; open?: unknown; formId?: unknown; formIds?: unknown; id?: unknown; on?: unknown; text?: unknown; sample?: { elementPath?: unknown }; threadId?: unknown; annotation?: unknown } | null;
   if (!a) return false;
-  if (a.type === "comment.draft") return typeof a.open === "boolean";
+  if (a.type === "comment.draft") return typeof a.open === "boolean" && (a.formId === undefined || typeof a.formId === "string");
+  if (a.type === "comment.restored") return Array.isArray(a.formIds) && a.formIds.every(id => typeof id === "string");
+  if (a.type === "comment.received") return typeof a.id === "string";
   if (a.type === "comment.record") return typeof a.on === "boolean";
   if (a.type !== "comment.send" || typeof a.text !== "string") return false;
   const drawing = a.annotation === undefined ? false : isDrawingAnnotation(a.annotation);
@@ -217,7 +233,7 @@ export interface PageBridge {
   openThread?(threadId: string): void;
   onThreadAction?(cb: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction | PageHeldAction) => void): void;
   /** The comment bubble's actions (comment mode, from the toolbar's pointer button). */
-  onComment?(cb: (action: PageCommentAction) => void): void;
+  onComment?(cb: (action: PageCommentAction, source?: "panel" | "page") => void): void;
 }
 
 /** Wait this long for the page's events after a stop (the page may be mid-navigation and never answer). */

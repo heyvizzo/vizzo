@@ -22,6 +22,7 @@ function talksInField(): boolean {
 /** "hold Control" / "press F5": the talk key, for hints. */
 export const talkHint = (): string => `hold ${hotkeyLabel(hotkeys().talk)}`;
 const MAX_FIELD_PX = 160;
+const newFormId = () => crypto.randomUUID?.() ?? `form-${performance.timeOrigin}-${Math.random()}`;
 
 const ICON_MIC = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" fill="currentColor"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
 const ICON_SEND = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 13V3.5M3.8 7.5 8 3.3l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -63,10 +64,22 @@ export function insertAtCaret(value: string, start: number, end: number, text: s
   return { value: before + mid + after, caret: before.length + pre.length + t.length };
 }
 
+export interface FormDraft {
+  id: string;
+  text: string;
+  start: number;
+  end: number;
+  direction: HTMLTextAreaElement["selectionDirection"];
+  focused: boolean;
+  lastInsert?: string;
+}
+
 export interface InlineForm {
   /** The row (field, mic, send) and the live words under it. */
   root: HTMLElement;
   field: HTMLTextAreaElement;
+  id: string;
+  snapshot(): FormDraft;
   value(): string;
   clear(): void;
   focus(): void;
@@ -77,6 +90,7 @@ export interface InlineForm {
 }
 
 export interface InlineFormOpts {
+  draft?: FormDraft;
   placeholder: string;
   /** Enter or the send button, with the field's trimmed text (never empty). */
   submit(text: string): void;
@@ -95,13 +109,15 @@ export interface InlineFormOpts {
 }
 
 export interface FormHub {
+  activeId(): string | undefined;
+  restored(activeId?: string): void;
   /** The chat's dictation state (comment.state). */
   update(state: CommentState): void;
   state(): CommentState;
   /** Dictated words: into the active form, at its caret. */
   insert(text: string, dictation?: DictationTranscript): void;
   /** Capture the intended recipient before the recording-start IPC roundtrip. */
-  prepareDictation(): void;
+  prepareDictation(announce?: boolean): void;
   /** Release an in-field talk-key hold even when drawing input swallowed the native event. */
   releaseTalkKey(): void;
   /** Keyboard focus is in a form's field (keys there type; the field handles its own talk-key hold). */
@@ -141,20 +157,28 @@ export function createFormHub(opts: FormHubOpts): FormHub {
   let state: CommentState = { instant: true, recording: false, transcribing: false, partial: "" };
   const forms = new Set<FormView>();
   let active: FormView | null = null;
-  let draftOpen = false;
+  let activeId: string | undefined;
   const recipients = new Map<string, FormView | null>();
   let pendingRecipient: FormView | null | undefined;
   let talkOwner: FormView | null = null;
 
-  const syncDraft = () => {
-    const open = [...forms].some((f) => f.open);
-    if (open === draftOpen) return;
-    draftOpen = open;
-    opts.send({ type: "comment.draft", open });
-  };
   const target = (): FormView | null => (active && active.open && forms.has(active) ? active : [...forms].find((f) => f.open) ?? null);
-  const prepareDictation = () => { if (!state.recording && !state.transcribing) pendingRecipient = target(); };
-  const recordingTarget = () => state.dictationId ? recipients.get(state.dictationId) ?? null : target();
+  const syncDraft = (force = false) => {
+    const id = target()?.form.id;
+    if (id === activeId && !force) return;
+    activeId = id;
+    opts.send({ type: "comment.draft", open: !!id, formId: id });
+  };
+  const prepareDictation = (announce = false) => {
+    syncDraft(announce && !!target());
+    if (!state.recording && !state.transcribing) pendingRecipient = target();
+  };
+  const byId = (id: string) => [...forms].find(f => f.open && f.form.id === id);
+  function recipientFor(dictationId?: string, formId?: string): FormView | null {
+    if (formId) return byId(formId) ?? null;
+    return dictationId ? recipients.get(dictationId) ?? null : target();
+  }
+  const recordingTarget = () => recipientFor(state.dictationId, state.formId);
   const forgetRecipient = (view: FormView) => {
     for (const [id, recipient] of recipients) if (recipient === view) recipients.set(id, null);
     if (pendingRecipient === view) pendingRecipient = null;
@@ -191,17 +215,24 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     field.rows = 1;
     field.placeholder = o.placeholder;
     field.spellcheck = true;
+    const draft = o.draft;
+    let lastInsert = draft?.lastInsert;
+    if (draft) {
+      field.value = draft.text;
+      field.setSelectionRange(draft.start, draft.end, draft.direction);
+    }
     const rec = h("button", "if-btn if-rec");
     rec.type = "button";
     rec.innerHTML = ICON_MIC;
     const send = h("button", "if-btn if-send");
     send.type = "button";
+    let sendInstant: boolean | undefined;
     const partial = h("div", "if-partial");
     partial.setAttribute("aria-live", "polite");
     row.append(field, rec, send);
     root.append(row, partial);
     /** Where dictated words go: the field's selection when dictation started (or the last one seen). */
-    let sel = { start: 0, end: 0 };
+    let sel = { start: field.selectionStart, end: field.selectionEnd };
     const keepSel = () => { sel = { start: field.selectionStart, end: field.selectionEnd }; };
 
     const fit = () => {
@@ -230,7 +261,11 @@ export function createFormHub(opts: FormHubOpts): FormHub {
         rec.dataset.tip = listening ? "Listening…" : recording ? "Stop dictating" : `Dictate into the field (or ${talkHint()})`;
         rec.setAttribute("aria-label", listening ? "Listening" : recording ? "Stop dictating" : "Dictate");
         rec.setAttribute("aria-pressed", String(recording || listening));
-        send.innerHTML = state.instant ? ICON_SEND : ICON_ADD;
+        // Keep the press target mounted if focus or dictation changes between pointerdown and click.
+        if (sendInstant !== state.instant) {
+          sendInstant = state.instant;
+          send.innerHTML = state.instant ? ICON_SEND : ICON_ADD;
+        }
         send.dataset.tip = state.instant ? "Send now (Enter)" : "Add to the list; send the list with the arrow next to the address bar (Enter)";
         send.setAttribute("aria-label", state.instant ? "Send" : "Add to the list");
         send.disabled = empty || listening;
@@ -242,6 +277,8 @@ export function createFormHub(opts: FormHubOpts): FormHub {
         if (o.openOnFocus && view.open && !view.isFocused() && !busy()) setOpen(false);
       },
       put(text, dictation) {
+        if (dictation && lastInsert === dictation.id) return;
+        lastInsert = dictation?.id;
         const previousText = field.value;
         const spoken = text.trim();
         const { value, caret } = insertAtCaret(previousText, sel.start, sel.end, text);
@@ -259,6 +296,7 @@ export function createFormHub(opts: FormHubOpts): FormHub {
         if (busy()) opts.send({ type: "comment.record", on: false });
         if (talkOwner === view) talkUp();
         forgetRecipient(view);
+        if (view.open) form.id = newFormId(); // reopening a hidden form starts a new dictation recipient
       }
       view.open = open;
       syncDraft();
@@ -290,7 +328,7 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     field.addEventListener("keyup", keepSel);
     field.addEventListener("pointerup", keepSel);
     field.addEventListener("focus", () => {
-      if (active !== view) { active = view; renderAll(); }
+      if (active !== view) { active = view; syncDraft(); renderAll(); }
       if (o.openOnFocus) setOpen(true);
     });
     field.addEventListener("blur", () => {
@@ -319,6 +357,11 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     const form: InlineForm = {
       root,
       field,
+      id: draft?.id ?? newFormId(),
+      snapshot: () => ({
+        id: form.id, text: field.value, start: field.selectionStart, end: field.selectionEnd,
+        direction: field.selectionDirection, focused: view.isFocused(), lastInsert,
+      }),
       value: () => field.value,
       clear() { field.value = ""; sel = { start: 0, end: 0 }; fit(); view.render(); },
       focus: () => field.focus({ preventScroll: true }),
@@ -335,6 +378,7 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     };
     view.form = form;
     forms.add(view);
+    if (draft) requestAnimationFrame(fit); // measure the restored text after the field is attached
     if (o.activateOnCreate) active = view;
     view.render();
     syncDraft();
@@ -342,6 +386,12 @@ export function createFormHub(opts: FormHubOpts): FormHub {
   }
 
   return {
+    activeId: () => target()?.form.id,
+    restored(id) {
+      if (id) active = byId(id) ?? active;
+      syncDraft(true);
+      opts.send({ type: "comment.restored", formIds: [...forms].filter(f => f.open).map(f => f.form.id) });
+    },
     update(next) {
       if (next.dictationId && !recipients.has(next.dictationId)) {
         recipients.set(next.dictationId, pendingRecipient === undefined ? target() : pendingRecipient);
@@ -356,8 +406,11 @@ export function createFormHub(opts: FormHubOpts): FormHub {
     state: () => state,
     insert(text, dictation) {
       if (!text.trim()) return;
-      const recipient = dictation ? recipients.get(dictation.id) : target();
-      if (recipient && forms.has(recipient) && recipient.open) recipient.put(text, dictation);
+      const recipient = recipientFor(dictation?.id, dictation?.formId);
+      if (recipient && forms.has(recipient) && recipient.open) {
+        recipient.put(text, dictation);
+        if (dictation?.formId) opts.send({ type: "comment.received", id: dictation.id });
+      }
       if (dictation) recipients.set(dictation.id, null);
     },
     prepareDictation,

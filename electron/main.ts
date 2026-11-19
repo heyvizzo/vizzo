@@ -23,6 +23,9 @@ import type { StoredInstructions } from "../shared/instructions.ts";
 import { keychainService, openEnv, sealEnv, type Cipher } from "./secrets.ts";
 import { bundlePath, readBundleId, tildify, uninstallPaths } from "./uninstall.ts";
 import { startWebServer } from "./webServer.ts";
+import { installThreadPanel } from "./threadPanel.ts";
+import type { PageCmd } from "../web/cursor/pageBridge.ts";
+import { installPageReload } from "./pageReload.ts";
 import { LEGACY_NAMES, legacySecrets, moveLegacyDir } from "./rename.ts";
 import { loginShellPath, mergePath } from "./shellPath.ts";
 import { chromeKeychainAccess, fullDiskAccess, fullDiskRow, keychainRow, microphoneRow, type PermissionRow } from "./permissions.ts";
@@ -74,6 +77,7 @@ let toolbar: WebContentsView | null = null;
 let folderBar: WebContentsView | null = null;
 let browser: WebContentsView | null = null;
 let sidebar: WebContentsView | null = null;
+let threadPanel: ReturnType<typeof installThreadPanel> | null = null;
 let divider: WebContentsView | null = null;
 /** Draws hover tooltips over every other view (electron/tooltip.ts, shell/tooltip.html). */
 let tooltip: WebContentsView | null = null;
@@ -314,12 +318,18 @@ function pageChangesStatus(status: ChangesStatus): PageChangesStatus {
   return null;
 }
 
+function openThreadChanges(threadId: string) {
+  if (changesStatus.kind === "ready" && changesStatus.ownedThreadIds.includes(threadId)) openChanges(threadId);
+}
+
 function setChangesStatus(status: ChangesStatus) {
   changesStatus = status;
   const enabled = readChangesPreferences(settingsFile()).gitSourceControl;
   const wc = toolbar?.webContents;
   if (wc?.getURL() === TOOLBAR_URL) wc.send("changes:status", enabled ? status : { kind: "none" });
-  browser?.webContents.send("changes:page-status", enabled ? pageChangesStatus(status) : null, enabled);
+  const panelStatus = enabled ? pageChangesStatus(status) : null;
+  browser?.webContents.send("changes:page-status", panelStatus, enabled);
+  threadPanel?.setChangesStatus(panelStatus, enabled);
 }
 
 /** A JSON object's fields; {} for anything else. */
@@ -535,6 +545,7 @@ function layout() {
   toolbar.setBounds({ x: 0, y: 0, width: topWidth, height: TOOLBAR_HEIGHT });
   folderBar.setBounds({ x: topWidth, y: 0, width: width - topWidth, height: TOOLBAR_HEIGHT });
   browser.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width: paneWidth, height: below });
+  threadPanel?.layout();
   sidebar.setBounds({ x: paneWidth, y: TOOLBAR_HEIGHT, width: side, height: below });
   // The divider runs the full height, through the address bar, so the split is one line. While dragging it covers
   // the window so it keeps the pointer over the other views. Hidden, it has no size.
@@ -605,6 +616,7 @@ function setDrawingMode(on: boolean) {
   if (on && drawingDisabledReason !== null) return;
   if (on && commentMode) setCommentMode(false);
   drawingMode = on;
+  threadPanel?.drawing(on);
   toolbar?.webContents.send("drawing:state", on);
   browser?.webContents.send("page:drawing-mode", on);
   if (on) browser?.webContents.focus();
@@ -659,7 +671,7 @@ function createWindow() {
     if (drag) clearInterval(drag.timer);
     settingsWin?.close();
     changesWin?.close();
-    win = null; toolbar = null; folderBar = null; browser = null; sidebar = null; divider = null; tooltip = null; tooltipPending = null; drag = null;
+    threadPanel = null; win = null; toolbar = null; folderBar = null; browser = null; sidebar = null; divider = null; tooltip = null; tooltipPending = null; drag = null;
   });
   win.on("resize", layout);
   // macOS: closing the window keeps the app running (its threads, jobs and turns go on); the Dock icon brings it back.
@@ -699,7 +711,7 @@ function createWindow() {
   // Its preload records what the chat needs from the page (push-to-talk, pointer, clicks, highlights) and draws
   // the turn's pointing targets; see page-preload.ts.
   browser = new WebContentsView({
-    webPreferences: { partition: "persist:browser", preload: join(__dirname, "page-preload.cjs"), contextIsolation: true, sandbox: true },
+    webPreferences: { partition: "persist:browser", additionalArguments: ["--vizzo-thread-panel"], preload: join(__dirname, "page-preload.cjs"), contextIsolation: true, sandbox: true },
   });
   browser.webContents.session.setPermissionRequestHandler((_wc, _permission, done) => done(false));
   win.contentView.addChildView(browser);
@@ -708,6 +720,10 @@ function createWindow() {
   sidebar = new WebContentsView({ webPreferences: appPrefs });
   sidebar.webContents.session.setPermissionRequestHandler((_wc, permission, done) => done(permission === "media"));
   win.contentView.addChildView(sidebar);
+  const pageView = browser;
+  threadPanel = installThreadPanel(win, pageView.webContents, () => pageView.getBounds(), __dirname,
+    (channel, ...args) => sidebar?.webContents.send(channel, ...args), openThreadChanges);
+  setChangesStatus(changesStatus);
 
   // Drag handle between the browser pane and the sidebar; added last, so it's on top of both.
   divider = new WebContentsView({ webPreferences: appPrefs });
@@ -731,12 +747,12 @@ function createWindow() {
       if (commentMode && input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat) setCommentMode(false);
     });
   }
-  for (const view of [toolbar, sidebar, browser]) view.webContents.on("before-input-event", (_e, input) => commentKey(input));
+  for (const view of [toolbar, sidebar, browser, threadPanel.view]) view.webContents.on("before-input-event", (_e, input) => commentKey(input));
   // Esc stops the voice wherever focus is (three in a row ask to stop its task too): the sidebar handles its own Esc,
   // the browser pane's and the toolbar's are relayed (the key still reaches the page, so its own Esc works as before).
-  for (const view of [toolbar, browser]) {
+  for (const view of [toolbar, browser, threadPanel.view]) {
     view.webContents.on("before-input-event", (_e, input) => {
-      if (input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat && !drawingPreviewIsOpen) sidebar?.webContents.send("escape");
+      if (input.type === "keyDown" && input.key === "Escape" && !input.isAutoRepeat && !drawingPreviewIsOpen && !threadPanel?.previewOpen()) sidebar?.webContents.send("escape");
     });
   }
   // The key can come up in another app: a held mode ends when the window loses focus.
@@ -745,6 +761,11 @@ function createWindow() {
   win.on("focus", attentionChanged);
 
   const wc = browser.webContents;
+  installPageReload(wc, () => {
+    const enabled = readChangesPreferences(settingsFile()).gitSourceControl;
+    wc.send("changes:page-status", enabled ? pageChangesStatus(changesStatus) : null, enabled);
+    sendPageUrl();
+  }, down => sidebar?.webContents.send("ptt", down));
   addInspect(wc, true);
   addInspect(sidebar.webContents);
   // Links that open a new window open as a page in the browser pane, not a second Electron window.
@@ -988,7 +1009,7 @@ function registerIpc() {
   // Hover tooltips: a view asks for one at its element's rect, the tooltip page lays it out and reports its size,
   // then it's placed below the element (above it when there's no room) and raised over every view.
   ipcMain.on("tooltip:show", (e, req: unknown) => {
-    const view = [toolbar, folderBar, browser, sidebar].find((v) => v?.webContents === e.sender);
+    const view = [toolbar, folderBar, browser, sidebar, threadPanel?.view].find((v) => v?.webContents === e.sender);
     const r = req as { text?: unknown; x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null;
     if (!view || !tooltip || typeof r?.text !== "string" || ![r.x, r.y, r.width, r.height].every((n) => typeof n === "number")) return;
     const zoom = e.sender.getZoomFactor();
@@ -1025,41 +1046,33 @@ function registerIpc() {
   });
   // Browser pane ↔ chat sidebar (web/cursor/pageBridge.ts). Each side only accepts messages from the other.
   const fromPage = (e: IpcMainEvent | IpcMainInvokeEvent) => !!browser && e.sender === browser.webContents;
-  ipcMain.on("ptt", (e, down: unknown) => {
-    if (fromPage(e)) sidebar?.webContents.send("ptt", down === true);
-  });
   for (const channel of ["page:samples", "page:events"]) {
     ipcMain.on(channel, (e, msg: unknown) => {
       if (fromPage(e)) sidebar?.webContents.send(channel, msg);
     });
   }
-  ipcMain.on("page:cmd", (e, cmd: { type: string; t?: number }) => {
+  ipcMain.on("page:cmd", (e, cmd: PageCmd) => {
     if (!sidebar || e.sender !== sidebar.webContents) return;
     if (cmd.type === "start") turnFrom = cmd.t ?? null;
     else if (cmd.type === "stop" || cmd.type === "clear") turnFrom = null;
-    browser?.webContents.send("page:cmd", cmd);
+    threadPanel?.command(cmd);
+    if (!("surface" in cmd && cmd.surface === "panel")) browser?.webContents.send("page:cmd", cmd);
   });
   // A page that loads mid-turn asks whether to record.
   ipcMain.handle("page:state", (e) => (fromPage(e) ? { tFrom: turnFrom } : null));
   // Element threads. A document that's ready for commands (load, reload, HMR full reload) gets its threads again.
   const fromSidebar = (e: IpcMainEvent | IpcMainInvokeEvent) => !!sidebar && e.sender === sidebar.webContents;
   ipcMain.handle("clipboard:write", (e, text: unknown) => {
-    if (!(fromSidebar(e) || fromPage(e)) || typeof text !== "string") throw new Error("Clipboard unavailable");
+    if (!(fromSidebar(e) || fromPage(e) || e.sender === threadPanel?.view.webContents) || typeof text !== "string") throw new Error("Clipboard unavailable");
     return clipboard.writeText(text);
   });
   ipcMain.handle("session:release", async (e, sessionId: unknown) => {
-    if (!(fromSidebar(e) || fromPage(e)) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
+    if (!(fromSidebar(e) || fromPage(e) || e.sender === threadPanel?.view.webContents) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
     await prepareSessionResume(sessionId, `http://127.0.0.1:${serverPort}`);
   });
   ipcMain.handle("session:continue", async (e, sessionId: unknown, context: unknown) => {
-    if (!(fromSidebar(e) || fromPage(e)) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
+    if (!(fromSidebar(e) || fromPage(e) || e.sender === threadPanel?.view.webContents) || typeof sessionId !== "string" || !sessionId) throw new Error("Session unavailable");
     await continueSession(sessionId, `http://127.0.0.1:${serverPort}`, typeof context === "string" ? context : undefined);
-  });
-  ipcMain.on("page:ready", (e) => {
-    if (!fromPage(e)) return;
-    const enabled = readChangesPreferences(settingsFile()).gitSourceControl;
-    e.sender.send("changes:page-status", enabled ? pageChangesStatus(changesStatus) : null, enabled);
-    sendPageUrl();
   });
   // The chat's settings (read synchronously: the sidebar needs them before it builds its UI). The sidebar and the
   // Settings window each save only the keys they change (web/chat/settings.ts); they're merged here, and the
@@ -1093,13 +1106,12 @@ function registerIpc() {
   // The keyboard shortcuts (shared/hotkeys.ts), saved with the chat's settings: the preloads read them at load and
   // hear each change (the sidebar's page has them from its settings).
   ipcMain.on("hotkeys:get", (e) => { e.returnValue = hotkeys(); });
-  onHotkeys((hk) => { for (const view of [toolbar, folderBar, browser, sidebar]) view?.webContents.send("hotkeys", hk); });
+  onHotkeys((hk) => { for (const view of [toolbar, folderBar, browser, sidebar, threadPanel?.view]) view?.webContents.send("hotkeys", hk); });
   ipcMain.handle("page:url", (e) => (fromSidebar(e) ? browser?.webContents.getURL() || null : null));
   ipcMain.on("page:thread", (e, action: unknown) => {
     if (!fromPage(e)) return;
     if (isPageThreadAction(action) && action.type === "thread.commit") {
-      if (e.senderFrame === e.sender.mainFrame && changesStatus.kind === "ready"
-        && changesStatus.ownedThreadIds.includes(action.threadId)) openChanges(action.threadId);
+      if (e.senderFrame === e.sender.mainFrame) openThreadChanges(action.threadId);
       return;
     }
     sidebar?.webContents.send("page:thread", action);

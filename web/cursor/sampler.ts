@@ -89,8 +89,7 @@ export class Sampler {
   }
 
   /** A sample (with details) of the element at a viewport point, and that element; null off the page's elements. */
-  sampleAt(x: number, y: number): { sample: CursorSample; el: Element } | null {
-    const hit = this.pick(x, y);
+  sampleAt(x: number, y: number, hit: Element | null = this.pick(x, y)): { sample: CursorSample; el: Element } | null {
     const info = describeElement(hit, this.root);
     const target = pointedElement(hit, this.root);
     if (!info.elementPath || !target) return null;

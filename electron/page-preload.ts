@@ -10,6 +10,7 @@
 // Nothing is exposed to the page: this runs in the preload's isolated world, with capture-phase listeners that run
 // before the page's own. The overlay lives in a closed shadow root, so the page's CSS can't touch it.
 import { ipcRenderer, webFrame } from "electron";
+import type { PageEditors } from "./pageReload.ts";
 import type { CursorSample, ReactInfo } from "../shared/protocol.ts";
 import { createTalkKey, isPttKeyUp, isTypingTarget } from "../web/audio/ptt.ts";
 import { setHotkeys } from "../shared/hotkeys.ts";
@@ -52,11 +53,14 @@ setHotkeys(ipcRenderer.sendSync("hotkeys:get"));
 ipcRenderer.on("hotkeys", (_e, hk: unknown) => setHotkeys(hk));
 
 let held = false;
+let handingOffHold = false;
+let inheritedHold = false;
+let suspendEditors: (() => boolean) | undefined;
 const ptt = (down: boolean) => {
   if (held === down) return;
   held = down;
-  if (down) forms?.prepareDictation();
-  ipcRenderer.send("ptt", down);
+  if (down) forms?.prepareDictation(true);
+  if (down || !handingOffHold) ipcRenderer.send("ptt", down);
 };
 /** Set in init(). The bubbles' fields are inside the closed shadow root, so isTypingTarget can't see them: ask. */
 let forms: FormHub | null = null;
@@ -65,13 +69,25 @@ const talk = createTalkKey(ptt);
 const talkAllowed = (target: EventTarget | null) => !isTypingTarget(target) && !forms?.typing();
 const talkUp = () => { forms?.releaseTalkKey(); talk.release(); ptt(false); };
 window.addEventListener("keydown", (e) => talk.keydown(e, talkAllowed(e.target)), true);
-const talkKeyUp = (e: KeyboardEvent) => { talk.keyup(e); if (isPttKeyUp(e)) forms?.releaseTalkKey(); };
+const talkKeyUp = (e: KeyboardEvent) => {
+  talk.keyup(e);
+  if (!isPttKeyUp(e)) return;
+  forms?.releaseTalkKey();
+  if (inheritedHold) {
+    inheritedHold = false;
+    ipcRenderer.send("ptt", false);
+  }
+};
 window.addEventListener("keyup", talkKeyUp, true);
 window.addEventListener("pointerdown", () => talk.pointerdown(), true);
 // On macOS Ctrl-click is a right-click: while Control talks, a click points at the page instead of opening the menu.
 window.addEventListener("contextmenu", (e) => { if (held && e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault(); }, true);
 window.addEventListener("blur", talkUp);
-window.addEventListener("pagehide", talkUp);
+window.addEventListener("pagehide", event => {
+  if (!event.isTrusted) return;
+  handingOffHold = !!suspendEditors?.() && held;
+  talkUp();
+});
 
 // ── back/forward: the mouse's side buttons and the trackpad's two-finger swipe ──
 
@@ -187,7 +203,22 @@ function init(): void {
     changed: () => comments.refresh(),
   });
   forms = hub;
+  window.addEventListener("focus", () => { if (hub.activeId()) hub.prepareDictation(true); });
+  const hosted = process.argv.includes("--vizzo-thread-panel");
+  let trackedPanelId: string | null = null;
+  let lastGeometry = "";
   const threads = createThreadOverlay({
+    external: hosted ? {
+      open: (id, geometry, sample) => ipcRenderer.send("panel:open", DOC, id, geometry, sample),
+      position(id, geometry) {
+        const key = JSON.stringify([id, geometry]);
+        if (key === lastGeometry) return;
+        lastGeometry = key;
+        ipcRenderer.send("panel:anchor", DOC, id, geometry);
+      },
+      outside: id => ipcRenderer.send("panel:outside", DOC, id),
+      close: id => ipcRenderer.send("panel:dismiss", DOC, id),
+    } : undefined,
     layer: threadLayer,
     host,
     attach,
@@ -197,11 +228,16 @@ function init(): void {
       return s ? { x: s.x + s.scrollX, y: s.y + s.scrollY } : null;
     },
     send: (action: PageThreadAction | PageOrbAction | PagePanelAction | PageConfirmAction | PageHeldAction) => ipcRenderer.send("page:thread", action),
-    sampleAt: (x, y) => sampler.sampleAt(x, y),
+    sampleAt: (x, y, element) => sampler.sampleAt(x, y, element),
     forms: hub,
     copyText: (text) => ipcRenderer.invoke("clipboard:write", text),
     releaseSession: (id) => ipcRenderer.invoke("session:release", id),
     continueSession: (id, context) => ipcRenderer.invoke("session:continue", id, context),
+  });
+  ipcRenderer.on("panel:track", (_e, id: string | null) => {
+    trackedPanelId = id;
+    lastGeometry = "";
+    threads.trackPanel(id);
   });
   const comments = createCommentOverlay({
     layer: commentLayer,
@@ -304,8 +340,38 @@ function init(): void {
     if (typeof p?.x === "number" && typeof p.y === "number") comments.openAt(p.x, p.y);
   });
   void ipcRenderer.invoke("comment:get").then((on: unknown) => comments.setMode(on === true));
-  // A new document has no open bubble (the chat may still think one is open from the last page).
-  ipcRenderer.send("page:comment", { type: "comment.draft", open: false } satisfies PageCommentAction);
+  // Full reloads replace the closed shadow root. Hand the editors to Electron before it goes away.
+  let pending: PageEditors | null = null;
+  let restoreUrl = "";
+  let suspended = false;
+  suspendEditors = () => {
+    suspended = true; // a late transcript belongs to the snapshot's successor
+    const editors = pending && restoreUrl === location.href ? pending : { panel: threads.snapshot(), comment: comments.snapshot(), activeId: hub.activeId() };
+    if (!editors.panel && !editors.comment) return !!trackedPanelId;
+    ipcRenderer.send("page:suspend", DOC, location.href, editors);
+    return true;
+  };
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted) return;
+    suspended = handingOffHold = false;
+    ipcRenderer.send("page:ready", DOC);
+  });
+  function restoreEditors(): void {
+    const saved = restoreUrl === location.href ? pending : null;
+    pending = null;
+    if (saved?.panel) threads.restore(saved.panel);
+    if (saved?.comment) comments.restore(saved.comment);
+    hub.restored(saved?.activeId);
+    if (!hosted) ipcRenderer.send("page:thread", { type: "thread.panel", threadId: threads.snapshot()?.threadId ?? null } satisfies PagePanelAction);
+    ipcRenderer.send("page:restored", DOC);
+  }
+  ipcRenderer.on("page:restore", (_event, saved: PageEditors | null, keyHeld: boolean) => {
+    if (suspended) return;
+    inheritedHold = keyHeld;
+    restoreUrl = location.href;
+    pending = saved;
+    if (!pending?.panel?.threadId) restoreEditors();
+  });
   ipcRenderer.on("page:open-thread", (_e, threadId: unknown) => {
     if (typeof threadId === "string") threads.open(threadId);
   });
@@ -314,6 +380,7 @@ function init(): void {
   });
 
   ipcRenderer.on("page:cmd", (_e, cmd: PageCmd) => {
+    if (suspended || ("surface" in cmd && cmd.surface === "panel")) return;
     switch (cmd.type) {
       case "start":
         start(cmd.t);
@@ -341,7 +408,8 @@ function init(): void {
         threads.setFullAnswers(cmd.fullAnswers);
         break;
       case "threads":
-        threads.setThreads(cmd.threads, cmd.deleting, cmd.continuing, cmd.connected);
+        threads.setThreads(cmd);
+        if (pending && (!cmd.loading || cmd.threads.some(t => t.threadId === pending?.panel?.threadId))) restoreEditors();
         comments.refresh(); // what's queued on its element
         break;
       case "thread.delete.preview":
@@ -374,7 +442,7 @@ function init(): void {
     }
   });
   // Ready for commands: the chat sends this document its threads.
-  ipcRenderer.send("page:ready");
+  ipcRenderer.send("page:ready", DOC);
 
   // Loaded mid-turn (a click navigated): record the rest of the turn here.
   void ipcRenderer.invoke("page:state").then((state: { tFrom: number | null } | null) => {
