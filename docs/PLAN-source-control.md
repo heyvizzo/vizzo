@@ -581,3 +581,7 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   keeps an existing draft after a failed request, and closing the review cancels its outstanding draft request.
   The message endpoint distinguishes generated text from a fallback caused by timeout, a missing model, or
   provider failure.
+- Settings → Models → Git source control now shows the timeout in seconds for the selected commit-message
+  model tier. Fast and Smart save independent limits, defaulting to 15 and 60 seconds. Interactive drafting and
+  automatic background delete drafts both use the saved limit for their selected tier. Settings accepts whole
+  seconds up to the same four-hour ceiling as the solver's time limit.
