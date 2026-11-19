@@ -189,6 +189,12 @@ async function run() {
   const clickPreference = () => prefs('document.querySelector("#git-source-control").click()');
   await until(() => prefs('document.querySelector("#git-source-control") && !document.querySelector("#section-preferences").hidden'), "Git preference");
   assert.equal(await prefs('document.querySelector("#git-source-control").checked'), true);
+  await prefs(`{
+    const timeout = document.querySelector("#commit-message-timeout");
+    timeout.value = "27";
+    timeout.dispatchEvent(new Event("input"));
+  }`);
+  await until(() => chatSettings().commitMessageTimeoutSeconds?.fast === 27, "Settings persists the drafting timeout");
   BrowserWindow.fromWebContents(preferences).hide();
   await sidebar.executeJavaScript("shell.queue.publish({ instant: true, count: 2, sending: false })");
   await until(() => bar('document.querySelector("#queue-count").textContent === "2"'), "separate queue count");
@@ -219,15 +225,21 @@ async function run() {
   await evaluate("window.vizzoChangesPreferences.setAuto(false)");
   assert.equal(chatSettings().gitSourceControl, gitPreference);
   assert.equal(chatSettings().autoCommitMessage, false);
+  assert.deepEqual(chatSettings().commitMessageTimeoutSeconds, { fast: 27, smart: 60 });
   for (const event of [{ sender: sidebar, senderFrame: sidebar.mainFrame }, { sender: window.webContents, senderFrame: null }]) {
     ipcMain.emit("changes:auto-message:set", event, true);
     ipcMain.emit("changes:auto-message:get", event);
     assert.equal(event.returnValue, false, "the bridge rejects every other sender and frame");
   }
-  await sidebar.executeJavaScript('shell.chatSettings.save(JSON.stringify({ gitSourceControl: false, autoCommitMessage: true }))');
+  await sidebar.executeJavaScript(`shell.chatSettings.save(JSON.stringify({
+    gitSourceControl: false, autoCommitMessage: true, commitMessageTier: "smart",
+    commitMessageTimeoutSeconds: { fast: 1, smart: 1 },
+  }))`);
   assert.equal(await bar("shell.changes.getStatus().then(s => s.kind)"), "ready");
   assert.equal(chatSettings().gitSourceControl, gitPreference);
   assert.equal(chatSettings().autoCommitMessage, false);
+  assert.equal(chatSettings().commitMessageTier, "fast");
+  assert.deepEqual(chatSettings().commitMessageTimeoutSeconds, { fast: 27, smart: 60 });
   await until(() => focusCount() > 0, "scanner focus");
   await until(() => visible().at(-1) === true, "scanner visibility");
   assert.deepEqual(visible(), [true]);

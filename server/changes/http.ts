@@ -204,9 +204,10 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
             controller.signal.throwIfAborted();
             verifyEnabled();
             data(service.scanner.reviewCurrent(body.project, body.generation));
-            const { commitMessageTier } = readChangesPreferences();
+            const { commitMessageTier, commitMessageTimeoutSeconds } = readChangesPreferences();
             const draft = await prepareCommitMessage(chosen.review, chosen.components, writers, {
-              tier: commitMessageTier, model, threads, signal: controller.signal,
+              tier: commitMessageTier, timeoutSeconds: commitMessageTimeoutSeconds[commitMessageTier],
+              model, threads, signal: controller.signal,
             });
             controller.signal.throwIfAborted();
             verifyEnabled();

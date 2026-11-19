@@ -338,7 +338,7 @@ export class ThreadDeletes {
     const { ledger, writers, commit } = this.services;
     const { review, persisted } = job;
     let request = job.request;
-    const { autoCommitMessage, commitMessageTier } = readChangesPreferences();
+    const { autoCommitMessage, commitMessageTier, commitMessageTimeoutSeconds } = readChangesPreferences();
     if (autoCommitMessage) {
       const selected = new Set(request.componentIds);
       const groups = review.view.groups.map((group) =>
@@ -346,7 +346,10 @@ export class ThreadDeletes {
       const threads = new Map([[job.threadId, job.messages]]);
       const { message } = await prepareCommitMessage({ ...review, view: { ...review.view, groups } },
         review.view.components.filter(({ id }) => selected.has(id)),
-        await writers.snapshot(review.project.id), { tier: commitMessageTier, fallback: request.message, threads });
+        await writers.snapshot(review.project.id), {
+          tier: commitMessageTier, timeoutSeconds: commitMessageTimeoutSeconds[commitMessageTier],
+          fallback: request.message, threads,
+        });
       request = { ...request, message };
     }
     const key = { projectId: request.projectId, jobId: request.jobId };

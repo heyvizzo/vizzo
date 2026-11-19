@@ -72,7 +72,7 @@ export interface Settings extends ChangesPreferences {
 export const PANEL_KEYS = [
   "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "sttLanguages", "pointingWords", "llm", "llmModels", "ttsVoices", "ttsStyle",
   "debugOutlines", "hoverOutline", "showRam", "showCost", "showFullAnswers", "showDebug", "showSolverSession", "captureTrace", "hotkeys", "selectionVersion",
-  "gitSourceControl", "commitMessageTier",
+  "gitSourceControl", "commitMessageTier", "commitMessageTimeoutSeconds",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
 export const SIDEBAR_KEYS = ["alwaysListen", "listenThreshold", "listenHangMs", "instant", "orbPos"] as const satisfies readonly (keyof Settings)[];

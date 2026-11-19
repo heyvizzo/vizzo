@@ -1074,6 +1074,7 @@ function registerIpc() {
     if (!settingsFrame) {
       delete patch.gitSourceControl;
       delete patch.commitMessageTier;
+      delete patch.commitMessageTimeoutSeconds;
     }
     // Only the Changes window owns this preference.
     delete patch.autoCommitMessage;
