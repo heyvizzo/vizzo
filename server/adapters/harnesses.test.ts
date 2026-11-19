@@ -229,9 +229,14 @@ describe("harness toggles", () => {
     expect(claude).toEqual(expect.arrayContaining(["--safe-mode", "--strict-mcp-config", "--disable-slash-commands"]));
     expect(after(claude, "--tools")).toBe("");
     expect(grokArgs({ ...commit, harness: "grok" }, "Draft a message")).toContain("--tools=");
-    expect(codexConfig({ ...commit, harness: "codex" }, ["custom"])).toMatchObject({
-      features: { shell_tool: false, plugins: false }, mcp_servers: { custom: { enabled: false } }, project_doc_max_bytes: 0,
+    const codex = { ...commit, harness: "codex" as const };
+    expect(codexConfig(codex, ["custom"])).toMatchObject({
+      features: { shell_tool: false, plugins: false, view_image: false, goals: false, default_mode_request_user_input: false,
+        code_mode: false, code_mode_only: false, request_permissions_tool: false },
+      mcp_servers: { custom: { enabled: false } }, project_doc_max_bytes: 0,
+      tools: { experimental_request_user_input: { enabled: false }, update_plan: { enabled: false } },
     });
+    expect(describeAgent(codex)).toContain("sandbox: read-only, approvalPolicy: never, baseInstructions");
     for (const harness of ["pi", "omp"] as const) {
       expect(rpcArgs({ ...commit, harness })).toEqual(expect.arrayContaining(["--no-session", "--no-extensions", "--no-tools", "--no-skills"]));
     }
