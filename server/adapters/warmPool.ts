@@ -51,7 +51,7 @@ export function agentSpec(role: CliRole, choice: LlmChoice, persist = false, pro
   };
 }
 
-const keyOf = (s: AgentSpec): string => JSON.stringify([s.role, s.harness, s.model, s.level ?? "", s.speed ?? "", s.toggles ?? {}, s.project ?? "", s.system, !!s.persist]);
+const keyOf = (s: AgentSpec): string => JSON.stringify([s.role, s.harness, s.model, s.level ?? "", s.speed ?? "", s.toggles ?? {}, s.project ?? "", s.system, !!s.persist, !!s.commitMessage]);
 
 class Pool {
   private idle: WarmAgent[] = [];

@@ -27,7 +27,7 @@ async function generateMessage(tier: LlmTier, system: string, prompt: string): P
     ? await apiRequest(provider, choice, { system, messages: [{ role: "user", content: prompt }] }, undefined, TIMEOUT_MS)
     : isHarness(provider) && await harnessRequest("router", choice, prompt, undefined, TIMEOUT_MS,
       undefined, undefined, {
-        role: "router", harness: provider, model, level, speed, system,
+        role: "router", harness: provider, model, level, speed, system, commitMessage: true,
         toggles: Object.fromEntries(HARNESS_TOGGLES[provider].map(({ id }) => [id, false])),
       });
   return result && result.stopReason !== "refusal" ? result.text : "";

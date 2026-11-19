@@ -211,7 +211,7 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
         }
         const finish = beginTask("Commit selected changes");
         try {
-          const result = await commitReviewedChanges(service, chosen.review, chosen.components, body.message, body.separately, body.scopeThreadId);
+          const result = await commitReviewedChanges(service, chosen.review, chosen.components, body.message, body.separately, body.scopeThreadId, isEnabled);
           await service.scanner.refresh();
           finish("reason" in result ? "failed" : "done");
           return respond(res, "reason" in result ? 409 : 200, result);

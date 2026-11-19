@@ -14,6 +14,7 @@ import { batchKey, exactBytes, exactText, MAX_FILE_BYTES, parsePatch, PENDING_MS
 import { hash, LedgerPersistence } from "./persistence.ts";
 import { evidencePath, pathAcceptsEvidence, readBaseEntry, readLedgerHead, readWorkingEntry, sameHead,
   type LedgerHead, type LedgerProject } from "./project.ts";
+import type { CommitContextMessage } from "./messageContext.ts";
 import { stopVerifiedOrphanNativeProcess } from "../adapters/nativeProcess.ts";
 import type { ProjectWriterSnapshot, WriterExecutionRecord } from "./writers.ts";
 
@@ -79,7 +80,7 @@ export interface ClosedThread {
   title: string;
   requests: readonly string[];
   summary?: string;
-  messageContext?: readonly import("./messageContext.ts").CommitContextMessage[];
+  messageContext?: readonly CommitContextMessage[];
   reason?: string;
   notice?: boolean;
   commitJobId?: string;
