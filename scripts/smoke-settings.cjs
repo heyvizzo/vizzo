@@ -143,13 +143,43 @@ async function main() {
   assert.equal(savedChat.showDebug, false);
   await evaluate("location.hash = '#models'");
   await waitFor("!document.querySelector('#section-models').hidden && !document.querySelector('#git-models').hidden", 'Git model picker is visible by default');
-  assert.equal(await evaluate("document.querySelector('#commit-message-tier').value"), 'fast');
-  await evaluate(`{
+  const commitModel = () => evaluate(`({
+    tier: document.querySelector('#commit-message-tier').value,
+    label: document.querySelector('#commit-message-timeout-label').textContent,
+    seconds: document.querySelector('#commit-message-timeout').valueAsNumber,
+  })`);
+  const selectCommitModel = value => evaluate(`{
     const tier = document.querySelector('#commit-message-tier');
-    tier.value = 'smart';
+    tier.value = ${JSON.stringify(value)};
     tier.dispatchEvent(new Event('change'));
   }`);
+  const editTimeout = value => evaluate(`{
+    const input = document.querySelector('#commit-message-timeout');
+    input.value = ${JSON.stringify(value)};
+    input.dispatchEvent(new Event('input'));
+  }`);
+  assert.deepEqual(await commitModel(), { tier: 'fast', label: 'Fast timeout (seconds)', seconds: 15 });
+  await editTimeout('24');
+  await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTimeoutSeconds.fast === 24", 'Fast timeout saves');
+  await selectCommitModel('smart');
   await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTier === 'smart'", 'Smart model choice is sent to desktop settings');
+  assert.deepEqual(await commitModel(), { tier: 'smart', label: 'Smart timeout (seconds)', seconds: 60 });
+  await editTimeout('82');
+  await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTimeoutSeconds.smart === 82", 'Smart timeout saves');
+  for (const value of ['', '0', '1.5', '14401']) {
+    await editTimeout(value);
+    assert.equal(await evaluate("document.querySelector('#commit-message-timeout').getAttribute('aria-invalid')"), 'true');
+    assert.equal(await evaluate("document.querySelector('#commit-message-timeout-error').hidden"), false);
+    assert.deepEqual(savedChat.commitMessageTimeoutSeconds, { fast: 24, smart: 82 });
+  }
+  await evaluate("document.querySelector('#commit-message-timeout').dispatchEvent(new FocusEvent('blur'))");
+  assert.deepEqual(await commitModel(), { tier: 'smart', label: 'Smart timeout (seconds)', seconds: 82 });
+  assert.equal(await evaluate("document.querySelector('#commit-message-timeout-error').hidden"), true);
+  await selectCommitModel('fast');
+  assert.deepEqual(await commitModel(), { tier: 'fast', label: 'Fast timeout (seconds)', seconds: 24 });
+  await selectCommitModel('smart');
+  await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTier === 'smart'", 'Restoring Smart saves its selection');
+  assert.deepEqual(await commitModel(), { tier: 'smart', label: 'Smart timeout (seconds)', seconds: 82 });
   assert.equal(savedChat.gitSourceControl, true);
   assert.equal(savedChat.commitMessageTier, 'smart');
   assert.equal(savedChat.autoCommitMessage, false);
@@ -168,6 +198,11 @@ async function main() {
   await waitFor("!document.querySelector('#section-preferences').hidden && document.querySelector('#show-solver-session').checked && !document.querySelector('#git-source-control').checked && document.querySelector('#git-models').hidden && document.querySelector('#commit-message-tier').value === 'smart'", 'Solver session, the saved Git opt-out and the model choice survive reopening Settings');
   await evaluate("document.querySelector('#git-source-control').click()");
   await waitFor("!document.querySelector('#git-models').hidden && JSON.parse(window.shell.chatSettings.get()).gitSourceControl === true", 'Re-enabling Git restores its model picker');
+  await evaluate("location.hash = '#models'");
+  await waitFor("!document.querySelector('#section-models').hidden", 'Models reopens');
+  assert.deepEqual(await commitModel(), { tier: 'smart', label: 'Smart timeout (seconds)', seconds: 82 });
+  await selectCommitModel('fast');
+  assert.deepEqual(await commitModel(), { tier: 'fast', label: 'Fast timeout (seconds)', seconds: 24 });
 
   await evaluate("location.hash = '#cookies'");
   await waitFor("!document.querySelector('#section-cookies').hidden", 'Browser cookies opens');

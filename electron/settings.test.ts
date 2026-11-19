@@ -32,7 +32,10 @@ describe("readChangesPreferences", () => {
   it("reads desktop preferences and handles missing, legacy and malformed settings", () => {
     const home = mkdtempSync(join(tmpdir(), "changes-prefs-"));
     const file = join(home, "settings.json");
-    const defaults = { gitSourceControl: true, commitMessageTier: "fast", autoCommitMessage: true };
+    const defaults = {
+      gitSourceControl: true, commitMessageTier: "fast", autoCommitMessage: true,
+      commitMessageTimeoutSeconds: { fast: 15, smart: 60 },
+    };
     try {
       expect(readChangesPreferences(file)).toEqual(defaults);
       writeFileSync(file, "null");
@@ -43,9 +46,18 @@ describe("readChangesPreferences", () => {
       expect(readChangesPreferences(file)).toEqual(defaults);
       writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ gitSourceControl: "false", commitMessageTier: "other", autoCommitMessage: "false" }) }));
       expect(readChangesPreferences(file)).toEqual(defaults);
-      const saved = { gitSourceControl: false, commitMessageTier: "smart", autoCommitMessage: false };
+      const saved = {
+        gitSourceControl: false, commitMessageTier: "smart", autoCommitMessage: false,
+        commitMessageTimeoutSeconds: { fast: 25, smart: 120 },
+      };
       writeFileSync(file, JSON.stringify({ chat: JSON.stringify(saved) }));
       expect(readChangesPreferences(file)).toEqual(saved);
+      writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ ...saved, commitMessageTimeoutSeconds: { fast: 27 } }) }));
+      expect(readChangesPreferences(file)).toEqual({ ...saved, commitMessageTimeoutSeconds: { fast: 27, smart: 60 } });
+      for (const invalid of [null, "25", 0, -1, 1.5, 1e10]) {
+        writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ ...saved, commitMessageTimeoutSeconds: { fast: invalid, smart: 120 } }) }));
+        expect(readChangesPreferences(file)).toEqual({ ...saved, commitMessageTimeoutSeconds: { fast: 15, smart: 120 } });
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -4,6 +4,7 @@
 // preferences, the browser pane's cookies and the API keys. Chat settings save on every change (web/chat/settings.ts)
 // and apply from the sidebar's next turn; the API keys save with the Save bar, which shows only while they're edited.
 import "./settings.css";
+import { COMMIT_MESSAGE_TIMEOUT_MAX_SECONDS, validCommitMessageTimeout } from "../../shared/changesPreferences.ts";
 import { API_PROVIDERS, HARNESSES, HARNESS_TOGGLES, LLM_DEFAULT_MODELS, LLM_PROVIDER_LABELS, TASK_TIMEOUT_MAX, TASK_TIMEOUT_MIN, cleanToggles, defaultLevel, isHarness, llmOf, toggleOn, type LlmProvider, type HarnessScan, type LlmChoice, type LlmModelInfo, type LlmTier, type RouterMode, type RunConfig } from "../../shared/config.ts";
 import { attachCombo, type Combo } from "../chat/combo.ts";
 import { LONG_TASK_MAX, LONG_TASK_MIN, PANEL_KEYS, loadSettings, saveSettingsKeys, sttLanguages, type ChatSettingsBridge } from "../chat/settings.ts";
@@ -374,13 +375,46 @@ function loadServerState(triesLeft = 30): void {
 loadServerState();
 
 const commitMessageTier = $<HTMLSelectElement>("commit-message-tier");
+const commitMessageTimeout = $<HTMLInputElement>("commit-message-timeout");
+const commitMessageTimeoutLabel = $("commit-message-timeout-label");
+const commitMessageTimeoutError = $("commit-message-timeout-error");
+commitMessageTimeout.max = String(COMMIT_MESSAGE_TIMEOUT_MAX_SECONDS);
+
+function checkCommitMessageTimeout(): number | null {
+  const seconds = commitMessageTimeout.valueAsNumber;
+  const error = !Number.isFinite(seconds) ? "Enter a number of seconds."
+    : !Number.isInteger(seconds) ? "Use whole seconds."
+    : !validCommitMessageTimeout(seconds) ? `Between 1 and ${COMMIT_MESSAGE_TIMEOUT_MAX_SECONDS} seconds.` : "";
+  commitMessageTimeoutError.textContent = error;
+  commitMessageTimeoutError.hidden = !error;
+  commitMessageTimeout.setAttribute("aria-invalid", String(!!error));
+  return error ? null : seconds;
+}
+
+function renderCommitMessageTimeout(): void {
+  const tier = settings.commitMessageTier;
+  commitMessageTimeoutLabel.textContent = tier === "smart" ? "Smart timeout (seconds)" : "Fast timeout (seconds)";
+  commitMessageTimeout.value = String(settings.commitMessageTimeoutSeconds[tier]);
+  checkCommitMessageTimeout();
+}
+
 const gitModels = $("git-models");
 gitModels.hidden = !settings.gitSourceControl;
 commitMessageTier.value = settings.commitMessageTier;
+renderCommitMessageTimeout();
 commitMessageTier.onchange = () => {
   settings.commitMessageTier = commitMessageTier.value === "smart" ? "smart" : "fast";
+  renderCommitMessageTimeout();
   saveSettings();
 };
+commitMessageTimeout.oninput = () => {
+  const seconds = checkCommitMessageTimeout();
+  const tier = settings.commitMessageTier;
+  if (seconds === null || seconds === settings.commitMessageTimeoutSeconds[tier]) return;
+  settings.commitMessageTimeoutSeconds[tier] = seconds;
+  saveSettings();
+};
+commitMessageTimeout.onblur = () => { if (checkCommitMessageTimeout() === null) renderCommitMessageTimeout(); };
 
 // ── preferences ────────────────────────────────────
 for (const [id, key] of [["show-full-answers", "showFullAnswers"], ["show-solver-session", "showSolverSession"], ["git-source-control", "gitSourceControl"], ["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"], ["capture-trace", "captureTrace"]] as const) {

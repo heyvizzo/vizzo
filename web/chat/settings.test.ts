@@ -22,13 +22,16 @@ describe("source control preferences", () => {
     expect(normalizeSettings({ gitSourceControl: "false", commitMessageTier: null, autoCommitMessage: null })).toMatchObject(defaults);
   });
 
-  it("saves a Git opt-out and the model choice independently of automatic drafting", () => {
-    const settings = normalizeSettings({ gitSourceControl: false, commitMessageTier: "smart", autoCommitMessage: false });
+  it("saves a Git opt-out, model choice and each tier's timeout independently of automatic drafting", () => {
+    const choice = {
+      gitSourceControl: false, commitMessageTier: "smart", commitMessageTimeoutSeconds: { fast: 24, smart: 75 },
+    };
+    const settings = normalizeSettings({ ...choice, autoCommitMessage: false });
     expect(settings.autoCommitMessage).toBe(false);
     const save = vi.fn();
     saveSettingsKeys({ get: () => null, save }, settings, PANEL_KEYS);
     const saved = JSON.parse(save.mock.calls[0]![0]);
-    expect(saved).toMatchObject({ gitSourceControl: false, commitMessageTier: "smart" });
+    expect(saved).toMatchObject(choice);
     expect(saved).not.toHaveProperty("autoCommitMessage");
   });
 });

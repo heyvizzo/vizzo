@@ -353,7 +353,7 @@ it("uses the saved tier on each request and bypasses warm agents with tools, inc
   }
 });
 
-it("keeps the Fast deadline and lets the saved Smart model finish after it", async () => {
+it("applies the default and edited timeout for the selected model on each request", async () => {
   const repo = await setup();
   const requests = new EventEmitter();
   const abort = vi.fn();
@@ -385,9 +385,65 @@ it("keeps the Fast deadline and lets the saved Smart model finish after it", asy
     await vi.advanceTimersByTimeAsync(16_000);
     expect(await (await smart).json()).toEqual({ status: "generated", message: "Summarize selected changes" });
     expect(abort).toHaveBeenCalledTimes(1);
+
+    const commitMessageTimeoutSeconds = { fast: 40, smart: 4 };
+    repo.preferences({ commitMessageTier: "smart", commitMessageTimeoutSeconds });
+    const customSmartStarted = once(requests, "started");
+    const customSmart = repo.post("/message", body);
+    expect(await customSmartStarted).toEqual([4_000]);
+    expect(calls[2]?.spec.model).toBe("gpt-6.1-sol");
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(abort).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await (await customSmart).json()).toEqual({ status: "fallback", reason: "timeout", message: "Commit selected changes" });
+    expect(abort).toHaveBeenCalledTimes(2);
+
+    repo.preferences({ commitMessageTier: "fast", commitMessageTimeoutSeconds });
+    const customFastStarted = once(requests, "started");
+    const customFast = repo.post("/message", body);
+    expect(await customFastStarted).toEqual([40_000]);
+    expect(calls[3]?.spec.model).toBe("gpt-6-sol");
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(await (await customFast).json()).toEqual({ status: "generated", message: "Summarize selected changes" });
+    expect(abort).toHaveBeenCalledTimes(2);
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("uses the configured drafting deadline before a background delete commit falls back", async () => {
+  const repo = await setup();
+  const requests = new EventEmitter();
+  let finish = () => {};
+  const abort = vi.fn(() => finish());
+  const calls = captureCommitHarness(repo.folder, {
+    wait: (timeoutMs) => new Promise<void>((resolve) => {
+      finish = resolve;
+      requests.emit("started", timeoutMs);
+    }),
+    abort,
+  });
+  repo.preferences({ commitMessageTier: "smart", commitMessageTimeoutSeconds: { fast: 25, smart: 3 } });
+  const thread = addThread(repo.scope, "Primary button");
+  thread.add("user", "request", "Make the button easier to see.");
+  await repo.edit(thread.threadId, "shared.txt", BASE, WITH_FIRST);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const started = once(requests, "started");
+    await deleteThreads(threadStore(), [{ threadId: thread.threadId, mode: "commit" }], false, repo.service);
+    expect(threadStore().info(thread.threadId)).toBeUndefined();
+    expect(await started).toEqual([3_000]);
+    expect(calls[0]?.spec.model).toBe("gpt-6.1-sol");
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(abort).not.toHaveBeenCalled();
+    expect(repo.git("rev-parse", "HEAD").trim()).toBe(repo.original);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(abort).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+  await expect.poll(() => repo.service.jobs(repo.project), { timeout: 15_000 }).toMatchObject([{ phase: "done" }]);
+  expect(repo.git("log", "-1", "--format=%B").trim()).toBe("Primary button\n\nMake the button easier to see.");
 });
 
 it("reports a missing API model separately and still provides a commit message", async () => {
