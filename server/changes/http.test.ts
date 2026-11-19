@@ -360,7 +360,7 @@ it("refuses a later commit when Git source control is turned off during the batc
     return result;
   });
   const response = await repo.post("/commit", { project: repo.project, generation: view.generation,
-    components: view.components.map(({ id }) => id), message: "Commit separate changes", separately: true });
+    components: view.components.map(({ id }) => id), message: "Commit separate changes", separately: true, scopeThreadId: "A" });
   expect(response.status).toBe(409);
   expect(await response.json()).toMatchObject({ commits: [repo.git("rev-parse", "HEAD").trim()] });
   expect(repo.git("rev-parse", "HEAD^").trim()).toBe(repo.original);
