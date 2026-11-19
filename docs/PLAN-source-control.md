@@ -574,3 +574,8 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   definitions enabled tools despite the per-thread switches. Older installations that cannot start an isolated
   drafting server use the deterministic message. OpenCode's native global configuration can still start a
   configured MCP process during a tool-free model request.
+- The product owner moved **Solver session** to **General preferences** alongside **Full answers** and set Git
+  source control to start enabled. Existing saved opt-outs still take effect.
+- The 15-second drafting limit interrupted a Smart Codex request before it completed. Smart drafting now has
+  a 60-second deadline, while Fast keeps its 15-second deadline. The window explains when it uses a fallback or
+  keeps an existing draft after a failed request, and closing the review cancels its outstanding draft request.
