@@ -147,6 +147,22 @@ describe("router on a Chat Completions API", () => {
       .rejects.toThrow("Cerebras API timed out after 30 ms");
   });
 
+  it("propagates a caller cancellation to the provider request", async () => {
+    process.env.CEREBRAS_API_KEY = "k";
+    const controller = new AbortController();
+    let providerSignal: AbortSignal | null | undefined;
+    setApiFetch(((_url: string, init?: RequestInit) => new Promise((_, reject) => {
+      providerSignal = init?.signal;
+      providerSignal?.addEventListener("abort", () => reject(providerSignal?.reason));
+    })) as typeof fetch);
+    const { apiRequest } = await import("./llmApi.ts");
+    const request = apiRequest("cerebras", { provider: "cerebras", model: "gpt-oss-120b" },
+      { system: "s", messages: [{ role: "user", content: "u" }] }, undefined, 1_000, controller.signal);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(providerSignal?.aborted).toBe(true);
+  });
+
   it("progress lines run on the API too", async () => {
     process.env.CEREBRAS_API_KEY = "k";
     const calls = fakeFetch(() => sse([{ choices: [{ delta: { content: '{"lines": ["Checking the grid.", "Almost there."]}' }, finish_reason: "stop" }] }]));

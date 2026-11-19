@@ -193,16 +193,28 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
         if (!validSelection(body)) throw new RequestError(400, "Select at least one change from a valid review");
         const chosen = selection(service, body);
         if (path === "/api/changes/message") {
-          const [writers, threads] = await Promise.all([
-            service.writerSnapshot(body.project), service.threadMessageContexts(chosen.review.project, chosen.components),
-          ]);
-          verifyEnabled();
-          data(service.scanner.reviewCurrent(body.project, body.generation));
-          const { commitMessageTier } = readChangesPreferences();
-          const message = await prepareCommitMessage(chosen.review, chosen.components, writers, { tier: commitMessageTier, model, threads });
-          verifyEnabled();
-          data(service.scanner.reviewCurrent(body.project, body.generation));
-          return respond(res, 200, { message });
+          if (res.destroyed) return;
+          const controller = new AbortController();
+          const disconnect = () => controller.abort();
+          res.once("close", disconnect);
+          try {
+            const [writers, threads] = await Promise.all([
+              service.writerSnapshot(body.project), service.threadMessageContexts(chosen.review.project, chosen.components),
+            ]);
+            controller.signal.throwIfAborted();
+            verifyEnabled();
+            data(service.scanner.reviewCurrent(body.project, body.generation));
+            const { commitMessageTier } = readChangesPreferences();
+            const draft = await prepareCommitMessage(chosen.review, chosen.components, writers, {
+              tier: commitMessageTier, model, threads, signal: controller.signal,
+            });
+            controller.signal.throwIfAborted();
+            verifyEnabled();
+            data(service.scanner.reviewCurrent(body.project, body.generation));
+            return respond(res, 200, draft);
+          } finally {
+            res.off("close", disconnect);
+          }
         }
         if (typeof body.message !== "string" || !body.message.trim() || body.message.includes("\0") ||
             body.message.length > MAX_COMMIT_MESSAGE || typeof body.separately !== "boolean" ||
@@ -245,6 +257,7 @@ export function changeRoutes(service: ChangesService, opts: ChangesHttpOptions =
       await service.scanner.refresh();
       respond(res, 200, { ok: true });
     } catch (error) {
+      if (res.destroyed) return;
       const status = error instanceof RequestError ? error.status : 409;
       if (status === 409) void service.scanner.refresh();
       respond(res, status, { reason: error instanceof Error ? error.message : String(error) });
