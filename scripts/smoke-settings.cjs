@@ -130,15 +130,19 @@ async function main() {
   await waitFor("location.hash === '#preferences' && !document.querySelector('#section-preferences').hidden", 'Legacy link opens Preferences');
   assert.equal(await evaluate("document.querySelector('.sidebar [aria-current=page]').textContent"), 'Preferences');
   assert.deepEqual(await evaluate("[...document.querySelectorAll('#section-preferences h3')].map(heading => heading.textContent)"), ['General preferences', 'Debugging', 'Traces']);
-  assert.equal(await evaluate("document.querySelector('#show-full-answers').closest('.card').previousElementSibling.textContent"), 'General preferences');
-  assert.equal(await evaluate("document.querySelector('#git-source-control').checked"), false);
-  assert.equal(await evaluate("document.querySelector('#git-models').hidden"), true);
+  assert.deepEqual(await evaluate(`[...document.querySelectorAll('#section-preferences h3 + .card input')].map(box => box.id)`),
+    ['show-full-answers', 'show-solver-session', 'git-source-control']);
+  assert.equal(await evaluate("document.querySelector('#show-solver-session').checked"), false);
+  assert.equal(await evaluate("document.querySelector('#git-source-control').checked"), true);
+  assert.match(await evaluate("document.querySelector('#summary .summary-row[title=\"Go to Preferences\"] .summary-text').textContent"), /Solver session off · Git source control on/);
 
   savedChat.autoCommitMessage = false; // Changes saved this while Settings was open.
-  await evaluate("document.querySelector('#git-source-control').click()");
-  await waitFor("document.querySelector('#summary').textContent.includes('Git source control on')", 'Dashboard follows the Git toggle');
+  await evaluate("document.querySelector('#show-solver-session').click()");
+  await waitFor("document.querySelector('#summary .summary-row[title=\"Go to Preferences\"] .summary-text').textContent.includes('Solver session on')", 'Dashboard follows the Solver session toggle');
+  assert.equal(savedChat.showSolverSession, true);
+  assert.equal(savedChat.showDebug, false);
   await evaluate("location.hash = '#models'");
-  await waitFor("!document.querySelector('#section-models').hidden && !document.querySelector('#git-models').hidden", 'Git model picker becomes visible');
+  await waitFor("!document.querySelector('#section-models').hidden && !document.querySelector('#git-models').hidden", 'Git model picker is visible by default');
   assert.equal(await evaluate("document.querySelector('#commit-message-tier').value"), 'fast');
   await evaluate(`{
     const tier = document.querySelector('#commit-message-tier');
@@ -157,12 +161,13 @@ async function main() {
   await waitFor("document.querySelector('#git-models').hidden && JSON.parse(window.shell.chatSettings.get()).gitSourceControl === false", 'Disabling Git hides its model picker');
   assert.equal(savedChat.gitSourceControl, false);
   assert.equal(savedChat.commitMessageTier, 'smart');
-  await evaluate("document.querySelector('#git-source-control').click()");
-  await waitFor("JSON.parse(window.shell.chatSettings.get()).gitSourceControl === true", 'Git is enabled again');
+  assert.match(await evaluate("document.querySelector('#summary').textContent"), /Git source control off/);
   const reloaded = once(win.webContents, 'did-finish-load');
   win.webContents.reload();
   await reloaded;
-  await waitFor("!document.querySelector('#section-preferences').hidden && document.querySelector('#git-source-control').checked && document.querySelector('#commit-message-tier').value === 'smart'", 'Git and model choices survive reopening Settings');
+  await waitFor("!document.querySelector('#section-preferences').hidden && document.querySelector('#show-solver-session').checked && !document.querySelector('#git-source-control').checked && document.querySelector('#git-models').hidden && document.querySelector('#commit-message-tier').value === 'smart'", 'Solver session, the saved Git opt-out and the model choice survive reopening Settings');
+  await evaluate("document.querySelector('#git-source-control').click()");
+  await waitFor("!document.querySelector('#git-models').hidden && JSON.parse(window.shell.chatSettings.get()).gitSourceControl === true", 'Re-enabling Git restores its model picker');
 
   await evaluate("location.hash = '#cookies'");
   await waitFor("!document.querySelector('#section-cookies').hidden", 'Browser cookies opens');
@@ -210,7 +215,7 @@ async function main() {
     await screenshot(process.env.SETTINGS_SCREENSHOT);
   }
   assert.deepEqual(errors, []);
-  console.log('Settings smoke passed: startup, speech polling, Preferences and persisted Git model settings, Dashboard requirements, permission explanations, cookie gates, navigation, and permission changes.');
+  console.log('Settings smoke passed: startup, speech polling, General preferences, persisted Git opt-out and model choice, Dashboard requirements, permission explanations, cookie gates, navigation, and permission changes.');
 }
 
 main().then(() => finish(0), error => { console.error(error); return finish(1); });

@@ -13,7 +13,6 @@ app.setPath('userData', home);
 const config = join(home, 'config');
 const threads = join(config, 'threads.json');
 const settings = join(config, 'settings.json');
-const setSourceControl = gitSourceControl => writeFileSync(settings, JSON.stringify({ chat: JSON.stringify({ gitSourceControl }) }));
 const journal = join(config, 'ledger.json');
 const repo = join(home, 'repo');
 const index = join(repo, '.git', 'index');
@@ -43,7 +42,7 @@ async function boot() {
   const received = [];
   ws.on('message', (msg, binary) => { if (!binary) received.push(JSON.parse(msg.toString())); });
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
-  return { child, messages, received, send: msg => ws.send(JSON.stringify(msg)) };
+  return { child, messages, received, origin, send: msg => ws.send(JSON.stringify(msg)) };
 }
 async function quit(server) {
   const exited = new Promise(resolve => server.child.once('exit', resolve));
@@ -54,10 +53,13 @@ async function quit(server) {
 async function main() {
   await app.whenReady();
   const threadId = execFileSync(join(root, 'node_modules/.bin/tsx'), [join(__dirname, 'smoke-delete-quit-seed.ts'), home], { encoding: 'utf8' }).trim();
-  setSourceControl(true);
+  assert.equal(statSync(settings, { throwIfNoEntry: false }), undefined);
   const base = git('rev-parse', 'HEAD');
   const oldIndex = readFileSync(index);
   const first = await boot();
+  const enabled = await fetch(`${first.origin}/api/changes/status`);
+  assert.equal(enabled.status, 200, 'Git is available without a settings file');
+  await enabled.json();
   const existing = await wait(() => first.received.find(m => m.type === 'threads.snapshot'), 'first thread snapshot');
   assert.equal(existing.threads[0].threadId, threadId);
   // Another Git process owns this lock. The delete job stays active in acquire-index long enough to quit.
@@ -75,8 +77,11 @@ async function main() {
   assert(!first.messages.some(m => /commit/i.test(m.finished?.title ?? '')));
   await quit(first);
 
-  setSourceControl(false);
+  writeFileSync(settings, JSON.stringify({ chat: JSON.stringify({ gitSourceControl: false }) }));
   const recovered = await boot();
+  const disabled = await fetch(`${recovered.origin}/api/changes/status`);
+  assert.equal(disabled.status, 404, 'the voice server honors the saved Git opt-out');
+  assert.deepEqual(await disabled.json(), { reason: 'Git source control is disabled' });
   const snapshot = await wait(() => recovered.received.find(m => m.type === 'threads.snapshot'), 'recovered thread snapshot');
   assert.deepEqual(snapshot.threads, []);
   const job = diskJob();
@@ -98,7 +103,7 @@ async function main() {
   assert.equal(git('rev-parse', 'HEAD'), base);
   assert.deepEqual(readFileSync(index), oldIndex);
   await quit(afterLock);
-  console.log('Real Electron quit/recovery passed: quit during a background thread commit, kept the closed group and foreign lock, and proved the commit was never attempted.');
+  console.log('Real Electron quit/recovery passed: default-on Git and saved opt-out, quit during a background thread commit, kept the closed group and foreign lock, and proved the commit was never attempted.');
 }
 main().then(() => finish(0), error => { console.error(error); finish(1); });
 function finish(code) {

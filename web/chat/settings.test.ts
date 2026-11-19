@@ -15,19 +15,20 @@ describe("showSolverSession", () => {
 });
 
 describe("source control preferences", () => {
-  it("normalizes legacy and invalid settings without opting into Git", () => {
-    const defaults = { gitSourceControl: false, commitMessageTier: "fast", autoCommitMessage: true };
-    expect(normalizeSettings({})).toMatchObject(defaults);
-    expect(normalizeSettings({ gitSourceControl: 1, commitMessageTier: null, autoCommitMessage: null })).toMatchObject(defaults);
+  it("defaults to Git when settings are missing, legacy, or invalid", () => {
+    const defaults = { gitSourceControl: true, commitMessageTier: "fast", autoCommitMessage: true };
+    expect(normalizeSettings(null)).toMatchObject(defaults);
+    expect(normalizeSettings({ showSolverSession: true })).toMatchObject(defaults);
+    expect(normalizeSettings({ gitSourceControl: "false", commitMessageTier: null, autoCommitMessage: null })).toMatchObject(defaults);
   });
 
-  it("saves the Settings panel choices without overwriting the Changes checkbox", () => {
-    const settings = normalizeSettings({ gitSourceControl: true, commitMessageTier: "smart", autoCommitMessage: false });
+  it("saves a Git opt-out and the model choice independently of automatic drafting", () => {
+    const settings = normalizeSettings({ gitSourceControl: false, commitMessageTier: "smart", autoCommitMessage: false });
     expect(settings.autoCommitMessage).toBe(false);
     const save = vi.fn();
     saveSettingsKeys({ get: () => null, save }, settings, PANEL_KEYS);
     const saved = JSON.parse(save.mock.calls[0]![0]);
-    expect(saved).toMatchObject({ gitSourceControl: true, commitMessageTier: "smart" });
+    expect(saved).toMatchObject({ gitSourceControl: false, commitMessageTier: "smart" });
     expect(saved).not.toHaveProperty("autoCommitMessage");
   });
 });

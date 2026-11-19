@@ -14,7 +14,7 @@ const anchor = {
   text: null, role: null, label: null, dataSource: null, bounds: { x: 0, y: 0, width: 16, height: 16 },
 };
 
-it("honors the saved opt-in on direct routes and preserves Keep deletion and socket sessions", async () => {
+it("defaults to Git, honors a saved opt-out, and preserves Keep deletion and socket sessions", async () => {
   const directory = mkdtempSync(join(tmpdir(), "vizzo-source-control-gate-"));
   const settings = join(directory, "settings.json");
   vi.stubEnv("VIZZO_SETTINGS_FILE", settings);
@@ -54,6 +54,10 @@ it("honors the saved opt-in on direct routes and preserves Keep deletion and soc
   };
   const off = { reason: "Git source control is disabled" };
   try {
+    const initial = await fetch(`${origin}/api/changes/status`);
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toEqual({ kind: "none" });
+    save(false);
     for (const suffix of ["", "/status", "/diff", "/jobs", "/message", "/commit", "/fix", "/restart"]) {
       const response = await fetch(`${origin}/api/changes${suffix}`);
       expect(response.status).toBe(404);

@@ -383,7 +383,7 @@ commitMessageTier.onchange = () => {
 };
 
 // ── preferences ────────────────────────────────────
-for (const [id, key] of [["show-full-answers", "showFullAnswers"], ["git-source-control", "gitSourceControl"], ["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"], ["show-solver-session", "showSolverSession"], ["capture-trace", "captureTrace"]] as const) {
+for (const [id, key] of [["show-full-answers", "showFullAnswers"], ["show-solver-session", "showSolverSession"], ["git-source-control", "gitSourceControl"], ["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"], ["capture-trace", "captureTrace"]] as const) {
   const box = $<HTMLInputElement>(id);
   box.checked = settings[key];
   box.onchange = () => {
@@ -859,7 +859,7 @@ function renderDashboard(): void {
   const missingRequired = perms?.some((r) => !r.ok) ?? false;
   const keyFields = envFields.filter((f) => !f.param);
   const keysSet = keyFields.filter((f) => envValues[f.key]?.trim()).length;
-  const display = ([["showCost", "Cost"], ["showRam", "RAM"], ["showDebug", "Details"], ["showSolverSession", "Solver session"], ["debugOutlines", "Outlines"], ["hoverOutline", "Hover outline"]] as const)
+  const debugging = ([["showCost", "Cost"], ["showRam", "RAM"], ["showDebug", "Details"], ["debugOutlines", "Outlines"], ["hoverOutline", "Hover outline"]] as const)
     .filter(([k]) => settings[k]).map(([, l]) => l);
   const lines: { label: string; text: string; detail?: string; tone?: Tone; section: Section }[] = [
     { label: "Fast model", text: fast.text, detail: [fast.loads, "router and progress lines"].filter(Boolean).join(" · "), tone: tierTone("fast"), section: "models" },
@@ -874,8 +874,13 @@ function renderDashboard(): void {
     { label: "Turns", text: `Router ${settings.routerMode === "auto" ? "auto (may answer)" : "forced (always the solver)"}`, detail: `Long tasks: over ${settings.longTaskSeconds} s · time limit ${settings.taskTimeoutMinutes} min`, section: "models" },
     { label: "Keyboard", text: `Talk: ${hotkeyLabel(settings.hotkeys.talk)} · Comment: ${hotkeyLabel(settings.hotkeys.comment)}`, section: "keyboard" },
     {
-      label: "Preferences", text: `Full answers ${settings.showFullAnswers ? "on" : "off"} · Git source control ${settings.gitSourceControl ? "on" : "off"}`,
-      detail: display.length ? `Debugging: ${display.join(", ")}` : undefined, section: "preferences",
+      label: "Preferences",
+      text: [
+        `Full answers ${settings.showFullAnswers ? "on" : "off"}`,
+        `Solver session ${settings.showSolverSession ? "on" : "off"}`,
+        `Git source control ${settings.gitSourceControl ? "on" : "off"}`,
+      ].join(" · "),
+      detail: debugging.length ? `Debugging: ${debugging.join(", ")}` : undefined, section: "preferences",
     },
     {
       label: "API keys", text: envFields.length ? `${keysSet} of ${keyFields.length} set` : "Loading…",
