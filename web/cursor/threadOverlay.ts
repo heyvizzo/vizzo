@@ -243,7 +243,7 @@ export interface ThreadOverlay {
   setHeld(items: HeldComment[]): void;
   /** Debugging → Details: edited files (off until enabled). */
   setDetails(on: boolean): void;
-  /** Debugging → Solver session: native session / resume command (off until enabled). */
+  /** General preferences → Solver session: native session / resume command (off until enabled). */
   setSession(on: boolean): void;
   /** Debugging → Full answers: expandable written answers (on by default). */
   setFullAnswers(on: boolean): void;
@@ -450,7 +450,7 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
   let held: HeldComment[] = [];
   /** Debugging → Details: edited files. */
   let details = false;
-  /** Debugging → Solver session: native sessions and their resume commands. */
+  /** General preferences → Solver session: native sessions and their resume commands. */
   let showSession = false;
   let fullAnswers = true;
 
