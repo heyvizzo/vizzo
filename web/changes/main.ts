@@ -1,4 +1,4 @@
-import type { ChangesActionResult, ChangesJobs, ChangesRestartHarness, ChangesStatus } from "../../shared/changes.ts";
+import type { ChangesActionResult, ChangesJobs, ChangesRestartHarness, ChangesSelectionRequest, ChangesStatus } from "../../shared/changes.ts";
 import type { ServerMsg } from "../../shared/protocol.ts";
 import { changesApi, ChangesError } from "./api.ts";
 import { ChangesList, element } from "./list.ts";
@@ -18,6 +18,8 @@ const result = $("result");
 const form = $<HTMLFormElement>("commit-form");
 const message = $<HTMLTextAreaElement>("commit-message");
 const messageStatus = $("message-status");
+const autoMessage = $<HTMLInputElement>("auto-commit-message");
+const generateMessage = $<HTMLButtonElement>("generate-message");
 const selectionNote = $("selection-note");
 const commitButton = $<HTMLButtonElement>("commit");
 const separatelyButton = $<HTMLButtonElement>("commit-separately");
@@ -33,6 +35,10 @@ let draftTimer: ReturnType<typeof setTimeout> | undefined;
 let jobsKey = "";
 let busy = false;
 let scopeVersion = 0;
+
+const autoMessageKey = "changes.autoCommitMessage";
+const preferences = (window as Window & { vizzoChangesPreferences?: { getAuto(): boolean; setAuto(enabled: boolean): void } }).vizzoChangesPreferences;
+try { autoMessage.checked = preferences?.getAuto() ?? (localStorage.getItem(autoMessageKey) !== "false"); } catch { /* use the default */ }
 
 const activeProject = () => "project" in status ? status.project : undefined;
 const errorText = (error: unknown): string => error instanceof ChangesError ? error.message : "Couldn’t reach source control.";
@@ -87,33 +93,42 @@ function syncActions(): void {
   selectAll.disabled = busy || !all.available;
   selectAllNote.textContent = all.includesOther ? "Includes Other changes." : "";
   message.disabled = busy;
-  const disabled = busy || !review.selection || !message.value.trim() || review.view?.branch === null;
-  commitButton.disabled = disabled;
-  separatelyButton.disabled = disabled;
+  autoMessage.disabled = busy;
+  const selectionDisabled = busy || !review.selection || review.view?.branch === null;
+  generateMessage.hidden = autoMessage.checked;
+  generateMessage.disabled = autoMessage.checked || selectionDisabled || !!draftRequest;
+  commitButton.disabled = selectionDisabled || !message.value.trim();
+  separatelyButton.disabled = commitButton.disabled;
   for (const button of jobList.querySelectorAll("button")) button.disabled = busy;
   const missing = review.missingRequirement;
   selectionNote.hidden = !missing;
   selectionNote.textContent = missing ? `Also select ${missing.files.map(file => file.path).join(", ")} to include the dependent change.` : "";
 }
 
-function cancelPrefill(): void {
+function cancelMessageRequest(): void {
   draftRequest?.abort();
+  draftRequest = undefined;
   clearTimeout(draftTimer);
   messageStatus.textContent = "";
 }
 
 function selectionChanged(): void {
   const selection = review.selection;
-  const version = draft.update(selection);
-  if (!selection || version !== undefined) cancelPrefill();
+  if (draft.update(selection)) {
+    cancelMessageRequest();
+    if (selection && autoMessage.checked) requestMessage(selection, false);
+  }
   if (message.value !== draft.text) message.value = draft.text;
   syncActions();
-  if (!selection || version === undefined) return;
+}
 
+function requestMessage(selection: ChangesSelectionRequest, manual: boolean): void {
+  const version = draft.begin(manual);
+  if (version === undefined) return;
   const controller = new AbortController();
   draftRequest = controller;
   messageStatus.textContent = "Preparing…";
-  draftTimer = setTimeout(async () => {
+  const fill = async () => {
     try {
       const response = await changesApi.message(selection, controller.signal);
       if (controller.signal.aborted) return;
@@ -122,11 +137,16 @@ function selectionChanged(): void {
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof ChangesError && error.status === 409) requireReview(error);
-      else messageStatus.textContent = "Enter a commit message.";
+      else messageStatus.textContent = manual ? "Couldn’t generate a commit message." : "Enter a commit message.";
     } finally {
-      if (!controller.signal.aborted) syncActions();
+      if (draftRequest === controller) {
+        draftRequest = undefined;
+        syncActions();
+      }
     }
-  }, 150);
+  };
+  if (manual) void fill();
+  else draftTimer = setTimeout(() => void fill(), 150);
 }
 
 function requireReview(error: ChangesError, reload = true): void {
@@ -262,6 +282,7 @@ async function submit(separately: boolean): Promise<void> {
   const text = message.value.trim();
   if (busy || !selection || !text || review.view?.branch === null) return;
   const currentScope = scopeVersion;
+  cancelMessageRequest();
   busy = true;
   syncActions();
   showResult("Committing…");
@@ -320,7 +341,7 @@ function openScope(): void {
   scopeVersion++;
   review.open(scopeFromHash(location.hash));
   draft.reset();
-  cancelPrefill();
+  cancelMessageRequest();
   list.resetDisclosures();
   showResult();
   renderReview();
@@ -332,7 +353,24 @@ selectAll.onchange = () => {
   review.toggleAll(selectAll.checked);
   selectionChanged();
 };
-message.oninput = () => { draft.edit(message.value); cancelPrefill(); syncActions(); };
+message.oninput = () => { draft.edit(message.value); cancelMessageRequest(); syncActions(); };
+autoMessage.onchange = () => {
+  const enabled = autoMessage.checked;
+  try {
+    if (preferences) preferences.setAuto(enabled);
+    else localStorage.setItem(autoMessageKey, String(enabled));
+  } catch { /* keep the current window's choice */ }
+  cancelMessageRequest();
+  const selection = review.selection;
+  if (enabled && selection) requestMessage(selection, false);
+  syncActions();
+};
+generateMessage.onclick = () => {
+  const selection = review.selection;
+  if (!selection) return;
+  requestMessage(selection, true);
+  syncActions();
+};
 form.onsubmit = event => { event.preventDefault(); void submit(false); };
 separatelyButton.onclick = () => { void submit(true); };
 window.addEventListener("hashchange", openScope);
