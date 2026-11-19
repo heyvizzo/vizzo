@@ -33,9 +33,9 @@ h2 { min-width: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
 .component { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 10px; padding: 5px 12px; border-top: 1px solid var(--line); }
 .component:has(input:checked) { background: var(--accent-soft); }
 .component:last-child { border-radius: 0 0 11px 11px; }
-.component > input, .select-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.component > input, .select-all input, .message-tools input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .component > input { margin-top: 7px; }
-.component > input:disabled, .select-all input:disabled { cursor: default; }
+.component > input:disabled, .select-all input:disabled, .message-tools input:disabled { cursor: default; }
 .component-note { margin: 1px 0 4px 21px; font-size: 12px; }
 
 summary { cursor: pointer; list-style: none; }
@@ -66,8 +66,11 @@ pre.removed { background: color-mix(in srgb, var(--err) 10%, var(--sunken)); }
 .result { display: grid; gap: 4px; overflow-wrap: anywhere; }
 .result:not(:empty) + form { margin-top: 8px; }
 form { display: grid; gap: 6px; }
-.message-head, .commit-actions { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 8px; }
+.message-head, .message-tools, .commit-actions { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 8px; }
 .message-head label { font-weight: 650; }
+.message-tools { align-items: center; min-height: 30px; }
+.message-tools label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.message-tools label:has(input:disabled) { color: var(--muted); cursor: default; }
 textarea { width: 100%; min-height: 54px; max-height: 28vh; padding: 8px 10px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; background: var(--field); color: var(--text); font: inherit; }
 .commit-actions { margin-top: 3px; align-items: center; justify-content: end; }
 .commit-actions p { margin-right: auto; }
