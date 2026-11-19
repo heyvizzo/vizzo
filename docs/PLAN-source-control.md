@@ -568,4 +568,9 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - Settings → Preferences replaces Debugging. **General preferences** contains **Full answers** and the opt-in
   Git source control switch. The latter controls the Changes window, toolbar and thread commit actions, and the
   Git choices in delete confirmations. The ledger continues settling writers and recovering durable deletions
-  independently to preserve custody.
+  independently to preserve custody. A background delete commit can finish once its guarded handoff has been
+  submitted to the ledger.
+- Codex drafting uses a dedicated read-only app-server with a private model catalog. Some bundled model
+  definitions enabled tools despite the per-thread switches. Older installations that cannot start an isolated
+  drafting server use the deterministic message. OpenCode's native global configuration can still start a
+  configured MCP process during a tool-free model request.
