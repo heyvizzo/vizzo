@@ -585,3 +585,4 @@ harness without exact before/after reports), routing a spoken "commit this" to t
   model tier. Fast and Smart save independent limits, defaulting to 15 and 60 seconds. Interactive drafting and
   automatic background delete drafts both use the saved limit for their selected tier. Settings accepts whole
   seconds up to the same four-hour ceiling as the solver's time limit.
+- The timeout field sits beside the commit-message model dropdown and wraps when the Settings column is narrow.
