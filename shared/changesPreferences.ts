@@ -9,7 +9,7 @@ export interface ChangesPreferences {
 export function changesPreferences(saved: unknown): ChangesPreferences {
   const source = saved && typeof saved === "object" ? saved as Partial<ChangesPreferences> : {};
   return {
-    gitSourceControl: source.gitSourceControl === true,
+    gitSourceControl: source.gitSourceControl !== false,
     commitMessageTier: source.commitMessageTier === "smart" ? "smart" : "fast",
     autoCommitMessage: source.autoCommitMessage !== false,
   };

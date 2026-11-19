@@ -1490,9 +1490,17 @@ class OpencodeAgent implements WarmAgent {
         throw err;
       }
     }
-    await this.server.watch(this.dir);
     const needsNativeIdle = on(this.spec, "shell");
-    await this.server.prepare(turn, needsNativeIdle);
+    try {
+      await this.server.watch(this.dir);
+      await this.server.prepare(turn, needsNativeIdle);
+    } catch (error) {
+      // OpenCode saves even an empty draft session. Terminal cleanup has not been registered yet.
+      if (this.spec.commitMessage && turn.stopping) {
+        void this.server.api(`/session/${sid}`, this.dir, { method: "DELETE" }).catch(() => {});
+      }
+      throw error;
+    }
     const messageId = opencodeMessageId();
     const ownMessages = new Set<string>();
     let sawRequest = false;
@@ -1508,9 +1516,13 @@ class OpencodeAgent implements WarmAgent {
     let streamed = "";
     const emit = (d: string): void => { streamed += d; if (!turn.stopping) onText?.(d); };
     const acceptMessage = (id: unknown, parentId: unknown) => {
-      if (id === messageId) sawRequest = true;
-      if (typeof id !== "string" || parentId !== messageId) return;
-      sawRequest = true;
+      const ownAssistant = typeof id === "string" && parentId === messageId;
+      if (!sawRequest && (id === messageId || ownAssistant)) {
+        sawRequest = true;
+        // A cancel sent before OpenCode accepted this draft may have found no active prompt.
+        if (this.spec.commitMessage && turn.stopping) this.abort();
+      }
+      if (!ownAssistant) return;
       ownMessages.add(id);
       for (const batch of unverifiedParts.get(id) ?? []) turn.edits(batch);
       unverifiedParts.delete(id);

@@ -71,7 +71,10 @@ export interface ChangesCommitRequest extends ChangesSelectionRequest {
   readonly scopeThreadId?: string;
 }
 
-export type ChangesMessageResult = { readonly message: string };
+export type ChangesMessageFailure = "timeout" | "missing-model" | "provider-error";
+export type ChangesMessageResult =
+  | { readonly status: "generated"; readonly message: string }
+  | { readonly status: "fallback"; readonly message: string; readonly reason: ChangesMessageFailure };
 export type ChangesCommitResult = { readonly commits: readonly string[] } | ChangesRefusal;
 export type ChangesRefusal = { readonly reason: string; readonly commits?: readonly string[] };
 export type ChangesActionResult = { readonly ok: true } | ChangesRefusal;

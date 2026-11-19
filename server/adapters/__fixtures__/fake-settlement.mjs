@@ -33,6 +33,7 @@ if (harness === "opencode") {
   const streams = new Set();
   let messageId;
   let promptResponse;
+  let draftAccepted = false;
   let dir;
   const partId = "part-native";
   const info = (id, parentID) => ({ id, parentID, sessionID: sid });
@@ -51,18 +52,35 @@ if (harness === "opencode") {
       streams.add(res);
       res.on("close", () => streams.delete(res));
     } else if (url.pathname === "/session" && req.method === "POST") respond({ id: sid });
-    else if (url.pathname.endsWith("/message")) {
+    else if (mode === "cancel-draft" && url.pathname === `/session/${sid}` && req.method === "DELETE") {
+      writeFileSync(join(process.env.VIZZO_FAKE_PROJECT, "draft-session-deleted"), "");
+      respond(true);
+    } else if (url.pathname.endsWith("/message")) {
       let raw = "";
       for await (const chunk of req) raw += chunk;
       ({ messageID: messageId } = JSON.parse(raw));
       dir = url.searchParams.get("directory");
       promptResponse = respond;
+      if (mode === "cancel-draft") {
+        writeFileSync(join(process.env.VIZZO_FAKE_PROJECT, "draft-dispatched"), "");
+        return;
+      }
       send("message.updated", { info: info(messageId) });
       send("message.updated", { info: info("assistant-current", messageId) });
       send("message.part.updated", { part: { id: "text", type: "text", sessionID: sid } });
       send("message.part.delta", { sessionID: sid, partID: "text", field: "text", delta: text });
     } else if (url.pathname.endsWith("/abort")) {
       respond(true);
+      if (mode === "cancel-draft") {
+        if (!draftAccepted) {
+          draftAccepted = true;
+          send("message.updated", { sessionID: sid, info: info(messageId) });
+        } else {
+          promptResponse({ info: info("assistant-current", messageId), parts: [] });
+          send("session.idle", { sessionID: sid });
+        }
+        return;
+      }
       afterStop(() => {
         for (const [id, messageID] of [["part-stale", "assistant-previous"], [partId, "assistant-current"]]) {
           const path = join(dir, "created");

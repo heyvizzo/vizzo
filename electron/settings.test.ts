@@ -32,7 +32,7 @@ describe("readChangesPreferences", () => {
   it("reads desktop preferences and handles missing, legacy and malformed settings", () => {
     const home = mkdtempSync(join(tmpdir(), "changes-prefs-"));
     const file = join(home, "settings.json");
-    const defaults = { gitSourceControl: false, commitMessageTier: "fast", autoCommitMessage: true };
+    const defaults = { gitSourceControl: true, commitMessageTier: "fast", autoCommitMessage: true };
     try {
       expect(readChangesPreferences(file)).toEqual(defaults);
       writeFileSync(file, "null");
@@ -41,9 +41,9 @@ describe("readChangesPreferences", () => {
       expect(readChangesPreferences(file)).toEqual(defaults);
       writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ showFullAnswers: false }) }));
       expect(readChangesPreferences(file)).toEqual(defaults);
-      writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ gitSourceControl: "true", commitMessageTier: "other", autoCommitMessage: "false" }) }));
+      writeFileSync(file, JSON.stringify({ chat: JSON.stringify({ gitSourceControl: "false", commitMessageTier: "other", autoCommitMessage: "false" }) }));
       expect(readChangesPreferences(file)).toEqual(defaults);
-      const saved = { gitSourceControl: true, commitMessageTier: "smart", autoCommitMessage: false };
+      const saved = { gitSourceControl: false, commitMessageTier: "smart", autoCommitMessage: false };
       writeFileSync(file, JSON.stringify({ chat: JSON.stringify(saved) }));
       expect(readChangesPreferences(file)).toEqual(saved);
     } finally {

@@ -85,13 +85,15 @@ function usageOf(
 }
 
 /** Runs `fn` with an abort signal that fires after `ms`; a timeout is reported as one. */
-async function withDeadline<T>(p: ApiProviderId, ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withDeadline<T>(p: ApiProviderId, ms: number, fn: (signal: AbortSignal) => Promise<T>, external?: AbortSignal): Promise<T> {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(new Error(`${label(p)} timed out after ${ms} ms`)), ms);
+  const signal = external ? AbortSignal.any([external, ctl.signal]) : ctl.signal;
+  const timer = setTimeout(() => ctl.abort(new DOMException(`${label(p)} timed out after ${ms} ms`, "TimeoutError")), ms);
   try {
-    return await fn(ctl.signal);
+    signal.throwIfAborted();
+    return await fn(signal);
   } catch (e) {
-    if (ctl.signal.aborted) throw ctl.signal.reason;
+    signal.throwIfAborted();
     throw e;
   } finally {
     clearTimeout(timer);
@@ -135,7 +137,7 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string
 }
 
 async function chatCompletions(
-  p: Exclude<ApiProviderId, "anthropic">, choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number,
+  p: Exclude<ApiProviderId, "anthropic">, choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal,
 ): Promise<HarnessResult> {
   const key = apiKey(p);
   if (!choice.model) throw new Error(`${label(p)}: no model chosen`);
@@ -186,7 +188,7 @@ async function chatCompletions(
       usage: usage ? usageOf(p, model, t, typeof usage.cost === "number" ? usage.cost : undefined) : null,
       raw: { provider: p, finishReason: finish, usage, lastChunk: last }, warm: true,
     };
-  });
+  }, signal);
 }
 
 // ── Anthropic Messages API ───────────────────────────────────────────────────
@@ -201,7 +203,7 @@ export function anthropicThinking(level: string | undefined): Pick<Anthropic.Mes
   return { thinking: { type: "adaptive" }, ...(EFFORTS.has(level) ? { output_config: { effort: level as Effort } } : {}) };
 }
 
-async function anthropicMessages(choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number): Promise<HarnessResult> {
+async function anthropicMessages(choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal): Promise<HarnessResult> {
   const client = anthropicFactory(apiKey("anthropic"));
   if (!choice.model) throw new Error(`${label("anthropic")}: no model chosen`);
   return withDeadline("anthropic", timeoutMs, async (signal) => {
@@ -222,16 +224,16 @@ async function anthropicMessages(choice: LlmChoice, req: ApiRequest, onText: ((d
       text, model: final.model, stopReason: final.stop_reason ?? null, usage: usageOf("anthropic", final.model, t),
       raw: { provider: "anthropic", id: final.id, stopReason: final.stop_reason, usage: u }, warm: true,
     };
-  });
+  }, signal);
 }
 
 /** One fast-tier request on a model API: streams the answer text to `onText`, resolves with the whole result. */
 export function apiRequest(
-  provider: ApiProviderId, choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number,
+  provider: ApiProviderId, choice: LlmChoice, req: ApiRequest, onText: ((d: string) => void) | undefined, timeoutMs: number, signal?: AbortSignal,
 ): Promise<HarnessResult> {
   const request = provider === "anthropic"
-    ? anthropicMessages(choice, req, onText, timeoutMs)
-    : chatCompletions(provider, choice, req, onText, timeoutMs);
+    ? anthropicMessages(choice, req, onText, timeoutMs, signal)
+    : chatCompletions(provider, choice, req, onText, timeoutMs, signal);
   return req.annotations?.length ? request.catch(err => {
     let detail = err instanceof Error ? err.message : String(err);
     for (const a of req.annotations!) detail = detail.replaceAll(a.image.dataUrl, "[image attachment]").replaceAll(a.image.dataUrl.slice(a.image.dataUrl.indexOf(",") + 1), "[image bytes]");

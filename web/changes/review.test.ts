@@ -123,6 +123,8 @@ describe("Changes review", () => {
 
 describe("message draft", () => {
   const selection = { project: "project", generation: 1, components: ["own"] };
+  const generated = (message: string) => ({ status: "generated", message } as const);
+  const fallback = { status: "fallback", message: "Writer title", reason: "timeout" } as const;
 
   it("ignores an out-of-date prefill and preserves user edits, even an empty message", () => {
     const draft = new MessageDraft();
@@ -131,12 +133,12 @@ describe("message draft", () => {
     expect(draft.update(selection)).toBe(false);
     draft.update({ ...selection, generation: 2 });
     const second = draft.begin(false)!;
-    expect(draft.resolve(first, "Old selection")).toBe(false);
-    expect(draft.resolve(second, "Current selection")).toBe(true);
+    expect(draft.resolve(first, generated("Old selection"))).toBeUndefined();
+    expect(draft.resolve(second, generated("Current selection"))).toBe("filled");
     draft.update({ ...selection, generation: 3 });
     const third = draft.begin(false)!;
     draft.edit("My draft");
-    expect(draft.resolve(third, "Late prefill")).toBe(false);
+    expect(draft.resolve(third, generated("Late prefill"))).toBeUndefined();
     draft.update(undefined);
     expect(draft.text).toBe("My draft");
     draft.edit("");
@@ -150,14 +152,14 @@ describe("message draft", () => {
     draft.update(selection);
     const first = draft.begin(false)!;
     draft.update(undefined);
-    expect(draft.resolve(first, "Cleared selection")).toBe(false);
+    expect(draft.resolve(first, generated("Cleared selection"))).toBeUndefined();
     draft.edit("Old scope");
     draft.reset();
     expect(draft.text).toBe("");
     draft.update(selection);
     const latest = draft.begin(false)!;
-    expect(draft.resolve(latest, "New scope")).toBe(true);
-    expect(draft.text).toBe("New scope");
+    expect(draft.resolve(latest, fallback)).toBe("filled");
+    expect(draft.text).toBe("Writer title");
   });
 
   it("only replaces custom text after a manual request for the current selection succeeds", () => {
@@ -168,13 +170,16 @@ describe("message draft", () => {
     expect(draft.begin(false)).toBeUndefined();
     const outdated = draft.begin(true)!;
     draft.update({ ...selection, generation: 2 });
-    expect(draft.resolve(outdated, "Old selection")).toBe(false);
+    expect(draft.resolve(outdated, fallback)).toBeUndefined();
+    expect(draft.resolve(draft.begin(true)!, fallback)).toBe("kept");
+    draft.update(selection);
+    expect(draft.text).toBe("Custom draft");
     const current = draft.begin(true)!;
     expect(draft.text).toBe("Custom draft");
-    expect(draft.resolve(current, "New message")).toBe(true);
+    expect(draft.resolve(current, generated("New message"))).toBe("filled");
     expect(draft.text).toBe("New message");
     expect(draft.begin(false)).toBeUndefined();
-    draft.update(selection);
+    draft.update({ ...selection, generation: 2 });
     expect(draft.text).toBe("");
     expect(draft.begin(false)).toBeTypeOf("number");
   });

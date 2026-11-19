@@ -179,21 +179,17 @@ async function run() {
   page.debugger.attach("1.3");
   await until(() => sidebar.executeJavaScript('document.querySelectorAll(".thread-item").length === 1'), "thread snapshot");
   page.send("page:open-thread", threadId);
-  await until(() => panelNode(page, ".th-panel .th-trash"), "thread panel with source control off");
-  assert(await bar('document.querySelector("#changes").hidden'));
-  assert.equal(await commitButton(), 0);
-  await bar("shell.changes.open()");
-  ipcMain.emit("page:thread", { sender: page, senderFrame: page.mainFrame }, { type: "thread.commit", threadId });
-  assert.equal(BrowserWindow.getAllWindows().length, 1, "both native entry points refuse opens while off");
+  const chatSettings = () => JSON.parse(JSON.parse(readFileSync(settings)).chat ?? "{}");
+  assert.equal(chatSettings().gitSourceControl, undefined, "the fixture starts without a saved Git preference");
+  await until(() => bar('document.querySelector("#changes-count").textContent === "3"'), "default-on Git shows the current project's file count");
+  await until(commitButton, "default-on Git shows the owned thread's Commit button");
   await sidebar.executeJavaScript('shell.openSettings("preferences")');
   const preferences = await until(() => byUrl("/settings.html#preferences"), "Settings Preferences");
   const prefs = (code) => preferences.executeJavaScript(code);
   const clickPreference = () => prefs('document.querySelector("#git-source-control").click()');
-  await until(() => prefs('document.querySelector("#git-source-control") && !document.querySelector("#section-preferences").hidden'), "opt-in checkbox");
-  assert.equal(await prefs('document.querySelector("#git-source-control").checked'), false);
-  await clickPreference();
+  await until(() => prefs('document.querySelector("#git-source-control") && !document.querySelector("#section-preferences").hidden'), "Git preference");
+  assert.equal(await prefs('document.querySelector("#git-source-control").checked'), true);
   BrowserWindow.fromWebContents(preferences).hide();
-  await until(() => bar('document.querySelector("#changes-count").textContent === "3"'), "current project's distinct file count");
   await sidebar.executeJavaScript("shell.queue.publish({ instant: true, count: 2, sending: false })");
   await until(() => bar('document.querySelector("#queue-count").textContent === "2"'), "separate queue count");
   assert(await bar(`(() => {
@@ -219,9 +215,9 @@ async function run() {
   assert.equal(await evaluate("window.open('/untrusted')"), null, "Changes cannot create a popup");
   assert.deepEqual(await evaluate("Object.keys(window.vizzoChangesPreferences).sort()"), ["getAuto", "setAuto"]);
   assert.equal(await evaluate("window.vizzoChangesPreferences.getAuto()"), true);
+  const gitPreference = chatSettings().gitSourceControl;
   await evaluate("window.vizzoChangesPreferences.setAuto(false)");
-  const chatSettings = () => JSON.parse(JSON.parse(readFileSync(settings)).chat);
-  assert.equal(chatSettings().gitSourceControl, true);
+  assert.equal(chatSettings().gitSourceControl, gitPreference);
   assert.equal(chatSettings().autoCommitMessage, false);
   for (const event of [{ sender: sidebar, senderFrame: sidebar.mainFrame }, { sender: window.webContents, senderFrame: null }]) {
     ipcMain.emit("changes:auto-message:set", event, true);
@@ -230,6 +226,7 @@ async function run() {
   }
   await sidebar.executeJavaScript('shell.chatSettings.save(JSON.stringify({ gitSourceControl: false, autoCommitMessage: true }))');
   assert.equal(await bar("shell.changes.getStatus().then(s => s.kind)"), "ready");
+  assert.equal(chatSettings().gitSourceControl, gitPreference);
   assert.equal(chatSettings().autoCommitMessage, false);
   await until(() => focusCount() > 0, "scanner focus");
   await until(() => visible().at(-1) === true, "scanner visibility");
@@ -314,6 +311,11 @@ async function run() {
   assert.equal(await panelNode(page, '.th-delete-actions [data-choice="commit"]'), 0);
   assert.equal(chatSettings().gitSourceControl, false);
   assert.equal(chatSettings().autoCommitMessage, false);
+  publish(ready); // An already-running scan can still report results after the setting is turned off.
+  assert.equal(await bar("shell.changes.getStatus()"), null);
+  await bar("shell.changes.open()");
+  ipcMain.emit("page:thread", { sender: page, senderFrame: page.mainFrame }, { type: "thread.commit", threadId });
+  assert.equal(changesWindows().length, 0, "both native entry points refuse opens while off");
   await clickPreference();
   await until(commitButton, "live re-enable restores thread Commit");
   assert.equal(await panelNode(page, ".th-foot"), 0, "old confirmation dismissed on re-enable");
@@ -322,8 +324,8 @@ async function run() {
   await until(() => panelNode(page, '.th-delete-actions [data-choice="commit"]'), "new review after re-enable");
   assert.equal(received.filter((msg) => msg.type === "thread.delete.preview").length, 2);
   assert.equal(received.some((msg) => msg.type === "thread.delete"), false, "stale Commit cannot be replayed after re-enable");
-  assert.equal(lifecycle.filter(({ type }) => type === "changes-preference").length, 3);
-  console.log("Changes Electron smoke passed: live opt-in and opt-out, stale delete protection, isolated persisted preferences, toolbar count, thread scope, project switches, scanner lifecycle, and restored bounds.");
+  assert.equal(lifecycle.filter(({ type }) => type === "changes-preference").length, 2);
+  console.log("Changes Electron smoke passed: default-on Git and live toggles, stale delete protection, isolated persisted preferences, toolbar count, thread scope, project switches, scanner lifecycle, and restored bounds.");
 }
 
 async function finish(code) {

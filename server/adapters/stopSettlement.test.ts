@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HarnessId } from "../../shared/config.ts";
 import { LedgerWorkerClient } from "../changes/ledgerWorkerClient.ts";
 import { WriterRegistry, type WriterExecution } from "../changes/writers.ts";
-import { restartSharedHarness, STOP_CONFIRM_MS } from "./harnesses.ts";
+import { AGENT_FACTORIES, HarnessTurn, restartSharedHarness, STOP_CONFIRM_MS } from "./harnesses.ts";
 import { openHarnessThread } from "./harnessThread.ts";
 import { stopWarm } from "./warmPool.ts";
 import "./claude.ts"; // registers solver prompts
@@ -230,6 +230,30 @@ it("journals the private OpenCode identity before the prompt POST can run", asyn
     await expect(request.answer).rejects.toMatchObject({ name: "AbortError" });
     await request.thread.settled;
   } finally { disarm.resolve(); request.close(); }
+}, 20_000);
+
+it.each([false, true])("cleans up a canceled OpenCode draft (prompt posted: %s)", async (posted) => {
+  const folder = mkdtempSync(join(tmpdir(), "vizzo-cancel-opencode-draft-"));
+  vi.stubEnv("OPENCODE_BIN", fixture);
+  vi.stubEnv("VIZZO_FAKE_NATIVE_HARNESS", "opencode");
+  vi.stubEnv("VIZZO_FAKE_STOP_MODE", "cancel-draft");
+  vi.stubEnv("VIZZO_FAKE_PROJECT", folder);
+  const agent = AGENT_FACTORIES.opencode({ role: "router", harness: "opencode", model: "", system: "", commitMessage: true });
+  const turn = new HarnessTurn();
+  const dispatched = () => existsSync(join(folder, "draft-dispatched"));
+  try {
+    const draft = agent.request("Draft a commit message", undefined, 15_000, undefined, turn);
+    void draft.catch(() => {});
+    if (posted) await expect.poll(dispatched, { timeout: 5_000 }).toBe(true);
+    turn.stop();
+    agent.abort?.();
+    if (!posted) await expect(draft).rejects.toMatchObject({ name: "AbortError" });
+    await expect.poll(() => existsSync(join(folder, "draft-session-deleted")), { timeout: 5_000 }).toBe(true);
+    expect(dispatched()).toBe(posted);
+  } finally {
+    await restartSharedHarness("opencode");
+    rmSync(folder, { recursive: true, force: true });
+  }
 }, 20_000);
 
 it("asks the owned OpenCode server to stop its tool before forced teardown and uses native idle", async () => {
