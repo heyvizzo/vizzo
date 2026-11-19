@@ -177,8 +177,9 @@
       changes.setAttribute("aria-label", label);
     }
     changes.onclick = () => shell.changes.open();
-    shell.changes.onStatus(showChanges);
-    shell.changes.getStatus().then(showChanges, () => {});
+    let changesStatusReceived = false;
+    shell.changes.onStatus((status) => { changesStatusReceived = true; showChanges(status); });
+    shell.changes.getStatus().then((status) => { if (!changesStatusReceived) showChanges(status); }, () => {});
 
     // Mic (the chat sidebar owns the microphone). Three looks: plain = push to talk; red dot = Always listen on;
     // red icon and dot = a turn is recording. A click toggles Always listen; holding it is push to talk, and while

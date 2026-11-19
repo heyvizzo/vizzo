@@ -16,7 +16,7 @@
     <a href="#tts" data-section="tts">Text to speech (TTS)</a>
     <a href="#keyboard" data-section="keyboard">Keyboard</a>
     <a href="#permissions" data-section="permissions">Permissions</a>
-    <a href="#debugging" data-section="debugging">Debugging</a>
+    <a href="#preferences" data-section="preferences">Preferences</a>
     <a href="#cookies" data-section="cookies">Browser cookies</a>
     <a href="#keys" data-section="keys">API Keys</a>
     <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar" title="Drag to resize; double-click to reset"></div>
@@ -59,6 +59,21 @@
               <select id="llm-smart-speed" title="Fast is the faster, pricier tier (Codex Fast (priority), Opus fast mode)" aria-label="Smart tier speed" hidden><option value="standard">standard</option><option value="fast">fast</option></select>
             </div>
             <div class="tier-toggles" id="llm-smart-toggles" role="group" aria-label="Smart tier: what the harness loads" hidden></div>
+          </div>
+        </div>
+        <div id="git-models" hidden>
+          <h3 class="sub-head">Git source control</h3>
+          <div class="card fields">
+            <div class="tier">
+              <label for="commit-message-tier" class="label">Commit message model</label>
+              <span id="commit-message-tier-hint" class="hint">Uses the model configured for the selected tier.</span>
+              <div class="tier-row">
+                <select id="commit-message-tier" aria-describedby="commit-message-tier-hint">
+                  <option value="fast">Fast</option>
+                  <option value="smart">Smart</option>
+                </select>
+              </div>
+            </div>
           </div>
         </div>
         <h3 class="sub-head">Turns</h3>
@@ -158,13 +173,18 @@
         <div id="permissions" class="card"></div>
       </section>
 
-      <section id="section-debugging" data-section="debugging" hidden>
-        <h2>Debugging</h2>
+      <section id="section-preferences" data-section="preferences" hidden>
+        <h2>Preferences</h2>
+        <h3 class="sub-head">General preferences</h3>
+        <div class="card fields">
+          <label class="check"><input type="checkbox" id="show-full-answers"> <span><span class="label">Full answers</span> <span class="hint">Show “Full answer” under replies to expand the complete written answer.</span></span></label>
+          <label class="check"><input type="checkbox" id="git-source-control"> <span><span class="label">Enable Git source control</span> <span class="hint">Review and commit changes in Git projects.</span></span></label>
+        </div>
+        <h3 class="sub-head">Debugging</h3>
         <p class="note">What the chat sidebar shows besides the conversation, and outlines on the page.</p>
         <div class="card fields">
           <label class="check"><input type="checkbox" id="show-cost"> <span><span class="label">Cost</span> <span class="hint">What each turn, task and thread cost, and what subscriptions and on-device speech saved.</span></span></label>
           <label class="check"><input type="checkbox" id="show-ram"> <span><span class="label">RAM</span> <span class="hint">How much memory the app server and each thread use, the on-device speech models included.</span></span></label>
-          <label class="check"><input type="checkbox" id="show-full-answers"> <span><span class="label">Full answers</span> <span class="hint">Show “Full answer” under replies to expand the complete written answer.</span></span></label>
           <label class="check"><input type="checkbox" id="show-debug"> <span><span class="label">Debugging details</span> <span class="hint">Under each turn: how it was routed (“direct answer” and similar), what was pointed at, clicked and highlighted, first audio and answer times, and the prompts &amp; responses of each model call.</span></span></label>
           <label class="check"><input type="checkbox" id="show-solver-session"> <span><span class="label">Solver session</span> <span class="hint">The smart solver’s harness and session ID in the conversation, thread and task panels. Click it to copy the command that resumes the session in a terminal.</span></span></label>
           <label class="check"><input type="checkbox" id="debug-outlines"> <span><span class="label">Outlines</span> <span class="hint">Outline what each turn pointed at on the page (picked elements, cursor rests).</span></span></label>

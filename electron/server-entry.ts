@@ -10,7 +10,7 @@ import { stopWarm } from "../server/adapters/warmPool.ts";
 import { loadPriceCatalog } from "../server/prices.ts";
 import { startSavedSpeech } from "../server/speechEngines.ts";
 import { setBrowserUrl } from "../server/browserPage.ts";
-import { applyEnv } from "./settings.ts";
+import { applyEnv, readChangesPreferences } from "./settings.ts";
 import "../server/adapters/claude.ts"; // registers the roles' prompts
 import { threadsFile } from "../server/threads/persist.ts";
 import { flushThreadLifecycle, monitorThreadCompletion, restoreThreadLifecycle } from "../server/threads/lifecycle.ts";
@@ -19,9 +19,14 @@ import { changesService } from "../server/changes/changesService.ts";
 import { changesStatus, subscribeChangesStatus } from "../server/changes/http.ts";
 import type { ChangesStatus } from "../shared/changes.ts";
 
+function reviewChangesProject() {
+  const enabled = readChangesPreferences().gitSourceControl;
+  void changesService().scanner.setProject(enabled ? projectDir() : null);
+}
+
 function useProject(dir: string | null) {
   setProjectDir(dir);
-  void changesService().scanner.setProject(projectDir());
+  reviewChangesProject();
   // The solver's agents start in the project folder: re-warm (the old ones are killed).
   warmSaved();
   console.log(`[server] project folder: ${projectDir() ?? "(none)"}`);
@@ -66,8 +71,15 @@ process.parentPort.on("message", (e: { data: {
     useProject(e.data.dir ?? null);
     publishChangesStatus(changesStatus());
   }
-  if (e.data.type === "changes-visible") void changesService().scanner.setVisible(e.data.visible === true);
-  if (e.data.type === "changes-focus") void changesService().scanner.focus();
+  if (e.data.type === "changes-preference") {
+    running.refreshSourceControl();
+    reviewChangesProject();
+    publishChangesStatus(changesStatus());
+  }
+  if (e.data.type === "changes-visible") {
+    void changesService().scanner.setVisible(e.data.visible === true && readChangesPreferences().gitSourceControl);
+  }
+  if (e.data.type === "changes-focus" && readChangesPreferences().gitSourceControl) void changesService().scanner.focus();
   if (e.data.type === "page") {
     setBrowserUrl(e.data.url ?? null);
     console.log(`[browser] page: ${e.data.url ?? "(none)"}`);

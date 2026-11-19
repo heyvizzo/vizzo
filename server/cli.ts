@@ -3,7 +3,7 @@
 import { pathToFileURL } from "node:url";
 import { startServer, type StartServerOpts } from "./index.ts";
 import { projectDir, setProjectDir } from "./project.ts";
-import { loadDesktopEnv } from "../electron/settings.ts";
+import { loadDesktopEnv, readChangesPreferences } from "../electron/settings.ts";
 
 // FAKE_VENDORS=1: every vendor is faked (tones, canned text) so the UI can be tried without keys. Runs aren't saved.
 async function fakeVendorOpts(): Promise<StartServerOpts> {
@@ -40,7 +40,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     });
     await restoreThreadLifecycle(threadsFile()).catch((error) => console.warn("[threads] could not recover saved threads", error));
     monitorThreadCompletion();
-    void changesService().scanner.setProject(projectDir());
+    if (readChangesPreferences().gitSourceControl) void changesService().scanner.setProject(projectDir());
   }
   try {
     await startServer(port, opts);

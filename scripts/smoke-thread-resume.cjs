@@ -24,7 +24,7 @@ const thread = {
   ],
 };
 ipcMain.on('hotkeys:get', e => { e.returnValue = null; });
-ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false }); });
+ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false, gitSourceControl: true }); });
 ipcMain.handle('attention:get', () => null);
 ipcMain.handle('project:get', () => null);
 ipcMain.handle('page:url', () => thread.pageUrl);
@@ -35,7 +35,7 @@ ipcMain.handle('comment:get', () => false);
 ipcMain.on('page:cmd', (_e, cmd) => page.webContents.send('page:cmd', cmd));
 ipcMain.on('page:thread', (_e, action) => chat?.webContents.send('page:thread', action));
 ipcMain.on('page:comment', (_e, action) => chat?.webContents.send('page:comment', action));
-ipcMain.on('page:ready', () => { pageReady = true; });
+ipcMain.on('page:ready', e => { pageReady = true; e.sender.send('changes:page-status', null, true); });
 ipcMain.on('queue:state', (_e, state) => { queueState = state; });
 const send = msg => peer.send(JSON.stringify(msg));
 const starts = () => received.filter(m => m.type === 'turn.start');
