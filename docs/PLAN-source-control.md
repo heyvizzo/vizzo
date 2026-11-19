@@ -579,3 +579,5 @@ harness without exact before/after reports), routing a spoken "commit this" to t
 - The 15-second drafting limit interrupted a Smart Codex request before it completed. Smart drafting now has
   a 60-second deadline, while Fast keeps its 15-second deadline. The window explains when it uses a fallback or
   keeps an existing draft after a failed request, and closing the review cancels its outstanding draft request.
+  The message endpoint distinguishes generated text from a fallback caused by timeout, a missing model, or
+  provider failure.
