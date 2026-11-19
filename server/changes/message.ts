@@ -48,7 +48,7 @@ export async function prepareCommitMessage(review: ScanReview, selected: readonl
   writers: Awaited<ReturnType<ScanWriterSource["snapshot"]>>, options: MessageOptions): Promise<string> {
   const ownerIds = new Set(selected.flatMap(({ writers }) => writers.map(changeWriterId)));
   const groups = review.view.groups.filter(({ writer }) => ownerIds.has(changeWriterId(writer)));
-  const executions = writers.executions.filter(({ writer }) => ownerIds.has(changeWriterId(writer)));
+  const executions = writers.executions.filter(({ writer, purpose }) => ownerIds.has(changeWriterId(writer)) && purpose !== "reconcile");
   const firstId = groups[0] && changeWriterId(groups[0].writer);
   const title = capped(groups[0]?.title.trim(), MAX_REQUEST_TEXT) || "Commit selected changes";
   const firstRequest = capped(executions.find(({ writer, request }) => changeWriterId(writer) === firstId && request?.trim())?.request?.trim(), MAX_REQUEST_TEXT);
@@ -72,7 +72,7 @@ export async function prepareCommitMessage(review: ScanReview, selected: readonl
       break;
     }
   }
-  const requests = executions.filter(({ writer, request, purpose }) => request?.trim() && purpose !== "reconcile" &&
+  const requests = executions.filter(({ writer, request }) => request?.trim() &&
     !hasTranscriptRequest.has(changeWriterId(writer))).slice(0, MAX_REQUESTS)
     .map(({ writer, request }) => ({ writer, request: capped(request, MAX_REQUEST_TEXT) }));
   const stat = new Map<string, { added: number; removed: number }>();
