@@ -25,16 +25,17 @@ const components = [
   file('mixed', [thread], true, 'src/mixed.ts', { tieReason: 'Also has Other changes' }),
   file('working', [central], false, 'src/running.ts', { selectable: false, reason: 'Still working…' }),
   file('other', [], true, 'src/user.ts'),
+  file('job-own', [job], false, 'src/footer.ts'),
 ];
 const groups = [
-  { writer: job, title: 'Finish the footer', state: 'open', own: [], tied: ['tied'] },
+  { writer: job, title: 'Finish the footer', state: 'open', own: ['job-own'], tied: ['tied'] },
   { writer: central, title: 'Update the page', state: 'working', own: ['working'], tied: [] },
   { writer: thread, title: 'Fix the header', state: 'open', incomplete: true, own: ['own'], tied: ['tied', 'mixed'] },
 ];
-let view = { generation: 1, branch: 'refs/heads/feature/header', base: null, groups, components, changedFiles: 5, notices: [] };
+let view = { generation: 1, branch: 'refs/heads/feature/header', base: null, groups, components, changedFiles: components.length, notices: [] };
 let status;
 let jobs = { jobs: [{ id: 'fix-me', commit, reason: 'Git’s staging area needs repair.', canFix: true }], restart: ['codex'] };
-let win, firstDraft;
+let win, firstDraft, finishFix, finishCombined;
 const errors = [];
 const calls = [];
 const socket = new WebSocketServer({ noServer: true });
@@ -93,15 +94,30 @@ async function serve(req, res) {
       if (!firstDraft) { firstDraft = () => respond({ message: 'Outdated prefill' }); return; }
       return respond({ message: 'Update project files' });
     case '/api/changes/commit':
+      if (!body.separately) {
+        finishCombined = () => {
+          const remaining = view.components.filter(item => !body.components.includes(item.id));
+          view = {
+            ...view, generation: view.generation + 1, components: remaining, changedFiles: remaining.length,
+            groups: view.groups.filter(group => [...group.own, ...group.tied].some(id => remaining.some(item => item.id === id))),
+          };
+          respond({ commits: [commit] });
+        };
+        return;
+      }
       if (body.components.length === 1 && body.components[0] === 'other-new') {
-        view = { ...view, generation: 4, components: view.components.filter(item => item.id !== 'other-new'), changedFiles: 4 };
+        view = { ...view, generation: 4, components: view.components.map(item =>
+          item.id === 'other-new' ? file('other-later', [], true, 'src/later.ts') : item) };
         return respond({ commits: [commit] });
       }
       view = { ...view, generation: 3, notices: ['HEAD moved: some changes are now marked Other'] };
       return respond({ commits: [commit], reason: 'Changed meanwhile: review again' }, 409);
     case '/api/changes/fix':
-      jobs = { ...jobs, jobs: [] };
-      return respond({ ok: true });
+      finishFix = () => {
+        jobs = { ...jobs, jobs: [] };
+        respond({ ok: true });
+      };
+      return;
     case '/api/changes/restart':
       jobs = { ...jobs, restart: [] };
       return respond({ ok: true });
@@ -151,7 +167,7 @@ async function main() {
   await waitForDom('document.querySelector("#groups h2")?.textContent === "Fix the header"', 'Scoped thread appears first');
   assert.equal(await evaluate('document.querySelector("#branch-name").textContent'), 'feature/header');
   assert.match(await evaluate('document.querySelector("#branch-state").textContent'), /No commits yet/);
-  assert.equal(await evaluate('document.querySelector("#file-count").textContent'), '5 changed files');
+  assert.equal(await evaluate('document.querySelector("#file-count").textContent'), '6 changed files');
   assert.equal(await evaluate('document.querySelector(".other-threads").open'), false);
   assert.equal(await evaluate('document.querySelector(".other-threads summary").textContent'), 'Other threads (2)');
   assert.equal(await evaluate('document.querySelector("#groups > :last-child h2").textContent'), 'Other changes');
@@ -161,6 +177,9 @@ async function main() {
   assert.deepEqual(await checked('tied'), [false, false]);
   assert.deepEqual(await checked('mixed'), [false]);
   assert.deepEqual(await checked('other'), [false]);
+  assert.equal(await evaluate('document.querySelector("#select-all").labels[0].textContent.trim()'), 'Select all changes');
+  assert.match(await evaluate('document.getElementById(document.querySelector("#select-all").getAttribute("aria-describedby")).textContent'), /Includes Other changes/);
+  assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), true);
   assert.equal(await evaluate('document.querySelector("input[data-component=working]").disabled'), true);
   assert.match(await evaluate('document.querySelector("input[data-component=mixed]").parentElement.textContent'), /Needs your call/);
 
@@ -176,7 +195,8 @@ async function main() {
   assert.equal(await evaluate('document.querySelector("#commit-message").value'), 'Edit the header by hand');
   await click('input[data-component=other]');
 
-  view = { ...view, generation: 2, components: [...components.slice(0, 4), file('other-new', [], true, 'src/user.ts')] };
+  view = { ...view, generation: 2, components: components.map(item =>
+    item.id === 'other' ? file('other-new', [], true, 'src/user.ts') : item) };
   broadcast({ type: 'changes.updated', project, generation: 2 });
   await waitForDom('!!document.querySelector("input[data-component=other-new]")', 'WebSocket refreshes changes');
   assert.deepEqual(await checked('other-new'), [false], 'Changed Other never inherits an earlier tick');
@@ -204,6 +224,9 @@ async function main() {
   assert.equal(await evaluate('document.querySelector("#commit").disabled'), true);
 
   await click('button[aria-label^="Fix staging"]');
+  await waitFor(() => !!finishFix, 'Fix sends an explicit request');
+  assert.equal(await evaluate('document.querySelector("#select-all").disabled'), true, 'Bulk selection stays disabled during Fix');
+  finishFix();
   await waitForDom(`document.querySelector('#result').textContent.includes('staging area was updated') && !document.querySelector('button[aria-label^="Fix staging"]')`, 'Fix updates the pinned job');
   assert.deepEqual(lastCall('fix').body, { project, jobId: 'fix-me' });
   await click('.job button');
@@ -221,17 +244,52 @@ async function main() {
   await waitForDom('document.querySelector("#result").textContent.startsWith("Committed ") && !document.querySelector("input[data-component=other-new]")', 'Other-only commit succeeds');
   assert.deepEqual(lastCall('commit').body, { project, generation: 3, components: ['other-new'], message: 'Update project files', separately: true });
 
+  await evaluate(`location.hash = ${JSON.stringify(scope)}`);
+  await waitForDom('document.querySelector(".other-threads") && document.querySelector("#select-all").indeterminate', 'Scoped review selects only its own work by default');
+  const priorCommits = calls.filter(call => call.path === '/api/changes/commit').length;
+  await key('#select-all', ' ', 'Space', 32);
+  assert.equal(await evaluate('document.querySelector("#select-all").checked'), true);
+  assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), false);
+  assert.equal(await evaluate('document.querySelector(".other-threads").open'), false);
+  assert.deepEqual(await checked('job-own'), [true], 'Bulk selection includes the collapsed writer’s own work');
+  assert.deepEqual(await checked('tied'), [true, true], 'Bulk selection checks both displays of a shared component');
+  assert.deepEqual(await checked('mixed'), [true]);
+  assert.deepEqual(await checked('other-later'), [true]);
+  assert.deepEqual(await checked('working'), [false], 'Bulk selection skips work in progress');
+
+  await key('#select-all', ' ', 'Space', 32);
+  assert.equal(await evaluate('document.querySelectorAll("input:checked").length'), 0, 'The checked bulk control clears every tick');
+  assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), false);
+  await key('#select-all', ' ', 'Space', 32);
+  await waitForDom('!document.querySelector("#commit").disabled', 'Bulk selection gets a commit message');
+  assert.equal(calls.filter(call => call.path === '/api/changes/commit').length, priorCommits, 'Selecting all never commits by itself');
+
+  await click('#commit');
+  await waitFor(() => !!finishCombined, 'Commit submits the bulk selection');
+  assert.equal(await evaluate('document.querySelector("#select-all").disabled'), true, 'Bulk selection stays disabled during Commit');
+  assert.deepEqual(lastCall('commit').body, {
+    project, generation: 4, components: ['job-own', 'mixed', 'other-later', 'own', 'tied'],
+    message: 'Update project files', separately: false, scopeThreadId: thread.id,
+  });
+  finishCombined();
+  await waitForDom('document.querySelector("#result").textContent.startsWith("Committed ") && !document.querySelector("input[data-component=other-later]")', 'Bulk commit succeeds');
+  assert.equal(calls.filter(call => call.path === '/api/changes/commit').length, priorCommits + 1);
+  assert.equal(await evaluate('document.querySelector("#select-all").disabled'), true, 'Bulk selection disables when no changes are eligible');
+
   status = { kind: 'unavailable', reason: 'Git 2.41 or later is required.', project };
   broadcast({ type: 'changes.status', status });
-  await waitForDom('document.querySelector("#availability").textContent.includes("Git 2.41") && document.querySelector("#commit-form").hidden', 'Unavailable project shows the reason');
+  await waitForDom('document.querySelector("#availability").textContent.includes("Git 2.41") && document.querySelector("#commit-form").hidden && document.querySelector("#selection-controls").hidden', 'Unavailable project shows the reason and hides actions');
   status = undefined;
-  view = { ...view, generation: 5, branch: null, base: commit, components: view.components.map(item => ({ ...item, selectable: false, reason: 'HEAD is detached' })) };
-  broadcast({ type: 'changes.updated', project, generation: 5 });
+  view = { ...view, generation: 6, branch: null, base: commit, components: view.components.map(item => ({ ...item, selectable: false, reason: 'HEAD is detached' })) };
+  broadcast({ type: 'changes.updated', project, generation: 6 });
   await waitForDom('document.querySelector("#branch-name").textContent === "Detached HEAD" && !document.querySelector("#branch").hidden', 'Detached HEAD is shown');
   assert.match(await evaluate('document.querySelector("#notices").textContent'), /Check out a branch to commit/);
   assert.equal(await evaluate('document.querySelector("#commit").disabled'), true);
+  view = { ...view, generation: 7, branch: 'refs/heads/feature/header', components: [], groups: [], changedFiles: 0 };
+  broadcast({ type: 'changes.updated', project, generation: 7 });
+  await waitForDom('document.querySelector("#availability").textContent === "No changes to review." && document.querySelector("#selection-controls").hidden', 'Empty review hides bulk selection');
   assert.deepEqual(errors, []);
-  console.log('Changes UI smoke passed: scoped selection and reset, keyboard ticks and diffs, Other review, message races, partial conflicts, hooks, Fix and Restart, unavailable status, and Git branch states.');
+  console.log('Changes UI smoke passed: scoped selection and reset, keyboard ticks and diffs, bulk selection and one combined commit, Other review, message races, partial conflicts, hooks, Fix and Restart, unavailable status, and Git branch states.');
 }
 
 async function finish(code) {

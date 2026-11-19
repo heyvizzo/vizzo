@@ -4,19 +4,22 @@ import { ChangesReview, MessageDraft, scopeFromHash } from "./review.ts";
 
 const a: ChangeWriter = { kind: "thread", id: "a + b/&c" };
 const b: ChangeWriter = { kind: "job", id: a.id };
+const c: ChangeWriter = { kind: "thread", id: "c" };
 const component = (id: string, writers: ChangeWriter[], other = false, selectable = true): ChangeComponent => ({
   id, writers, other, selectable, files: [{ path: `${id}.txt`, entry: "text", added: 1, removed: 0 }],
 });
 const view: ChangesView = {
-  generation: 1, branch: "refs/heads/main", base: null, changedFiles: 7, notices: [],
+  generation: 1, branch: "refs/heads/main", base: null, changedFiles: 8, notices: [],
   groups: [
     { writer: a, title: "A", state: "open", own: ["own", "blocked", "dependent"], tied: ["mixed", "shared"] },
     { writer: b, title: "B", state: "open", own: ["job"], tied: ["shared"] },
+    { writer: c, title: "C", state: "closed", own: ["closed"], tied: [] },
   ],
   components: [
     component("own", [a]), component("blocked", [a], false, false), component("job", [b]),
     component("mixed", [a], true), component("shared", [a, b]), component("other", [], true),
     { ...component("dependent", [a]), requires: ["other"] },
+    component("closed", [c]),
   ],
 };
 
@@ -38,6 +41,50 @@ describe("Changes review", () => {
     review.open(scopeFromHash(""));
     review.apply("project", view);
     expect(review.selection).toBeUndefined();
+  });
+
+  it("selects every eligible component across a scoped review and clears them together", () => {
+    const review = new ChangesReview();
+    review.open(a.id);
+    review.apply("project", view);
+    expect(review.selectAllState).toEqual({ checked: false, indeterminate: true, available: true, includesOther: true });
+
+    review.toggleAll(true);
+    expect(review.selection).toEqual({
+      project: "project", generation: 1, components: ["closed", "dependent", "job", "mixed", "other", "own", "shared"],
+    });
+    expect(review.missingRequirement).toBeUndefined();
+    expect(review.selectAllState).toMatchObject({ checked: true, indeterminate: false });
+    review.toggle("other", false);
+    expect(review.selectAllState).toMatchObject({ checked: false, indeterminate: true });
+    expect(review.selection).toBeUndefined();
+
+    review.toggleAll(false);
+    expect(review.selectAllState).toMatchObject({ checked: false, indeterminate: false });
+    expect(review.selection).toBeUndefined();
+    review.apply("project", { ...view, generation: 2 });
+    expect(review.selection).toBeUndefined();
+  });
+
+  it("never extends a bulk selection to new, replaced, or newly eligible IDs on refresh", () => {
+    const review = new ChangesReview();
+    review.apply("project", view);
+    review.toggleAll(true);
+    const next = { ...view, generation: 2, components: [
+      ...view.components.filter(item => !["blocked", "mixed", "shared"].includes(item.id)),
+      component("blocked", [a]), component("mixed-new", [a], true), component("new", [a]),
+      component("shared", [a, b], false, false),
+    ] };
+    review.apply("project", next);
+    expect(review.selection).toEqual({
+      project: "project", generation: 2, components: ["closed", "dependent", "job", "other", "own"],
+    });
+    expect(review.selectAllState).toMatchObject({ checked: false, indeterminate: true });
+
+    review.apply("next project", view);
+    expect(review.selection).toBeUndefined();
+    review.apply("next project", { ...view, components: [component("blocked", [a], true, false)] });
+    expect(review.selectAllState).toEqual({ checked: false, indeterminate: false, available: false, includesOther: false });
   });
 
   it("keeps only exact eligible ticks on refresh, including explicit Other selections", () => {

@@ -20,6 +20,10 @@ h2 { min-width: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
 
 .review { display: grid; gap: 12px; padding-block: 16px 24px; }
 .review > :empty, .commit-bar:not(:has(form:not([hidden]), #result:not(:empty))) { display: none; }
+.select-all { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; padding-inline: 13px; }
+.select-all label { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; cursor: pointer; }
+.select-all label:has(input:disabled) { color: var(--muted); cursor: default; }
+.select-all .hint:empty { display: none; }
 #groups, .notices { display: grid; gap: 10px; }
 .notice { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--raised); overflow-wrap: anywhere; }
 .job { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
@@ -29,8 +33,9 @@ h2 { min-width: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
 .component { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 10px; padding: 5px 12px; border-top: 1px solid var(--line); }
 .component:has(input:checked) { background: var(--accent-soft); }
 .component:last-child { border-radius: 0 0 11px 11px; }
-.component > input { width: 16px; height: 16px; margin: 7px 0 0; accent-color: var(--accent); cursor: pointer; }
-.component > input:disabled { cursor: default; }
+.component > input, .select-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.component > input { margin-top: 7px; }
+.component > input:disabled, .select-all input:disabled { cursor: default; }
 .component-note { margin: 1px 0 4px 21px; font-size: 12px; }
 
 summary { cursor: pointer; list-style: none; }

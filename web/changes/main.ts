@@ -11,6 +11,9 @@ const branch = $("branch");
 const notices = $("notices");
 const jobList = $("jobs");
 const scopeNote = $("scope-note");
+const selectionControls = $("selection-controls");
+const selectAll = $<HTMLInputElement>("select-all");
+const selectAllNote = $("select-all-note");
 const result = $("result");
 const form = $<HTMLFormElement>("commit-form");
 const message = $<HTMLTextAreaElement>("commit-message");
@@ -48,6 +51,7 @@ function renderReview(): void {
   notices.replaceChildren(...texts.map(text => element("p", "notice", text)));
   scopeNote.hidden = !view || scope === null || !!scopedGroup;
   scopeNote.textContent = "This thread has no owned changes in the current project.";
+  selectionControls.hidden = !view?.components.length;
   form.hidden = !view?.components.length;
   selectionChanged();
 }
@@ -77,6 +81,11 @@ function showResult(reason = "", commits: readonly string[] = [], error = false)
 
 function syncActions(): void {
   list.syncSelection(busy);
+  const all = review.selectAllState;
+  selectAll.checked = all.checked;
+  selectAll.indeterminate = all.indeterminate;
+  selectAll.disabled = busy || !all.available;
+  selectAllNote.textContent = all.includesOther ? "Includes Other changes." : "";
   message.disabled = busy;
   const disabled = busy || !review.selection || !message.value.trim() || review.view?.branch === null;
   commitButton.disabled = disabled;
@@ -319,6 +328,10 @@ function openScope(): void {
   void refresh();
 }
 
+selectAll.onchange = () => {
+  review.toggleAll(selectAll.checked);
+  selectionChanged();
+};
 message.oninput = () => { draft.edit(message.value); cancelPrefill(); syncActions(); };
 form.onsubmit = event => { event.preventDefault(); void submit(false); };
 separatelyButton.onclick = () => { void submit(true); };

@@ -60,6 +60,26 @@ export class ChangesReview {
     else this.selected.delete(id);
   }
 
+  toggleAll(checked: boolean): void {
+    this.selected.clear();
+    if (!checked) return;
+    for (const component of this.components.values()) {
+      if (component.selectable) this.selected.add(component.id);
+    }
+  }
+
+  get selectAllState(): { checked: boolean; indeterminate: boolean; available: boolean; includesOther: boolean } {
+    let selectable = 0;
+    let includesOther = false;
+    for (const component of this.components.values()) {
+      if (!component.selectable) continue;
+      selectable++;
+      includesOther ||= component.other;
+    }
+    const checked = selectable > 0 && this.selected.size === selectable;
+    return { checked, indeterminate: this.selected.size > 0 && !checked, available: selectable > 0, includesOther };
+  }
+
   get missingRequirement(): ChangeComponent | undefined {
     for (const id of this.selected) {
       for (const required of this.components.get(id)?.requires ?? []) {
