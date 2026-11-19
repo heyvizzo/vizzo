@@ -106,4 +106,25 @@ describe("aborting a request", () => {
     await expect(harnessRequest("solver", CLAUDE.smart, "again", undefined, 60_000, abort.signal)).rejects.toThrow("stopped by the user");
     expect(hanging.length).toBe(before);
   });
+
+  it.each([
+    { harness: "claude-code", commitMessage: true, kills: true },
+    { harness: "grok", commitMessage: true, kills: true },
+    { harness: "pi", commitMessage: true, kills: true },
+    { harness: "omp", commitMessage: true, kills: true },
+    { harness: "codex", commitMessage: true, kills: false },
+    { harness: "opencode", commitMessage: true, kills: false },
+    { harness: "claude-code", commitMessage: false, kills: false },
+  ] as const)("cancels $harness during startup (commit draft $commitMessage)", async ({ harness, commitMessage, kills }) => {
+    const interrupt = vi.fn();
+    setAgentFactory((spec) => Object.assign(new HangingAgent(spec), { abort: interrupt }));
+    const controller = new AbortController();
+    const request = harnessRequest("router", { provider: harness, model: "" }, "Draft a message", undefined, 15_000,
+      controller.signal, undefined, { role: "router", harness, model: "", system: "", commitMessage });
+    const [used] = hanging;
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(used?.killed).toBe(kills);
+    expect(interrupt).toHaveBeenCalledTimes(kills ? 0 : 1);
+  });
 });

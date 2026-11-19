@@ -171,8 +171,10 @@ export async function harnessRequest(
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => {
         turn.stop();
-        if (agent.abort) agent.abort();
-        else agent.kill();
+        // A private draft agent is consumed even if canceled before its native turn starts.
+        const privateDraft = spec.commitMessage && h !== "codex" && h !== "opencode";
+        if (privateDraft || !agent.abort) agent.kill();
+        else agent.abort();
         reject(signal.reason ?? new Error("aborted"));
       };
       if (signal.aborted) onAbort();
