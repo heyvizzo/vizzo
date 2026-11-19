@@ -1,7 +1,7 @@
 // The Settings window of the Electron app (electron/main.ts openSettings): a sidebar of sections, one shown at a time
 // (the URL hash names it). Dashboard sums up the rest and flags what doesn't work; then the LLM tiers and how turns
-// run, the speech models (speechView.ts: pick, configure, install), the keyboard shortcuts, the app's macOS permissions, the debugging
-// displays, the browser pane's cookies and the API keys. Chat settings save on every change (web/chat/settings.ts)
+// run, the speech models (speechView.ts: pick, configure, install), the keyboard shortcuts, the app's macOS permissions,
+// preferences, the browser pane's cookies and the API keys. Chat settings save on every change (web/chat/settings.ts)
 // and apply from the sidebar's next turn; the API keys save with the Save bar, which shows only while they're edited.
 import "./settings.css";
 import { API_PROVIDERS, HARNESSES, HARNESS_TOGGLES, LLM_DEFAULT_MODELS, LLM_PROVIDER_LABELS, TASK_TIMEOUT_MAX, TASK_TIMEOUT_MIN, cleanToggles, defaultLevel, isHarness, llmOf, toggleOn, type LlmProvider, type HarnessScan, type LlmChoice, type LlmModelInfo, type LlmTier, type RouterMode, type RunConfig } from "../../shared/config.ts";
@@ -48,7 +48,7 @@ mountInstructions(shell.instructions, shell.onProject, {
 });
 
 // ── sections ───────────────────────────────────────
-const sectionOf = (hash: string): Section => SECTIONS.find((x) => `#${x}` === hash) ?? "dashboard";
+const sectionOf = (hash: string): Section => hash === "#debugging" ? "preferences" : SECTIONS.find((x) => `#${x}` === hash) ?? "dashboard";
 function showSection(section: Section): void {
   for (const el of document.querySelectorAll<HTMLElement>("main section[data-section]")) el.hidden = el.dataset.section !== section;
   for (const a of document.querySelectorAll<HTMLAnchorElement>(".sidebar a")) {
@@ -373,11 +373,25 @@ function loadServerState(triesLeft = 30): void {
 }
 loadServerState();
 
-// ── display ────────────────────────────────────────
-for (const [id, key] of [["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-full-answers", "showFullAnswers"], ["show-debug", "showDebug"], ["show-solver-session", "showSolverSession"], ["capture-trace", "captureTrace"]] as const) {
+const commitMessageTier = $<HTMLSelectElement>("commit-message-tier");
+const gitModels = $("git-models");
+gitModels.hidden = !settings.gitSourceControl;
+commitMessageTier.value = settings.commitMessageTier;
+commitMessageTier.onchange = () => {
+  settings.commitMessageTier = commitMessageTier.value === "smart" ? "smart" : "fast";
+  saveSettings();
+};
+
+// ── preferences ────────────────────────────────────
+for (const [id, key] of [["show-full-answers", "showFullAnswers"], ["git-source-control", "gitSourceControl"], ["debug-outlines", "debugOutlines"], ["hover-outline", "hoverOutline"], ["show-ram", "showRam"], ["show-cost", "showCost"], ["show-debug", "showDebug"], ["show-solver-session", "showSolverSession"], ["capture-trace", "captureTrace"]] as const) {
   const box = $<HTMLInputElement>(id);
   box.checked = settings[key];
-  box.onchange = () => { settings[key] = box.checked; saveSettings(); dashboardChanged(); };
+  box.onchange = () => {
+    settings[key] = box.checked;
+    gitModels.hidden = !settings.gitSourceControl;
+    saveSettings();
+    dashboardChanged();
+  };
 }
 
 // ── traces (server/traceStore.ts) ──────────────────
@@ -845,7 +859,7 @@ function renderDashboard(): void {
   const missingRequired = perms?.some((r) => !r.ok) ?? false;
   const keyFields = envFields.filter((f) => !f.param);
   const keysSet = keyFields.filter((f) => envValues[f.key]?.trim()).length;
-  const display = ([["showCost", "Cost"], ["showRam", "RAM"], ["showFullAnswers", "Full answers"], ["showDebug", "Details"], ["showSolverSession", "Solver session"], ["debugOutlines", "Outlines"], ["hoverOutline", "Hover outline"]] as const)
+  const display = ([["showCost", "Cost"], ["showRam", "RAM"], ["showDebug", "Details"], ["showSolverSession", "Solver session"], ["debugOutlines", "Outlines"], ["hoverOutline", "Hover outline"]] as const)
     .filter(([k]) => settings[k]).map(([, l]) => l);
   const lines: { label: string; text: string; detail?: string; tone?: Tone; section: Section }[] = [
     { label: "Fast model", text: fast.text, detail: [fast.loads, "router and progress lines"].filter(Boolean).join(" · "), tone: tierTone("fast"), section: "models" },
@@ -859,7 +873,10 @@ function renderDashboard(): void {
     },
     { label: "Turns", text: `Router ${settings.routerMode === "auto" ? "auto (may answer)" : "forced (always the solver)"}`, detail: `Long tasks: over ${settings.longTaskSeconds} s · time limit ${settings.taskTimeoutMinutes} min`, section: "models" },
     { label: "Keyboard", text: `Talk: ${hotkeyLabel(settings.hotkeys.talk)} · Comment: ${hotkeyLabel(settings.hotkeys.comment)}`, section: "keyboard" },
-    { label: "Debugging", text: display.length ? display.join(", ") : "Nothing extra shown", section: "debugging" },
+    {
+      label: "Preferences", text: `Full answers ${settings.showFullAnswers ? "on" : "off"} · Git source control ${settings.gitSourceControl ? "on" : "off"}`,
+      detail: display.length ? `Debugging: ${display.join(", ")}` : undefined, section: "preferences",
+    },
     {
       label: "API keys", text: envFields.length ? `${keysSet} of ${keyFields.length} set` : "Loading…",
       detail: unreadableKeys.length ? `Couldn't decrypt ${unreadableKeys.map(keyLabel).join(", ")}` : "Only the picked models' keys are needed",

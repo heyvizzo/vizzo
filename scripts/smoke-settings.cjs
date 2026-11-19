@@ -2,6 +2,7 @@
 // No speech engines, model downloads, or external model calls are started.
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
 const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
@@ -23,6 +24,8 @@ let permissions = [
 const importCalls = [];
 let finishImport;
 const selection = { stt: 'local_whisperkit', tts: 'macos' };
+let savedChat = { sttModel: selection.stt, ttsModel: selection.tts };
+const chatWrites = [];
 const engines = [
   { kind: 'stt', engine: 'whisperkit', label: 'WhisperKit', state: 'ready' },
   { kind: 'tts', engine: 'macos', label: 'macOS voices', state: 'ready' },
@@ -33,7 +36,12 @@ const installs = [
 ].map(row => ({ ...row, installed: true, state: 'idle', builtin: ['apple', 'macos'].includes(row.engine) }));
 ipcMain.on('hotkeys:get', event => { event.returnValue = null; });
 ipcMain.on('chat-settings:get', event => {
-  event.returnValue = JSON.stringify({ sttModel: selection.stt, ttsModel: selection.tts });
+  event.returnValue = JSON.stringify(savedChat);
+});
+ipcMain.on('chat-settings:save', (_event, json) => {
+  const patch = JSON.parse(json);
+  chatWrites.push(patch);
+  savedChat = { ...savedChat, ...patch };
 });
 ipcMain.handle('instructions:get', () => ({ global: '', project: '', projectDir: null }));
 ipcMain.handle('settings:get', () => ({ permissions, fields: [], values: {} }));
@@ -118,6 +126,44 @@ async function main() {
   await waitFor("document.querySelector('#summary').textContent.includes('1 of 1 required permission granted')", 'Dashboard counts only the microphone');
   assert.ok(!(await evaluate("document.querySelector('#health').textContent")).match(/Full Disk Access|Chrome keychain/), 'optional permissions do not need attention');
 
+  await evaluate("location.hash = '#debugging'");
+  await waitFor("location.hash === '#preferences' && !document.querySelector('#section-preferences').hidden", 'Legacy link opens Preferences');
+  assert.equal(await evaluate("document.querySelector('.sidebar [aria-current=page]').textContent"), 'Preferences');
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('#section-preferences h3')].map(heading => heading.textContent)"), ['General preferences', 'Debugging', 'Traces']);
+  assert.equal(await evaluate("document.querySelector('#show-full-answers').closest('.card').previousElementSibling.textContent"), 'General preferences');
+  assert.equal(await evaluate("document.querySelector('#git-source-control').checked"), false);
+  assert.equal(await evaluate("document.querySelector('#git-models').hidden"), true);
+
+  savedChat.autoCommitMessage = false; // Changes saved this while Settings was open.
+  await evaluate("document.querySelector('#git-source-control').click()");
+  await waitFor("document.querySelector('#summary').textContent.includes('Git source control on')", 'Dashboard follows the Git toggle');
+  await evaluate("location.hash = '#models'");
+  await waitFor("!document.querySelector('#section-models').hidden && !document.querySelector('#git-models').hidden", 'Git model picker becomes visible');
+  assert.equal(await evaluate("document.querySelector('#commit-message-tier').value"), 'fast');
+  await evaluate(`{
+    const tier = document.querySelector('#commit-message-tier');
+    tier.value = 'smart';
+    tier.dispatchEvent(new Event('change'));
+  }`);
+  await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTier === 'smart'", 'Smart model choice is sent to desktop settings');
+  assert.equal(savedChat.gitSourceControl, true);
+  assert.equal(savedChat.commitMessageTier, 'smart');
+  assert.equal(savedChat.autoCommitMessage, false);
+  assert.ok(chatWrites.every(patch => !Object.hasOwn(patch, 'autoCommitMessage')));
+
+  await evaluate("location.hash = '#preferences'");
+  await waitFor("!document.querySelector('#section-preferences').hidden", 'Preferences reopens');
+  await evaluate("document.querySelector('#git-source-control').click()");
+  await waitFor("document.querySelector('#git-models').hidden && JSON.parse(window.shell.chatSettings.get()).gitSourceControl === false", 'Disabling Git hides its model picker');
+  assert.equal(savedChat.gitSourceControl, false);
+  assert.equal(savedChat.commitMessageTier, 'smart');
+  await evaluate("document.querySelector('#git-source-control').click()");
+  await waitFor("JSON.parse(window.shell.chatSettings.get()).gitSourceControl === true", 'Git is enabled again');
+  const reloaded = once(win.webContents, 'did-finish-load');
+  win.webContents.reload();
+  await reloaded;
+  await waitFor("!document.querySelector('#section-preferences').hidden && document.querySelector('#git-source-control').checked && document.querySelector('#commit-message-tier').value === 'smart'", 'Git and model choices survive reopening Settings');
+
   await evaluate("location.hash = '#cookies'");
   await waitFor("!document.querySelector('#section-cookies').hidden", 'Browser cookies opens');
   const cookieState = () => evaluate("Object.fromEntries([...document.querySelectorAll('#cookies button[data-browser]')].map(button => [button.dataset.browser, button.disabled]))");
@@ -164,7 +210,7 @@ async function main() {
     await screenshot(process.env.SETTINGS_SCREENSHOT);
   }
   assert.deepEqual(errors, []);
-  console.log('Settings smoke passed: startup, speech polling, Dashboard requirements, permission explanations, cookie gates, navigation, and permission changes.');
+  console.log('Settings smoke passed: startup, speech polling, Preferences and persisted Git model settings, Dashboard requirements, permission explanations, cookie gates, navigation, and permission changes.');
 }
 
 main().then(() => finish(0), error => { console.error(error); return finish(1); });

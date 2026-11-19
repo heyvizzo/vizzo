@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG, DEFAULT_TTS_STYLE, validTaskTimeout, FISH_DEFAULT_VOICE
 import { parsePointingWords } from "../../shared/languages.ts";
 import type { OrbPos } from "../cursor/pageBridge.ts";
 import { DEFAULT_HOTKEYS, normalizeHotkeys, type Hotkeys } from "../../shared/hotkeys.ts";
+import { changesPreferences, type ChangesPreferences } from "../../shared/changesPreferences.ts";
 import { clampHangMs, VAD_HANG_MS } from "../audio/vad.ts";
 import { DEFAULT_LISTEN_RMS, clampThreshold } from "./meter.ts";
 
@@ -14,7 +15,7 @@ export const LONG_TASK_MIN = 5;
 export const LONG_TASK_MAX = 600;
 export const validLongTask = (s: unknown): s is number => Number.isInteger(s) && (s as number) >= LONG_TASK_MIN && (s as number) <= LONG_TASK_MAX;
 
-export interface Settings {
+export interface Settings extends ChangesPreferences {
   routerMode: RouterMode; ttsModel: TtsModel; sttModel: SttModel; longTaskSeconds: number;
   /**
    * The languages spoken with each speech-to-text model (its picker in Settings): none = Auto, for a model that says
@@ -71,6 +72,7 @@ export interface Settings {
 export const PANEL_KEYS = [
   "routerMode", "ttsModel", "sttModel", "longTaskSeconds", "taskTimeoutMinutes", "sttLanguages", "pointingWords", "llm", "llmModels", "ttsVoices", "ttsStyle",
   "debugOutlines", "hoverOutline", "showRam", "showCost", "showFullAnswers", "showDebug", "showSolverSession", "captureTrace", "hotkeys", "selectionVersion",
+  "gitSourceControl", "commitMessageTier",
 ] as const satisfies readonly (keyof Settings)[];
 /** What the chat sidebar changes (its talk controls, the toolbar's Instant toggle, the orb on the page). */
 export const SIDEBAR_KEYS = ["alwaysListen", "listenThreshold", "listenHangMs", "instant", "orbPos"] as const satisfies readonly (keyof Settings)[];
@@ -91,8 +93,9 @@ export function normalizeSettings(saved: unknown): Settings {
     taskTimeoutMinutes: DEFAULT_CONFIG.taskTimeoutMinutes,
     sttLanguages: {}, pointingWords: {}, llm: { ...DEFAULT_CONFIG.llm }, llmModels: { fast: {}, smart: {} }, ttsVoices: {}, alwaysListen: false, listenThreshold: DEFAULT_LISTEN_RMS, listenHangMs: VAD_HANG_MS,
     ttsStyle: { ...DEFAULT_TTS_STYLE }, instant: true, debugOutlines: false, hoverOutline: false, showRam: false, showCost: false, showFullAnswers: true, showDebug: false, showSolverSession: false, captureTrace: false, orbPos: null, hotkeys: DEFAULT_HOTKEYS,
+    ...(saved && typeof saved === "object" ? saved : {}),
+    ...changesPreferences(saved),
   };
-  if (saved && typeof saved === "object") Object.assign(settings, saved);
   settings.ttsStyle = { ...DEFAULT_TTS_STYLE, ...settings.ttsStyle };
   if (!validLongTask(settings.longTaskSeconds)) settings.longTaskSeconds = 20;
   if (!validTaskTimeout(settings.taskTimeoutMinutes)) settings.taskTimeoutMinutes = DEFAULT_CONFIG.taskTimeoutMinutes;
