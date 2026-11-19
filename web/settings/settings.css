@@ -79,6 +79,10 @@ label.check input:focus-visible { outline: 2px solid var(--accent); outline-offs
 .tier-row { display: flex; gap: 6px; }
 .tier-row select { flex: 0 1 auto; width: auto; min-width: 0; }
 .tier-row .combo { flex: 1 1 180px; min-width: 0; }
+.commit-message-row { flex-wrap: wrap; align-items: flex-start; gap: 6px 12px; }
+.commit-message-timeout { min-width: 0; }
+.commit-message-timeout label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.commit-message-timeout input { max-width: 100%; }
 /* What the tier's harness loads: compact checkboxes, wrapped */
 .tier-toggles { display: flex; flex-wrap: wrap; gap: 4px 14px; padding-top: 2px; }
 .tier-toggles[hidden] { display: none; }

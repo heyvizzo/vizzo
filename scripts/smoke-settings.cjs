@@ -148,6 +148,16 @@ async function main() {
     label: document.querySelector('#commit-message-timeout-label').textContent,
     seconds: document.querySelector('#commit-message-timeout').valueAsNumber,
   })`);
+  const commitModelRects = () => evaluate(`Object.fromEntries([
+    ['model', '#commit-message-tier'], ['timeout', '#commit-message-timeout'],
+    ['error', '#commit-message-timeout-error'],
+  ].map(([key, selector]) => [key, document.querySelector(selector).getBoundingClientRect().toJSON()]))`);
+  async function assertTimeoutInline() {
+    const { model, timeout } = await commitModelRects();
+    assert.ok(model.height > 0 && timeout.height > 0, 'Both commit message controls are visible');
+    assert.equal(timeout.top, model.top, 'Timeout shares the model dropdown row');
+    assert.ok(timeout.left > model.right, 'Timeout sits to the right of the model dropdown');
+  }
   const selectCommitModel = value => evaluate(`{
     const tier = document.querySelector('#commit-message-tier');
     tier.value = ${JSON.stringify(value)};
@@ -159,11 +169,13 @@ async function main() {
     input.dispatchEvent(new Event('input'));
   }`);
   assert.deepEqual(await commitModel(), { tier: 'fast', label: 'Fast timeout (seconds)', seconds: 15 });
+  await assertTimeoutInline();
   await editTimeout('24');
   await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTimeoutSeconds.fast === 24", 'Fast timeout saves');
   await selectCommitModel('smart');
   await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTier === 'smart'", 'Smart model choice is sent to desktop settings');
   assert.deepEqual(await commitModel(), { tier: 'smart', label: 'Smart timeout (seconds)', seconds: 60 });
+  await assertTimeoutInline();
   await editTimeout('82');
   await waitFor("JSON.parse(window.shell.chatSettings.get()).commitMessageTimeoutSeconds.smart === 82", 'Smart timeout saves');
   for (const value of ['', '0', '1.5', '14401']) {
@@ -172,6 +184,24 @@ async function main() {
     assert.equal(await evaluate("document.querySelector('#commit-message-timeout-error').hidden"), false);
     assert.deepEqual(savedChat.commitMessageTimeoutSeconds, { fast: 24, smart: 82 });
   }
+  await assertTimeoutInline();
+  const { timeout, error } = await commitModelRects();
+  assert.ok(error.height > 0 && error.top >= timeout.bottom, 'Validation feedback is visible below the timeout');
+
+  const [width, height] = win.getSize();
+  win.setSize(560, height);
+  await waitFor('innerWidth === 560', 'Settings resizes to its minimum width');
+  await evaluate("document.body.style.setProperty('--side-w', '340px')");
+  const narrow = await commitModelRects();
+  assert.ok(narrow.timeout.top >= narrow.model.bottom, 'Timeout wraps in a narrow column');
+  assert.ok(narrow.error.height > 0 && narrow.error.top >= narrow.timeout.bottom, 'Feedback stays below the wrapped timeout');
+  assert.ok(await evaluate(`(() => {
+    const card = document.querySelector('#git-models .card');
+    return card.scrollWidth === card.clientWidth;
+  })()`), 'Git source control card does not overflow horizontally');
+  await evaluate("document.body.style.removeProperty('--side-w')");
+  win.setSize(width, height);
+
   await evaluate("document.querySelector('#commit-message-timeout').dispatchEvent(new FocusEvent('blur'))");
   assert.deepEqual(await commitModel(), { tier: 'smart', label: 'Smart timeout (seconds)', seconds: 82 });
   assert.equal(await evaluate("document.querySelector('#commit-message-timeout-error').hidden"), true);
@@ -250,7 +280,7 @@ async function main() {
     await screenshot(process.env.SETTINGS_SCREENSHOT);
   }
   assert.deepEqual(errors, []);
-  console.log('Settings smoke passed: startup, speech polling, General preferences, persisted Git opt-out and model choice, Dashboard requirements, permission explanations, cookie gates, navigation, and permission changes.');
+  console.log('Settings smoke passed: startup, speech polling, General preferences, Git model and timeout layout and persistence, Dashboard requirements, permission explanations, cookie gates, navigation, and permission changes.');
 }
 
 main().then(() => finish(0), error => { console.error(error); return finish(1); });
