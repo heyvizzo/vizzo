@@ -2,10 +2,24 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PIPER_BASE, PIPER_CATALOG, piperVoices } from "./ttsVoices.ts";
+import { PIPER_BASE, PIPER_CATALOG, piperVoices, zonos3Voices } from "./ttsVoices.ts";
 
 let dir = "";
 afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+it("offers automatic voice selection and the installed ZONOS3-Mini presets", () => {
+  dir = mkdtempSync(join(tmpdir(), "zonos-voices-"));
+  expect(zonos3Voices(dir)).toEqual([]);
+  mkdirSync(join(dir, "voices"));
+  const files = { jett: "Jett_en-energetic_M_1.embedding.npz", arjun: "Arjun_hi_M_1.embedding.npz", rupert: "Rupert_en-British_M_1.embedding.npz" };
+  writeFileSync(join(dir, "voices.json"), JSON.stringify(files));
+  for (const f of [files.jett, files.arjun]) writeFileSync(join(dir, "voices", f), "");
+  expect(zonos3Voices(dir)).toEqual([
+    { id: "auto", label: "Automatic (by language)", lang: "", default: true },
+    { id: "jett", label: "Jett (English)", lang: "en" },
+    { id: "arjun", label: "Arjun (Hindi)", lang: "hi" },
+  ]);
+});
 
 function piperDir(voices: string[], speakers: Record<string, number> = {}): string {
   dir = mkdtempSync(join(tmpdir(), "piper-voices-"));

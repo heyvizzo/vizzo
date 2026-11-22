@@ -31,8 +31,8 @@ const engines = [
   { kind: 'tts', engine: 'macos', label: 'macOS voices', state: 'ready' },
 ];
 const installs = [
-  ...['apple', 'whisperkit', 'parakeet', 'moonshine'].map(engine => ({ kind: 'stt', engine })),
-  ...['macos', 'kokoro', 'piper'].map(engine => ({ kind: 'tts', engine })),
+  ...['apple', 'whisperkit', 'parakeet', 'moonshine', 'rumble-2-flash'].map(engine => ({ kind: 'stt', engine })),
+  ...['macos', 'kokoro', 'piper', 'zonos3-mini'].map(engine => ({ kind: 'tts', engine })),
 ].map(row => ({ ...row, installed: true, state: 'idle', builtin: ['apple', 'macos'].includes(row.engine) }));
 ipcMain.on('hotkeys:get', event => { event.returnValue = null; });
 ipcMain.on('chat-settings:get', event => {

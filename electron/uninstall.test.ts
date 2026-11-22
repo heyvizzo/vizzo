@@ -18,7 +18,9 @@ describe("uninstallPaths", () => {
     expect(uninstallPaths(base)).toEqual([
       `${H}/Sites/realtime-voice/.models`,
       `${H}/Sites/realtime-voice/.venv-tts`,
+      `${H}/Sites/realtime-voice/.venv-zonos3`,
       `${H}/Sites/realtime-voice/.venv-stt`,
+      `${H}/Sites/realtime-voice/.venv-rumble`,
       `${H}/Library/Application Support/vizzo`,
       `${H}/.config/vizzo`,
       "/var/folders/x/T/vizzo-agents",

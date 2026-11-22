@@ -78,8 +78,11 @@ async function serve(req, res) {
     res.end(JSON.stringify(data));
   };
   switch (pathname) {
-    case '/api/changes/status':
-      return respond(status ?? { kind: 'ready', project, generation: view.generation, changedFiles: view.changedFiles, ownedThreadIds: [thread.id] });
+    case '/api/changes/status': {
+      const files = view.components.filter(item => item.writers.includes(thread)).flatMap(item => item.files.map(file => file.path));
+      const threadFileCounts = files.length ? { [thread.id]: new Set(files).size } : {};
+      return respond(status ?? { kind: 'ready', project, generation: view.generation, changedFiles: view.changedFiles, ownedThreadIds: Object.keys(threadFileCounts), threadFileCounts });
+    }
     case '/api/changes':
       assert.equal(url.searchParams.get('project'), project);
       return respond(view);
@@ -343,6 +346,14 @@ async function main() {
   await key('#select-all', ' ', 'Space', 32);
   assert.equal(await evaluate('document.querySelectorAll("input[data-component]:checked").length'), 0, 'The checked bulk control clears every tick');
   assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), false);
+  const threadTick = '#groups > .card .group-head > input';
+  assert.equal(await evaluate(`document.querySelector(${JSON.stringify(threadTick)}).getAttribute("aria-label")`), 'Select all files in Fix the header');
+  await key(threadTick, ' ', 'Space', 32);
+  assert.deepEqual([...await checked('tied'), ...await checked('mixed')], [true, true, true], 'A thread checkbox selects every file in its card');
+  assert.deepEqual(await checked('job-own'), [false], 'A thread checkbox leaves other threads alone');
+  assert.equal(await evaluate('document.querySelector("#select-all").indeterminate'), true);
+  await key(threadTick, ' ', 'Space', 32);
+  assert.equal(await evaluate('document.querySelectorAll("input[data-component]:checked").length'), 0, 'The checked thread checkbox clears its files');
   nextDraft = { status: 'fallback', reason: 'provider-error', message: 'Commit selected changes' };
   await key('#select-all', ' ', 'Space', 32);
   await waitForDom('!document.querySelector("#commit").disabled && document.querySelector("#message-status").textContent.endsWith("Using a fallback message.")', 'An automatic fallback is labeled and can be committed');

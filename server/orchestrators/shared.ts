@@ -1,4 +1,5 @@
 // Helpers shared by the orchestrators: a lazily-opened per-turn Scribe stream.
+import { sttLanguageOpts } from "../../shared/config.ts";
 import type { SttStream } from "../adapters/types.ts";
 import type { OrchestratorDeps } from "./types.ts";
 import type { TurnBase } from "./turnBase.ts";
@@ -19,8 +20,7 @@ export class LazyScribe {
 
   open(): Promise<SttStream> {
     if (!this.p) {
-      const lang = this.base.ctx.config.language;
-      this.p = this.base.track(this.deps.openScribe({ mark: this.base.mark, model: this.base.ctx.config.sttModel, ...(lang && lang !== "auto" ? { language: lang } : {}) })).then((s) => {
+      this.p = this.base.track(this.deps.openScribe({ mark: this.base.mark, model: this.base.ctx.config.sttModel, ...sttLanguageOpts(this.base.ctx.config) })).then((s) => {
         this.stream = s;
         s.onPartial((t) => this.base.sttPartial(t));
         for (const b of this.buf.splice(0)) s.pushAudio(b);

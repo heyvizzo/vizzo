@@ -141,13 +141,19 @@ async function main() {
   for (const t of threads) send({ type: 'thread.removed', threadId: t.threadId });
   await until(async () => await listed() === 0, 'Clear removes confirmed threads');
 
-  // The sidebar × uses the server's automatic choice and also waits for the acknowledgment.
+  // The sidebar × asks first, offering the panel's choices, and also waits for the acknowledgment.
   send({ type: 'threads.snapshot', threads });
   await until(async () => await listed() === 4, 'threads restored for single delete');
   await evaluate('document.querySelector(".thread-del").click()');
-  await until(() => previews().length === 4, 'automatic mode requested');
+  await until(() => previews().length === 4, 'single delete preview requested');
   assert.deepEqual(previews()[3].threadIds, ['t1']);
   reply(previews()[3], states);
+  await until(confirmReady, 'single delete asks first');
+  assert.match(await confirmText(), /Delete “One”\?/);
+  assert.equal(await evaluate('[...document.querySelectorAll(".reset-confirm-actions button")].map(b => b.textContent).join("|")'),
+    'Cancel|Delete, keep uncommitted|Commit and delete');
+  assert.equal(mutations().length, 1, 'the × alone deletes nothing');
+  await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
   await until(() => mutations().length === 2, 'single delete sent');
   assert.equal(mutations()[1].mode, 'commit');
   assert.equal(await listed(), 4, 'single delete waits for durable removal');
@@ -159,7 +165,11 @@ async function main() {
   await until(() => previews().length === 5, 'another deletion preview requested');
   assert.deepEqual(previews()[4].threadIds, ['t2']);
   reply(previews()[4], states);
+  await until(confirmReady, 'a working thread asks before stopping');
+  assert.equal(await evaluate('[...document.querySelectorAll(".reset-confirm-actions button")].map(b => b.textContent).join("|")'), 'Cancel|Stop and delete');
+  await evaluate('document.querySelector(".reset-confirm-actions .danger").click()');
   await until(() => mutations().length === 3, 'another deletion sent');
+  assert.equal(mutations()[2].mode, 'keep');
   send({ type: 'thread.delete.done', requestId: mutations()[1].requestId });
   send({ type: 'thread', thread: { ...threads[2], title: 'Still here' } });
   await until(() => evaluate('document.querySelector(".thread-item[data-thread-id=t3] .thread-title").textContent === "Still here"'), 'stale acknowledgment processed');
@@ -234,6 +244,31 @@ async function main() {
   await until(() => resets() === 3, 'generic reset sent once');
   assert.deepEqual(mutations().at(-1).threads, choices.map(choice => ({ ...choice, mode: 'keep' })));
   assert.equal(previews().length, 8, 'disabled reset can never request a Git review');
+
+  // "Clear, keep uncommitted" sends the same reset with every thread kept, and only appears when something would commit.
+  send({ type: 'conversation.reset.done', requestId: mutations().at(-1).requestId });
+  setSourceControl(true);
+  send({ type: 'threads.snapshot', threads });
+  await until(async () => await listed() === 4 && await evaluate('!document.getElementById("reset").disabled'), 'threads restored for keep-all');
+  await addNote();
+  await clickReset();
+  await until(() => previews().length === 9, 'keep-all preview requested');
+  reply(previews()[8], states);
+  await until(confirmReady, 'keep-all preview confirmed');
+  assert.equal(await evaluate('[...document.querySelectorAll(".reset-confirm-actions button")].map(b => b.textContent).join("|")'),
+    'Cancel|Clear, keep uncommitted|Clear conversation');
+  await evaluate('document.querySelector(".reset-confirm-actions .keep-uncommitted").click()');
+  await until(() => resets() === 4, 'keep-all reset sent once');
+  assert.deepEqual(mutations().at(-1).threads, choices.map(choice => ({ ...choice, mode: 'keep' })), 'nothing is committed');
+  send({ type: 'conversation.reset.done', requestId: mutations().at(-1).requestId });
+  send({ type: 'threads.snapshot', threads });
+  await until(async () => await listed() === 4 && await evaluate('!document.getElementById("reset").disabled'), 'threads restored again');
+  await clickReset();
+  await until(() => previews().length === 10, 'nothing-to-commit preview requested');
+  reply(previews()[9], { ...states, t1: { state: 'complete', defaultMode: 'commit', willCommit: false } });
+  await until(confirmReady, 'nothing-to-commit preview confirmed');
+  assert.equal(await evaluate('!!document.querySelector(".reset-confirm-actions .keep-uncommitted")'), false, 'no keep-all button when nothing would commit');
+  await evaluate('document.querySelector(".reset-confirm-actions button").click()');
   assert.deepEqual(errors, []);
   console.log('Reset confirm smoke passed: batches count tied and working threads, refresh when work starts, preserve Keep choices and markers, and reset without a preceding cancellation.');
 }

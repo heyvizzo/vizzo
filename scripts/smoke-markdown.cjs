@@ -162,19 +162,33 @@ async function main() {
     writeFileSync(path.join(output, `${theme}.png`), (await win.webContents.capturePage()).toPNG());
   }
 
-  const finalId = await startTurn();
-  finishTurn(prefix + '## Final only\n\n**Complete** without deltas.');
-  await until(() => evaluate(`document.querySelector('.turn[data-turn="${finalId}"] h2')?.textContent === 'Final only'`), 'final-only answer renders');
-  const job = { jobId: 'markdown-job', turnId: finalId, approach: active.config.approach, intent: 'task', question: 'Background answer', estimateS: 60, state: 'running' };
+  const job = { jobId: 'markdown-job', turnId, approach: active.config.approach, intent: 'question', question: 'Background answer', estimateS: 60, state: 'running' };
   send({ type: 'job', job });
   await until(() => evaluate("!!document.querySelector('.job')"), 'background card appears');
   assert.equal(await evaluate("document.querySelector('.job details.detail').hidden"), true);
-  send({ type: 'job', job: { ...job, state: 'done', spoken: 'Fixed.', detail: prefix + markdown } });
+  const finalId = await startTurn();
+  finishTurn(prefix + '## Final only\n\n**Complete** without deltas.');
+  await until(() => evaluate(`document.querySelector('.turn[data-turn="${finalId}"] h2')?.textContent === 'Final only'`), 'final-only answer renders');
+  const completed = { ...job, state: 'done', spoken: 'Fixed.', detail: prefix + markdown };
+  send({ type: 'job', job: completed });
   await until(() => conversation?.find(e => e.id === 'job:markdown-job')?.detail === markdown, 'background answer preserves original Markdown');
-  await evaluate("document.querySelector('.job-marker').click(); document.querySelector('.job details.detail > summary').click()");
+  assert.deepEqual(conversation.map(e => e.id), [turnId, finalId, 'job:markdown-job'], 'the answer arrives after intervening turns');
+  assert.equal(await evaluate("document.querySelector('.job-result .job-spoken').innerText"), 'Fixed.');
+  assert.equal(await evaluate("document.querySelector('.job').hidden"), true, 'the short answer is visible with task details closed');
+  await evaluate("document.querySelector('.job-marker').click()");
+  assert.equal(await evaluate("document.querySelector('.job').hidden"), false);
   assert.equal(await evaluate("document.querySelector('.job .md h1')?.textContent"), 'Overview');
   assert.equal(await evaluate("document.querySelector('.job .md pre code')?.textContent"), code);
   assert.equal(await evaluate("document.querySelector('.job details.detail').open"), true);
+  send({ type: 'notice', jobId: job.jobId, state: 'start' });
+  send({ type: 'notice', jobId: job.jobId, state: 'end' });
+  const later = await startTurn();
+  finishTurn('');
+  send({ type: 'job', job: { ...completed, costUsd: 0.01 } });
+  await until(() => evaluate("document.querySelector('.job-marker .cost-text')?.textContent.includes('0.01')"), 'speech cost arrives');
+  await until(() => conversation?.at(-1)?.id === later, 'new turn is still last');
+  assert.equal(await evaluate("document.querySelectorAll('.job-result').length"), 1, 'cost update edits the existing result');
+  assert.equal(await evaluate("document.querySelector('.job details.detail').open"), true, 'cost update keeps details open');
   assert.deepEqual(errors, []);
   console.log('Markdown smoke passed: streaming, final-only answers, background jobs, original Markdown forwarding, safe text, themes and narrow-sidebar code overflow.');
 }

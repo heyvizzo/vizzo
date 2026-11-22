@@ -163,7 +163,6 @@ export class TurnBase {
       const extra = this.markMeta[name];
       ctx.mark(name, extra ? { ...meta, ...extra } : meta);
     };
-    this.resetTimeout();
   }
 
   /** Start a fresh watchdog for the next phase; solver requests have their own task time limit. */

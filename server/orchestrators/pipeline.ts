@@ -268,8 +268,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       }
       const canBackground = cfg.memory && cfg.backgroundLongTasks && !!ctx.channel;
       // Element threads: the element this turn is about and what the router is told about the threads.
-      // A turn with a focus stays there: the message box's in the conversation, an open panel's in its thread.
-      // Typed (no speech) stays on the click. Only spoken with no focus can move to an existing thread it names.
+      // Panel replies and clicked comments have a fixed element. Main chat has no pointer but can name a thread.
       const clicks = ctx.pageEvents?.().clicks;
       const chatTurn = typed !== undefined && !!ctx.chat;
       const typedTurn = typed !== undefined && !ctx.annotation && !chatTurn;
@@ -292,7 +291,8 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       let decided = false;
       const decide = (d: RouteDecision, final = false): void => {
         if (decided || base.isFinished) return;
-        if (tt && !final && d.target === undefined && d.tell === undefined) return; // wait for the target
+        // A silent clarification must not create a marker. Wait until we know there is a reply.
+        if (tt && !final && (d.intent === "clarify" || (d.target === undefined && d.tell === undefined))) return;
         decided = true;
         const { intent, estimateS } = d;
         const delegated = intent === "question" || intent === "task";
@@ -330,7 +330,6 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
       }));
       routerUsage = route.usage;
       if (base.isFinished) return;
-      decide(route.decision, true);
       // The router judged the transcript a description of silence: no reply, and nothing kept in the conversation.
       if (!route.delegate && !route.decision.tell && route.decision.intent === "clarify" && !base.voiceText.trim()) {
         base.markMeta["turn.end"] = { ...base.markMeta["turn.end"], skipped: "router-silent" };
@@ -338,6 +337,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         base.finish({ transcript: "" });
         return;
       }
+      decide(route.decision, true);
       const first = spoken as SegmentTts | null;
       first?.flush();
       if (firstTts) { firstTts.done().catch(() => {}); firstTts = null; } // pre-warmed but nothing was said
@@ -370,10 +370,8 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         }
       }
 
-      // From the message box, a tell reads the thread's result here: the turn stays in the conversation.
-      const told = plan?.relation === "tell" ? plan.threadId
-        : tt?.chat && route.decision.tell && store.info(route.decision.tell) ? route.decision.tell : null;
-      if (told) {
+      if (plan?.relation === "tell") {
+        const told = plan.threadId;
         // "Tell me about the red button": its latest result is this turn's answer (the router said nothing).
         const last = store.info(told)?.messages.findLast((m) => m.kind === "result");
         if (last) {
@@ -583,6 +581,7 @@ export function createPipelineOrchestrator(deps: OrchestratorDeps): Orchestrator
         if (!base.isFinished) scribe.push(pcm);
       },
       onRelease() {
+        base.resetTimeout();
         if (typed === undefined) scribe.commit();
         run().catch((e) => base.fail(e instanceof Tagged ? e.source : "orchestrator", e));
       },

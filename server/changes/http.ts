@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { readChangesPreferences } from "../../electron/settings.ts";
-import type { ChangesJobs, ChangesRestartHarness, ChangesSelectionRequest, ChangesStatus } from "../../shared/changes.ts";
+import { changedFileCount, groupComponents, type ChangesJobs, type ChangesRestartHarness, type ChangesSelectionRequest, type ChangesStatus } from "../../shared/changes.ts";
 import { beginTask } from "../activity.ts";
 import { restartSharedHarness } from "../adapters/harnesses.ts";
 import { changesService, type ChangesService } from "./changesService.ts";
@@ -31,11 +31,16 @@ export function changesStatus(service = changesService()): ChangesStatus {
     case "none": case "loading": return { kind: state.kind };
     case "non-repository": return { kind: state.kind, reason: state.reason };
     case "unavailable": return { kind: state.kind, reason: state.reason, ...(state.project && { project: state.project.id }) };
-    case "ready": return {
-      kind: state.kind, project: state.project.id, generation: state.view.generation, changedFiles: state.view.changedFiles,
-      ownedThreadIds: state.view.groups.filter(({ writer, own, tied }) => writer.kind === "thread" && (own.length || tied.length))
-        .map(({ writer }) => writer.id),
-    };
+    case "ready": {
+      const { view } = state;
+      const components = new Map(view.components.map(component => [component.id, component]));
+      const threads = view.groups.filter(({ writer, own, tied }) => writer.kind === "thread" && (own.length || tied.length));
+      const threadFileCounts = Object.fromEntries(threads.map(group => [group.writer.id, changedFileCount(groupComponents(group, components))]));
+      return {
+        kind: state.kind, project: state.project.id, generation: view.generation, changedFiles: view.changedFiles,
+        ownedThreadIds: threads.map(({ writer }) => writer.id), threadFileCounts,
+      };
+    }
   }
 }
 

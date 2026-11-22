@@ -145,9 +145,10 @@ export function mountSpeech(deps: SpeechDeps, containers: Record<SpeechKind, HTM
       // Two lines: Voice ID, Speed / Direction, Volume.
       return [param("Voice ID", voice, true), param("Speed", speed), param("Direction", direction, true), param("Volume", volume)];
     }
-    if (id === "openai_tts_1" || id === "kokoro" || id === "piper") {
+    if (id === "openai_tts_1" || id === "kokoro" || id === "piper" || id === "zonos3-mini") {
       const select = el("select");
-      select.title = "The voice for English. Other languages use the model's own voice for them, where it has one.";
+      select.title = id === "zonos3-mini" ? "Choose a preset for every language, or let Vizzo pick one for the spoken language."
+        : "The voice for English. Other languages use the model's own voice for them, where it has one.";
       select.onchange = () => {
         const opt = voices[id]?.find((v) => v.id === select.value);
         if (opt?.installed === false) {

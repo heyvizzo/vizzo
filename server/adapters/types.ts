@@ -30,6 +30,8 @@ export interface OpenScribeOpts {
   model?: SttModel;
   /** Pin the language (ISO 639-1, e.g. "en", "ro"); omitted = Scribe auto-detects. */
   language?: string;
+  /** No pin: detect only among these (two or more), where the engine can (WhisperKit, Rumble); the others ignore it. */
+  languages?: string[];
 }
 export type OpenScribe = (opts: OpenScribeOpts) => Promise<SttStream>;
 
@@ -98,7 +100,7 @@ export interface RouteTurnOpts {
   clicked?: boolean;
   /** Typed, with no speech: the marker stays on the click. */
   typed?: boolean;
-  /** Typed in the conversation's message box (no pointer): it stays central (a tell can still read a thread's result). */
+  /** Typed in the main message box, with no pointer. It can refer to a listed thread. */
   chat?: boolean;
   /** Spoken with this task's panel open: the turn stays on that thread. */
   panel?: string;

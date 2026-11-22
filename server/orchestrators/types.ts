@@ -49,7 +49,7 @@ export interface TurnContext {
   typedText?: string;
   /** The thread whose panel was open when the turn started: the turn goes to it, not where the router would send it. */
   pinnedThread?: string;
-  /** Typed in the conversation's message box (turn.start `chat`): the turn stays in the conversation. */
+  /** Typed in the main message box (turn.start `chat`), with no pointer. */
   chat?: boolean;
   /** Clicks and highlighted text the client reported for this turn (turn.context). */
   pageEvents?: () => PageEvents;
@@ -98,6 +98,6 @@ export interface OrchestratorDeps {
   generateFillers?: GenerateFillers;
   /** ElevenLabs voice id (default: process.env.ELEVENLABS_VOICE_ID). */
   voiceId?: string;
-  /** Speech/routing watchdog from turn.start, reset after solver work (default 60 s). */
+  /** Speech/routing watchdog from turn.release, reset after solver work (default 60 s). */
   turnTimeoutMs?: number;
 }

@@ -10,6 +10,7 @@ describe("speech selection", () => {
   });
   it("maps a local Speech model to its engine", () => {
     expect(sttEngineOf("local_whisperkit")).toBe("whisperkit");
+    expect(sttEngineOf("local_rumble-2-flash")).toBe("rumble-2-flash");
     expect(sttEngineOf("scribe_v2")).toBeNull();
   });
 });

@@ -68,6 +68,18 @@ export class ChangesReview {
     }
   }
 
+  /** Ticks or clears every listed component, as one card's header checkbox does. */
+  toggleMany(ids: readonly string[], checked: boolean): void {
+    for (const id of ids) this.toggle(id, checked);
+  }
+
+  selectManyState(ids: readonly string[]): { checked: boolean; indeterminate: boolean; available: boolean } {
+    const selectable = ids.filter(id => this.components.get(id)?.selectable);
+    const picked = selectable.filter(id => this.selected.has(id)).length;
+    const checked = selectable.length > 0 && picked === selectable.length;
+    return { checked, indeterminate: picked > 0 && !checked, available: selectable.length > 0 };
+  }
+
   get selectAllState(): { checked: boolean; indeterminate: boolean; available: boolean; includesOther: boolean } {
     let selectable = 0;
     let includesOther = false;

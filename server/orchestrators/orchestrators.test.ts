@@ -173,4 +173,26 @@ describe("pipeline orchestrator", () => {
     expect(h.events.find((e) => e.type === "error")).toMatchObject({ source: "timeout" });
     expect(allClosed(d.log)).toBe(true);
   });
+
+  it("allows a long recording and times out stalled transcription 60 seconds after release", async () => {
+    vi.useFakeTimers();
+    try {
+      const d = deps({ scribeHangs: true });
+      const h = harness({ approach: "pipeline" });
+      const turn = createPipelineOrchestrator(d)(h.ctx);
+      turn.onAudio(FRAME);
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(h.events.some((e) => e.type === "error")).toBe(false);
+
+      turn.onAudio(FRAME);
+      turn.onRelease();
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(h.events.some((e) => e.type === "error")).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await turn.done).error).toBe("timeout: turn exceeded 60000 ms");
+      expect(allClosed(d.log)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

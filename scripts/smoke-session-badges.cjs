@@ -155,6 +155,13 @@ async function main() {
   }
   await until(() => peer && pageReady && evaluate('!!document.querySelector("#conversation-session .session-badge")'), 'session reaches sidebar');
   assert.equal(await evaluate('getComputedStyle(document.querySelector("#conversation-session .session-info")).display'), 'none');
+  await until(() => text('.th-bubble.fixed.th-job-result').then(t => t.includes('Done.')), 'completion appears at the orb without waiting for speech');
+  await click('.th-bubble .th-job-open');
+  const result = '.th-panel [data-key="job:completed-job"]';
+  await until(() => node(result + ' details[open]'), 'the orb bubble opens its own task details');
+  assert.equal(await text(result + ' .th-job-question'), 'The earlier main-conversation task');
+  assert.equal(await text(result + ' .th-detail'), 'The earlier result.');
+  await click('.th-close');
   page.webContents.send('page:open-thread', thread.threadId);
   await until(() => node('.th-panel'), 'thread panel opens');
   assert.equal(await node('.th-panel .session-info'), null, 'debug off hides native session');

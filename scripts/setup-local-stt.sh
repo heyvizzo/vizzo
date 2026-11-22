@@ -2,7 +2,9 @@
 # Local STT models (offline): Parakeet TDT 0.6B v3 (MLX), Moonshine medium (English) and WhisperKit large-v3 turbo.
 # Creates .venv-stt (Python 3.12 via uv), installs whisperkit-cli (Homebrew), and downloads the models into
 # .models/{parakeet,moonshine,whisperkit}. Apple SpeechTranscriber needs nothing: macOS installs its model on first use.
-# Idempotent.   npm run setup:local-stt [parakeet] [moonshine] [whisperkit]   (no engine: all; Settings → Install runs it for one)
+# Rumble 2 Flash uses its own PyTorch environment. Install it explicitly with
+# npm run setup:local-stt -- rumble-2-flash, or from Settings.
+# Idempotent. With no arguments, installs Parakeet, Moonshine and WhisperKit.
 set -euo pipefail
 source "$(dirname "$0")/ensure-uv.sh"
 # SPEECH_DATA_DIR: where the env and .models/ go (the packaged app's Application Support folder); else the repo.
@@ -38,6 +40,29 @@ download_model_from_info(find_model_info('en'), cache_root=Path('.models/moonshi
 "
 fi
 
+if want rumble-2-flash; then
+  if [[ "$(uname -s)" == "Darwin" ]] && { [[ "$(uname -m)" != "arm64" ]] || (( $(sw_vers -productVersion | cut -d. -f1) < 14 )); }; then
+    echo "Rumble 2 Flash requires Apple silicon and macOS 14 or later." >&2
+    exit 1
+  fi
+  ensure_uv
+  echo "Setting up Python for Rumble 2 Flash"
+  [ -x .venv-rumble/bin/python ] || uv venv .venv-rumble --python 3.12
+  uv pip install --python .venv-rumble/bin/python --quiet numpy scipy 'torch>=2.9,<3' 'transformers>=5.23,<6'
+  echo "Downloading Rumble 2 Flash"
+  .venv-rumble/bin/python -I - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    "Reson8/Rumble-2-Flash",
+    revision="a0c34287229103b706c670d70791683e34379732",
+    local_dir=".models/rumble-2-flash",
+    allow_patterns=["*.json", "chat_template.jinja", "merges.txt", "model.safetensors"],
+    ignore_patterns=["ctc/*"],
+)
+PY
+fi
+
 if want whisperkit; then
   if ! command -v whisperkit-cli >/dev/null && [ ! -x /opt/homebrew/bin/whisperkit-cli ]; then
     command -v brew >/dev/null || { echo "Homebrew is required for WhisperKit (brew install whisperkit-cli)"; exit 1; }
@@ -55,4 +80,4 @@ if want whisperkit; then
     [ -d "$WK" ] || { echo "WhisperKit model download failed"; exit 1; }
   fi
 fi
-echo "local STT ready: $(du -sh .models/parakeet .models/moonshine .models/whisperkit 2>/dev/null | awk '{print $2": "$1}' | tr '\n' ' ')"
+echo "local STT ready: $(du -sh .models/parakeet .models/moonshine .models/whisperkit .models/rumble-2-flash 2>/dev/null | awk '{print $2": "$1}' | tr '\n' ' ')"

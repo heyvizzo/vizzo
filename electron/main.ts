@@ -313,7 +313,7 @@ function openChanges(threadId?: string) {
 }
 
 function pageChangesStatus(status: ChangesStatus): PageChangesStatus {
-  if (status.kind === "ready") return { kind: "ready", ownedThreadIds: status.ownedThreadIds };
+  if (status.kind === "ready") return { kind: "ready", threadFileCounts: status.threadFileCounts };
   if (status.kind === "unavailable") return { kind: "unavailable", reason: status.reason };
   return null;
 }
@@ -490,10 +490,7 @@ let lastSwipeNav = 0;
  * swipe, from wheel events on the page) or "gesture" (a macOS swipe event: three-finger swipes, and mice whose
  * software sends back/forward as one, like Logi Options+'s Back/Forward).
  */
-// DEBUG-HISTORY (temporary)
-const historyDebug = (line: string) => { try { require("node:fs").appendFileSync('/private/tmp/claude-501/-Users-j-Sites-vizzo/aa977892-3ab7-43ed-a726-2940189693f5/scratchpad/history-debug.log', `${new Date().toISOString()} ${line}\n`); } catch {} };
 function goHistory(dir: unknown, via: unknown) {
-  historyDebug(`goHistory ${String(dir)} via ${String(via)}`);
   const wc = currentPage();
   if (!wc || (dir !== "back" && dir !== "forward")) return;
   if (via === "swipe") {
@@ -685,12 +682,11 @@ function createWindow() {
   });
   // macOS swipe events come to the window: three-finger swipes (System Settings → Trackpad → Swipe between pages:
   // three fingers), and mouse buttons that Logi Options+ maps to Back/Forward (it sends them as swipes). Two-finger
-  // swipes come to the page as wheel events instead (historyNav.ts). Checked with an MX Master 3 on Logi Options+:
-  // its Back button arrives as "right", Forward as "left".
+  // swipes come to the page as wheel events instead (historyNav.ts). Electron's "left" is deltaX +1, which is back
+  // (WebKit's swipeWithEvent); logged with an MX Master 3 on Logi Options+: Back arrives as "left", Forward as "right".
   win.on("swipe", (_e, direction) => {
-    historyDebug(`window swipe ${direction}`);
-    if (direction === "right") goHistory("back", "gesture");
-    else if (direction === "left") goHistory("forward", "gesture");
+    if (direction === "left") goHistory("back", "gesture");
+    else if (direction === "right") goHistory("forward", "gesture");
   });
 
   const appPrefs = { preload: join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true };
@@ -1186,7 +1182,6 @@ function registerIpc() {
   ipcMain.handle("page:history-state", (e) =>
     (fromPage(e) && browser ? { ...historyState(browser.webContents), swipedAgo: Date.now() - lastSwipeNav } : null));
   ipcMain.on("page:history", (e, dir: unknown, via: unknown) => { if (fromPage(e)) goHistory(dir, via); });
-  ipcMain.on("history:debug", (_e, line: unknown) => historyDebug(`page ${String(line)}`)); // DEBUG-HISTORY
   ipcMain.on("page:navigate", (e, url: unknown) => {
     if (fromSidebar(e) && typeof url === "string" && /^(https?|file):/i.test(url)) currentPage()?.loadURL(url);
   });

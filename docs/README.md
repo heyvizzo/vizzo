@@ -20,7 +20,9 @@ npm run dev                 # the Electron app (browser pane + voice sidebar). C
                             # (Settings can scan the harnesses before that), and add the API keys in Settings → API keys (there is no .env file).
 npm run dev:fake            # same, but every vendor is faked (tones + canned text): try the UI with no keys
 npm run setup:local-tts     # optional: Kokoro + Piper voices (macOS TTS needs nothing)
+npm run setup:local-tts -- zonos3-mini  # optional: ZONOS3-Mini and its 27 voices (Apple silicon, macOS 14+)
 npm run setup:local-stt     # optional: Parakeet, Moonshine, WhisperKit for Speech → On-device (Apple needs nothing)
+npm run setup:local-stt -- rumble-2-flash  # optional: Rumble 2 Flash (on-device batch STT, 40+ languages)
 ```
 
 The chat is the sidebar: each turn is classified question / task / clarify / answer with a time estimate. Short tasks get spoken progress lines while the solver works; long ones run as background jobs that are announced when done. Hold Control or the button to talk, or turn on Always listen. Press Control while it talks to interrupt, Esc to stop. Ctrl+M turns on comment mode. Both keys can be changed in Settings → Keyboard. Point at the page in the browser pane. History is kept per connection; "New conversation" resets it. Chat turns are saved to `results/chat-*.jsonl`.

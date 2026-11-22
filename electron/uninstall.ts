@@ -45,7 +45,9 @@ export function uninstallPaths(env: UninstallEnv): string[] {
     env.packaged ? bundlePath(env.exe) : null,
     join(speechRoot, ".models"),
     join(speechRoot, ".venv-tts"),
+    join(speechRoot, ".venv-zonos3"),
     join(speechRoot, ".venv-stt"),
+    join(speechRoot, ".venv-rumble"),
     env.userData,
     // Run from the repo's: the packaged app keeps its selections in userData (electron/main.ts), so these stay
     // with `npm run dev`, which may be installed next to it.

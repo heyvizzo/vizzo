@@ -3,22 +3,23 @@
 //   macos  — AVSpeechSynthesizer (tools/mactts/main.swift, compiled once)
 //   kokoro — Kokoro-82M ONNX      (tools/localtts/server.py --engine kokoro)
 //   piper  — Piper, en_US lessac + ro_RO mihai (tools/localtts/server.py --engine piper)
-// The server starts only the selected engine (server/speechEngines.ts), so the first sentence doesn't pay a model
-// load, and kills it when another is picked; Kokoro/Piper need `npm run setup:local-tts` once. Text goes a sentence at a time (Kokoro also
-// splits long sentences at clauses: it synthesizes a whole piece before returning any audio); the voice
-// follows the turn's language, resolved per piece.
+//   zonos3-mini — ZONOS3-Mini on Apple silicon (MLX, tools/localtts/server.py --engine zonos3-mini)
+// The server starts the selected engine ahead of a turn and stops it when another is picked.
+// Each sentence uses the turn's current language. Kokoro also splits long sentences at clauses.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { OpenTts, TtsStream } from "./types.ts";
 import { splitClauses, takeSentences } from "./sentences.ts";
 import { APP_ROOT, SPEECH_ROOT } from "../paths.ts";
 import { EngineHost } from "./engineHost.ts";
+import { LOCAL_TTS_MODELS } from "../../shared/config.ts";
 
-export type LocalEngine = "macos" | "kokoro" | "piper";
-export const LOCAL_ENGINES: readonly LocalEngine[] = ["macos", "kokoro", "piper"];
+export const LOCAL_ENGINES = LOCAL_TTS_MODELS;
+export type LocalEngine = (typeof LOCAL_ENGINES)[number];
+type PythonEngine = Exclude<LocalEngine, "macos">;
 
 const ROOT = APP_ROOT;
-const VENV_PY = `${SPEECH_ROOT}.venv-tts/bin/python`;
+export const TTS_VENVS = { kokoro: ".venv-tts", piper: ".venv-tts", "zonos3-mini": ".venv-zonos3" } as const;
 const MODELS = `${SPEECH_ROOT}.models`;
 const SCRIPT = `${ROOT}tools/localtts/server.py`;
 
@@ -32,16 +33,21 @@ interface EngineSpec {
 }
 
 /** The model files each Python engine needs (under .models/; server/speechInstall.ts checks them too). */
-export const LOCAL_TTS_FILES: Record<"kokoro" | "piper", string[]> = {
+export const LOCAL_TTS_FILES: Record<PythonEngine, string[]> = {
   kokoro: ["kokoro/kokoro-v1.0.onnx", "kokoro/voices-v1.0.bin"],
   piper: ["piper/en_US-lessac-medium.onnx", "piper/ro_RO-mihai-medium.onnx"],
+  "zonos3-mini": [
+    "config.json", "model.safetensors", "tokenizer.json", "codec/config.json", "codec/model.safetensors",
+    "voices.json", "voices/Jett_en-energetic_M_1.embedding.npz",
+  ].map((f) => `zonos3-mini/${f}`),
 };
 
-function pythonEngine(engine: "kokoro" | "piper"): EngineSpec["launch"] {
+function pythonEngine(engine: PythonEngine): EngineSpec["launch"] {
   return async () => {
-    const missing = [VENV_PY, ...LOCAL_TTS_FILES[engine].map((f) => `${MODELS}/${f}`)].filter((f) => !existsSync(f));
+    const python = `${SPEECH_ROOT}${TTS_VENVS[engine]}/bin/python`;
+    const missing = [python, ...LOCAL_TTS_FILES[engine].map((f) => `${MODELS}/${f}`)].filter((f) => !existsSync(f));
     if (missing.length) throw new Error(`not installed (Settings → Text to speech → Install): missing ${missing.map((m) => m.replace(SPEECH_ROOT, "")).join(", ")}`);
-    return { cmd: VENV_PY, args: ["-I", SCRIPT, "--engine", engine, "--models", MODELS] };
+    return { cmd: python, args: ["-I", SCRIPT, "--engine", engine, "--models", MODELS] };
   };
 }
 
@@ -61,6 +67,10 @@ const ENGINES: Record<LocalEngine, EngineSpec> = {
   piper: {
     label: "Piper (local)",
     launch: pythonEngine("piper"),
+  },
+  "zonos3-mini": {
+    label: "ZONOS3-Mini (local)",
+    launch: pythonEngine("zonos3-mini"),
   },
 };
 
@@ -159,7 +169,11 @@ export function openLocalTts(engine: LocalEngine): OpenTts {
     // Streams are opened when the user presses talk: start loading a non-default voice right away.
     if (voice) h.load(voice);
     // Resolved per piece: a stream opened before the transcript exists learns the language later.
-    const lang = () => ((typeof language === "function" ? language() : language) === "ro" ? "ro" : "en");
+    const lang = () => {
+      const code = typeof language === "function" ? language() : language;
+      if (engine === "zonos3-mini") return code || "en";
+      return code === "ro" ? "ro" : "en";
+    };
     const clauses = ENGINES[engine].clauses;
     const audioCbs: ((b: Buffer) => void)[] = [];
     const early: Buffer[] = [];

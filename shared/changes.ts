@@ -44,6 +44,14 @@ export interface ChangesView {
   readonly changedFiles: number;
 }
 
+export function groupComponents(group: ChangeGroup, components: ReadonlyMap<string, ChangeComponent>): ChangeComponent[] {
+  return [...group.own, ...group.tied].flatMap(id => components.get(id) ?? []);
+}
+
+export function changedFileCount(components: readonly ChangeComponent[]): number {
+  return new Set(components.flatMap(component => component.files.map(file => file.path))).size;
+}
+
 /** Bootstrap the Changes window before it has a project and a scan generation. */
 export type ChangesStatus =
   | { readonly kind: "none" | "loading" }
@@ -55,6 +63,7 @@ export type ChangesStatus =
     readonly generation: number;
     readonly changedFiles: number;
     readonly ownedThreadIds: readonly string[];
+    readonly threadFileCounts: Readonly<Record<string, number>>;
   };
 
 export interface ChangesSelectionRequest {

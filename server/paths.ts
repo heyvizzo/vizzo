@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 export const APP_ROOT = process.env.APP_ROOT ?? fileURLToPath(new URL("../", import.meta.url));
 export const SERVER_DIR = `${APP_ROOT}server/`;
 /**
- * Where the on-device speech engines' downloads live: .models/, .venv-tts and .venv-stt (server/speechInstall.ts).
+ * Where the on-device speech engines keep .models/ and their Python environments (server/speechInstall.ts).
  * The repo root for `npm run dev`; the packaged app sets SPEECH_DATA_DIR to a folder in Application Support, since
  * the app bundle is read-only and replaced by every update.
  */

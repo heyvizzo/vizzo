@@ -1,19 +1,20 @@
-"""Persistent local text-to-speech helper for the voice lab: Kokoro-82M (ONNX) or Piper.
+"""Persistent local text-to-speech helper for Kokoro-82M, Piper and ZONOS3-Mini.
 
 Started by server/adapters/localTts.ts (`npm run dev`), one process per engine, models loaded once.
 Same framed protocol as tools/mactts:
-  stdin, one JSON per line:  {"id":"1","text":"Hello.","lang":"en","voice":"en_US-ryan-high"}   (lang: en | ro; voice optional)
+  stdin, one JSON per line:  {"id":"1","text":"Hello.","lang":"en","voice":"en_US-ryan-high"}   (voice optional)
                              {"cmd":"load","voice":"en_US-ryan-high"}   load + warm a voice ahead of use (Piper)
   stdout:                    {"id":"1","pcm":N}\\n + N bytes of PCM16 mono 24 kHz little-endian
                              {"id":"1","done":true,"voice":"…","ms":123}\\n
                              {"id":"1","error":"…"}\\n
                              {"ready":true,"engine":"…","voices":{…}}\\n   once, after the warm-up
-Usage: .venv-tts/bin/python -I tools/localtts/server.py --engine kokoro|piper --models .models
+Usage: <engine venv>/bin/python -I tools/localtts/server.py --engine kokoro|piper|zonos3-mini --models .models
 """
 import argparse
 import asyncio
 import json
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -166,15 +167,49 @@ class PiperEngine:
         return name
 
 
+class Zonos3Engine:
+    # Presets from the pinned checkpoint. Romanian has no preset of its own; Ginevra
+    # reads Romanian reliably. Other languages without a preset use unconditioned speech.
+    VOICES = {
+        "en": "jett", "ro": "ginevra", "it": "ginevra", "fr": "gaspard", "de": "liesel",
+        "es": "ximena", "pt": "leonor", "zh": "meilin", "ko": "seoyeon", "hi": "ananya", "te": "sravya",
+    }
+
+    def __init__(self, models):
+        from mlx_audio.tts import load
+
+        self.model = load(Path(models) / "zonos3-mini")
+
+    def load(self, voice):
+        pass  # each preset is a small speaker embedding read directly by generate()
+
+    async def speak(self, rid, text, lang, silent=False, voice_name=None):
+        import soxr
+
+        voice = voice_name if voice_name in self.model.voices else self.VOICES.get(lang, "none")
+        # Keep the filter state across codec chunks, flushing its tail on the final chunk.
+        resampler = soxr.ResampleStream(self.model.sample_rate, RATE, 1, dtype="float32")
+        for chunk in self.model.generate(text, voice=voice, lang_code=lang, stream=True,
+                                         max_tokens=32 if silent else None):
+            if silent:
+                continue
+            samples = resampler.resample_chunk(np.asarray(chunk.audio, dtype=np.float32), last=chunk.is_final_chunk)
+            pcm = to_pcm16(samples)
+            if pcm:
+                emit({"id": rid, "pcm": len(pcm)}, pcm)
+        return voice
+
+
 async def main():
+    engines = {"kokoro": KokoroEngine, "piper": PiperEngine, "zonos3-mini": Zonos3Engine}
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", choices=["kokoro", "piper"], required=True)
+    ap.add_argument("--engine", choices=engines, required=True)
     ap.add_argument("--models", required=True)
     args = ap.parse_args()
-    engine = KokoroEngine(args.models) if args.engine == "kokoro" else PiperEngine(args.models)
-    # Warm-up: the first synthesis per language is the slow one.
-    for lang, text in (("en", "Ready."), ("ro", "Gata.")):
-        await engine.speak("_warm", text, lang, silent=True)
+    engine = engines[args.engine](args.models)
+    await engine.speak("_warm", "Ready.", "en", silent=True)
+    if args.engine != "zonos3-mini":  # Kokoro and Piper use a different voice for Romanian.
+        await engine.speak("_warm", "Gata.", "ro", silent=True)
     emit({"ready": True, "engine": args.engine})
 
     loop = asyncio.get_running_loop()

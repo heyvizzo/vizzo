@@ -9,7 +9,8 @@ import { openTts as openElevenTts } from "../server/adapters/elevenTts.ts";
 import { openLocalTts, setLocalTtsLogger, startLocalTts, stopLocalTts } from "../server/adapters/localTts.ts";
 import { openOpenAiTts } from "../server/adapters/openaiTts.ts";
 import { openFishTts } from "../server/adapters/fishTts.ts";
-import { isLocalTts, type TtsModel } from "../shared/config.ts";
+import { isLocalTts, LOCAL_TTS_MODELS, type TtsModel } from "../shared/config.ts";
+import { speechInstaller } from "../server/speechInstall.ts";
 
 loadDesktopEnv(); // the API keys saved in Settings (a shell variable wins)
 
@@ -17,8 +18,10 @@ const arg = (k: string, d: number) => { const i = process.argv.indexOf(`--${k}`)
 const N = arg("n", 5), E2E = arg("e2e", 3);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const voiceId = process.env.ELEVENLABS_VOICE_ID ?? "";
-const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5", "openai_tts_1", "fish_drama_3", "macos", "kokoro", "piper"];
-const E2E_MODELS: TtsModel[] = ["eleven_v4_turbo", "macos", "kokoro", "piper"];
+const installs = speechInstaller().states();
+const localModels = LOCAL_TTS_MODELS.filter((m) => installs.some((s) => s.kind === "tts" && s.engine === m && s.installed));
+const MODELS: TtsModel[] = ["eleven_v4_turbo", "eleven_flash_v2_5", "openai_tts_1", "fish_drama_3", ...localModels];
+const E2E_MODELS: TtsModel[] = ["eleven_v4_turbo", ...localModels];
 const TEXTS = { en: "Let me check the features section styles. One moment.", ro: "Mă uit la stilurile secțiunii. Un moment." };
 setLocalTtsLogger(() => {});
 
@@ -105,7 +108,7 @@ const row = (label: string, xs: (number | null)[]) => { const v = xs.filter((x):
 
 async function main(): Promise<void> {
   const started = new Date().toISOString();
-  await Promise.all((["macos", "kokoro", "piper"] as const).map((e) => startLocalTts(e)));
+  await Promise.all(localModels.map((e) => startLocalTts(e)));
   for (const model of MODELS) {
     if (model.startsWith("eleven_") && !voiceId) { console.log(`SKIP ${model}: ELEVENLABS_VOICE_ID not set`); continue; }
     if (model === "openai_tts_1" && !process.env.OPENAI_API_KEY) { console.log(`SKIP ${model}: OPENAI_API_KEY not set`); continue; }
@@ -145,6 +148,7 @@ async function main(): Promise<void> {
     "- **openai_tts_1**: OpenAI `tts-1` over HTTP (`/v1/audio/speech`, `response_format: pcm`, voice `coral`), one request per sentence, the next requested while the current one streams.",
     "- **kokoro**: Kokoro-82M ONNX on CPU (`tools/localtts`, voice af_heart; Romanian via espeak phonemes + the Italian voice if_sara), long sentences split at clauses.",
     "- **piper**: Piper (`tools/localtts`, en_US-lessac-medium / ro_RO-mihai-medium, 22.05 kHz resampled to 24 kHz).",
+    ...(localModels.includes("zonos3-mini") ? ["- **zonos3-mini** uses MLX on Apple silicon with Jett for English and Ginevra for Romanian. It streams at 44.1 kHz, resampled to 24 kHz."] : []),
     "- **macos**: `tools/mactts` (AVSpeechSynthesizer, persistent helper, voices warmed): text goes a sentence at a time. Voices: best en-US voice installed, Ioana for Romanian.",
     "",
     "### TTS alone (ms from the first text pushed)",

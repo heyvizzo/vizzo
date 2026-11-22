@@ -1,5 +1,5 @@
 // cursor-only approach (TASKS T9): STT (the configured Speech model) + pointing resolution, no LLM, no TTS.
-import { SAMPLE_RATE, turnLanguages } from "../../shared/config.ts";
+import { SAMPLE_RATE, sttLanguageOpts, turnLanguages } from "../../shared/config.ts";
 import { computeRests, normalizeLanguage, pointingMatcher, resolvePointing } from "../../shared/pointing.ts";
 import type { PointingTarget } from "../../shared/protocol.ts";
 import { openStt } from "./deps.ts";
@@ -24,8 +24,7 @@ export function createCursorOnlyOrchestrator(open: OpenScribe = openStt): Orches
     const run = async (): Promise<TurnResult> => {
       let s: SttStream;
       try {
-        const lang = config.language;
-        s = await Promise.race([open({ mark: ctx.mark, model: config.sttModel, ...(lang && lang !== "auto" ? { language: lang } : {}) }), cancelledP]);
+        s = await Promise.race([open({ mark: ctx.mark, model: config.sttModel, ...sttLanguageOpts(config) }), cancelledP]);
       } catch (e) {
         if (!cancelled) ctx.send({ type: "error", turnId, source: "scribe", message: String(e) });
         throw e;

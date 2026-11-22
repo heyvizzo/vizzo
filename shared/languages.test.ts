@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_POINTING_WORDS, LANGUAGES, LANGUAGE_CODES, languageCode, languageLabel, languageName, parsePointingWords, pointingWordsFor } from "./languages.ts";
-import { STT_LANGUAGE_SUPPORT, sttLanguageOptions, sttLanguagesFor, turnLanguages, type SttModel } from "./config.ts";
+import { STT_LANGUAGE_SUPPORT, sttLanguageOpts, sttLanguageOptions, sttLanguagesFor, turnLanguages, type SttModel } from "./config.ts";
 import { isPointingWord, pointingLanguage, pointingMatcher } from "./pointing.ts";
 
 describe("the language catalog", () => {
@@ -101,9 +101,23 @@ describe("a speech model's languages", () => {
   it("a model that reports the language: Auto, or one language", () => {
     expect(sttLanguagesFor("local_whisperkit", undefined)).toEqual([]);
     expect(sttLanguagesFor("local_whisperkit", [])).toEqual([]);
-    expect(sttLanguagesFor("local_whisperkit", ["de", "fr"])).toEqual(["de"]);
+    expect(sttLanguagesFor("openrouter_whisper_large_v3", ["de", "fr"])).toEqual(["de"]);
     expect(sttLanguagesFor("openrouter_whisper_large_v3", undefined, "ro")).toEqual(["ro"]);
     expect(sttLanguagesFor("openrouter_whisper_large_v3", undefined, "auto")).toEqual([]);
+  });
+
+  it("one that can limit its detection: also Auto among the languages you speak", () => {
+    expect(sttLanguagesFor("local_whisperkit", ["de", "fr", "de"])).toEqual(["de", "fr"]);
+    expect(sttLanguagesFor("local_rumble-2-flash", ["ro", "en"])).toEqual(["ro", "en"]);
+    expect(sttLanguagesFor("local_rumble-2-flash", ["ro", "bg"])).toEqual(["ro"]); // no Bulgarian in Rumble
+    expect((Object.keys(STT_LANGUAGE_SUPPORT) as SttModel[]).filter((m) => STT_LANGUAGE_SUPPORT[m].limit)).toEqual(["local_whisperkit", "local_rumble-2-flash"]);
+  });
+
+  it("what a turn tells the speech engine: a pin, or two or more languages to detect among", () => {
+    expect(sttLanguageOpts({ language: "ro", languages: ["ro"] })).toEqual({ language: "ro" });
+    expect(sttLanguageOpts({ language: "auto", languages: ["ro", "en"] })).toEqual({ languages: ["ro", "en"] });
+    expect(sttLanguageOpts({ language: "auto", languages: [] })).toEqual({});
+    expect(sttLanguageOpts({ language: "auto" })).toEqual({});
   });
 
   it("a model that doesn't: the languages you speak, at least one", () => {

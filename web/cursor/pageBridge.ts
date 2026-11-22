@@ -3,7 +3,7 @@
 // Each process has its own performance clock: times cross the bridge as epoch ms (performance.timeOrigin + t)
 // and each side converts to and from its own clock.
 import { isDrawingAnnotation, type DrawingAnnotation } from "../../shared/annotations.ts";
-import type { CursorRest, CursorSample, ElementDetails, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
+import type { CursorRest, CursorSample, ElementDetails, JobInfo, PageEvents, PointingTarget, Word } from "../../shared/protocol.ts";
 import type { ThreadAnchor, ThreadDeleteMode, ThreadDeletePreview, ThreadInfo, ThreadSay } from "../../shared/threads.ts";
 import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
 
@@ -29,7 +29,7 @@ export type PageCmd =
    * A thread's spoken line: show a bubble from its marker. `ended`: its audio finished (the fade may start).
    * `confirm`: a question with Yes / No instead (stop the task?); unanswered after `ms`, it's a No and goes.
    */
-  | { type: "bubble"; say: ThreadSay; ended: boolean; confirm?: BubbleConfirm }
+  | { type: "bubble"; say: PageSay; ended: boolean; confirm?: BubbleConfirm }
   /** The conversation orb (the page as a whole): its state, and where it was dragged to (null: the default spot). */
   | { type: "orb"; state: OrbState; pos: OrbPos | null }
   /** The conversation as the sidebar shows it, for the orb's panel. */
@@ -53,6 +53,9 @@ export type PageCmd =
 
 export interface BubbleConfirm { confirmId: string; ms: number }
 
+/** A background result's sayId is also its entry in the orb's conversation panel. */
+export type PageSay = ThreadSay & { jobLabel?: string };
+
 export type PageThreadDeletePreview = { type: "thread.delete.preview"; requestId: string; threadId: string }
   & ({ preview: ThreadDeletePreview } | { error: string });
 
@@ -66,7 +69,7 @@ export interface OrbPos { x: number; y: number }
 export interface ConvoEntry {
   /** Saved task context, independent of the conversation's currently selected session. */
   session?: HarnessSessionInfo;
-  resumeContext?: string;
+  backgroundJob?: Pick<JobInfo, "question" | "state">;
   id: string;
   /** What the user said (null: not a turn). */
   user: string | null;
@@ -149,9 +152,9 @@ export function isPageCommentAction(m: unknown): m is PageCommentAction {
 /** Page → chat: one document's events for the current turn (epoch ms). `final`: the reply to a stop. */
 export interface PageEventsMsg { doc: string; events: PageEvents; final: boolean }
 
-/** Electron main → isolated page preload: only the availability and thread ownership needed by the panel. */
+/** Electron main → isolated page preload: availability and changed-file counts for the thread panel. */
 export type PageChangesStatus =
-  | { kind: "ready"; ownedThreadIds: readonly string[] }
+  | { kind: "ready"; threadFileCounts: Readonly<Record<string, number>> }
   | { kind: "unavailable"; reason: string }
   | null;
 
@@ -165,7 +168,7 @@ export type PageThreadAction =
   | { type: "thread.commit"; threadId: string }
   /** Stop its active turn and solver, keeping the thread and its draft. Handled by the chat. */
   | { type: "thread.stop"; threadId: string }
-  /** The panel's "Always use the smart model" checkbox. */
+  /** Change smart-model routing for future messages in this thread. */
   | { type: "thread.smart"; threadId: string; on: boolean };
 
 export function isPageThreadAction(m: unknown): m is PageThreadAction {

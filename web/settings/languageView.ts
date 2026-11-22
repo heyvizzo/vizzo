@@ -24,12 +24,16 @@ export interface LanguagePicker {
   fill(): void;
 }
 
+/** The language select's value for "Languages I speak": auto-detect among them. */
+const AMONG = "*";
+
 /**
- * A model's language control. A model that says which language it heard: Auto or one language. One that doesn't:
- * the languages you speak, one or more (chips, and a list to add from). One that needs to be told: one language.
+ * A model's language control. A model that says which language it heard: Auto or one language, and (one that can
+ * limit its detection) Auto among the languages you speak. One that doesn't: the languages you speak, one or more
+ * (chips, and a list to add from). One that needs to be told: one language.
  */
 export function languagePicker(model: SttModel, settings: Settings, changed: () => void): LanguagePicker {
-  const { mode } = STT_LANGUAGE_SUPPORT[model];
+  const { mode, limit } = STT_LANGUAGE_SUPPORT[model];
   const offered = sttLanguageOptions(model);
   const current = (): string[] => sttLanguages(settings, model);
   const set = (languages: string[]): void => {
@@ -39,33 +43,20 @@ export function languagePicker(model: SttModel, settings: Settings, changed: () 
   const wrap = el("div", "param wide lang-param");
   wrap.append(el("span", "param-label", mode === "multi" ? "Languages you speak" : "Language"));
 
-  if (mode !== "multi") {
-    const select = el("select");
-    select.setAttribute("aria-label", "Language");
-    if (mode === "auto") select.append(option("", "Auto-detect"));
-    select.append(...offered.map((c) => option(c, languageLabel(c))));
-    select.disabled = mode === "single" && offered.length < 2;
-    select.title = mode === "auto"
-      ? "Auto-detect: the model says which language it heard, and that language's pointing words are used."
-      : "This model has to be told the language.";
-    select.onchange = () => set(select.value ? [select.value] : []);
-    wrap.append(select);
-    return { el: wrap, fill: () => { if (document.activeElement !== select) select.value = current()[0] ?? ""; } };
-  }
-
+  // The languages you speak: chips to remove (keeping `keep`), and a list to add from.
   const chips = el("div", "lang-chips");
   const add = el("select");
   add.setAttribute("aria-label", "Add a language");
-  add.title = "This model doesn't say which language it heard, so choose the ones you speak: their pointing words are used together.";
+  add.title = mode === "multi"
+    ? "This model doesn't say which language it heard, so choose the ones you speak: their pointing words are used together."
+    : "The model detects which of these you spoke.";
   add.onchange = () => { if (add.value) set([...current(), add.value]); };
-  wrap.append(chips, add);
-  const fill = (): void => {
-    const chosen = current();
+  const fillChips = (chosen: string[], keep: number): void => {
     chips.replaceChildren(...chosen.map((c) => {
       const chip = el("button", "lang-chip", languageName(c));
       chip.type = "button";
-      chip.disabled = chosen.length < 2;
-      chip.title = chip.disabled ? "Add another language before removing this one" : `Remove ${languageName(c)}`;
+      chip.disabled = chosen.length <= keep;
+      chip.title = chip.disabled ? `Add another language before removing this one` : `Remove ${languageName(c)}`;
       chip.setAttribute("aria-label", chip.disabled ? languageName(c) : `Remove ${languageName(c)}`);
       if (!chip.disabled) chip.append(el("span", "lang-chip-x", "×"));
       chip.onclick = () => set(current().filter((x) => x !== c));
@@ -75,6 +66,44 @@ export function languagePicker(model: SttModel, settings: Settings, changed: () 
     add.replaceChildren(option("", "Add a language…"), ...rest.map((c) => option(c, languageLabel(c))));
     add.value = "";
     add.hidden = rest.length === 0;
+  };
+
+  if (mode === "multi") {
+    wrap.append(chips, add);
+    return { el: wrap, fill: () => fillChips(current(), 1) };
+  }
+
+  const select = el("select");
+  select.setAttribute("aria-label", "Language");
+  if (mode === "auto") select.append(option("", "Auto-detect"));
+  if (limit) select.append(option(AMONG, "Languages I speak"));
+  select.append(...offered.map((c) => option(c, languageLabel(c))));
+  select.disabled = mode === "single" && offered.length < 2;
+  const rumble = model === "local_rumble-2-flash" ? "Auto-detect the spoken language or choose one to guide transcription." : undefined;
+  const titles: Record<string, string> = {
+    "": rumble ?? "Auto-detect: the model says which language it heard, and that language's pointing words are used.",
+    [AMONG]: "Auto-detect, but only among the languages you speak, so a short clip isn't heard as another language.",
+  };
+  const pinTitle = rumble ?? (mode === "auto" ? "Transcribe in this language only." : "This model has to be told the language.");
+  // Chose "from languages I speak" with only one at hand: stays until a second one is added (or another choice).
+  let among = false;
+  select.onchange = () => {
+    among = select.value === AMONG;
+    if (!among) return set(select.value ? [select.value] : []);
+    const others = Object.values(settings.sttLanguages).flat();
+    const seed = [...new Set([...current(), ...others, "en"])].filter((c) => offered.includes(c)).slice(0, 2);
+    set(seed);
+  };
+  wrap.append(select);
+  if (limit) wrap.append(chips, add);
+  const fill = (): void => {
+    const chosen = current();
+    if (chosen.length > 1) among = true;
+    const value = among ? AMONG : chosen[0] ?? "";
+    if (document.activeElement !== select) select.value = value;
+    select.title = titles[value] ?? pinTitle;
+    chips.hidden = add.hidden = !among;
+    if (among) fillChips(chosen, 2);
   };
   return { el: wrap, fill };
 }
@@ -90,10 +119,19 @@ export function isDefaultList(code: string, entries: readonly string[]): boolean
  * edited or opened here; English when there would be none (Auto).
  */
 export function pointingTabs(settings: Settings, opened: readonly string[] = []): string[] {
-  const models = Object.keys(STT_LANGUAGE_SUPPORT) as SttModel[];
-  const picked = [settings.sttModel, ...models].flatMap((m) => (m === settings.sttModel || settings.sttLanguages[m] ? sttLanguages(settings, m) : []));
-  const all = [...new Set([...picked, ...Object.keys(settings.pointingWords), ...opened])];
+  const all = [...new Set([...pickedLanguages(settings), ...Object.keys(settings.pointingWords), ...opened])];
   return all.length ? all : ["en"];
+}
+
+/** The languages chosen for the models (the selected one's, then the others'): their tabs stay. */
+function pickedLanguages(settings: Settings): string[] {
+  const models = Object.keys(STT_LANGUAGE_SUPPORT) as SttModel[];
+  return [settings.sttModel, ...models].flatMap((m) => (m === settings.sttModel || settings.sttLanguages[m] ? sttLanguages(settings, m) : []));
+}
+
+/** Whether a tab can be closed: it was opened here or its list edited, and no model uses the language. */
+export function closableTab(settings: Settings, code: string, opened: readonly string[] = []): boolean {
+  return (opened.includes(code) || code in settings.pointingWords) && !pickedLanguages(settings).includes(code);
 }
 
 /** The pointing-word lists: a tab per language in use, its list in a textarea, Reset once it was edited. */
@@ -123,13 +161,24 @@ export function mountPointingWords(box: HTMLElement, settings: Settings, save: (
     const codes = pointingTabs(settings, opened);
     if (!codes.includes(active)) active = codes[0]!;
     tabs.replaceChildren(...codes.map((c) => {
+      const wrap = el("span", "lang-tab-wrap");
       const tab = el("button", "lang-tab", languageName(c));
       tab.type = "button";
       tab.setAttribute("role", "tab");
       tab.setAttribute("aria-selected", String(c === active));
       if (c in settings.pointingWords) tab.append(el("span", "lang-edited", " (edited)"));
       tab.onclick = () => { active = c; render(); };
-      return tab;
+      wrap.append(tab);
+      if (closableTab(settings, c, opened)) {
+        const close = el("button", "lang-tab-close", "×");
+        close.type = "button";
+        const what = c in settings.pointingWords ? `Close ${languageName(c)} and discard its edited list` : `Close ${languageName(c)}`;
+        close.title = what;
+        close.setAttribute("aria-label", what);
+        close.onclick = () => closeTab(c);
+        wrap.append(close);
+      }
+      return wrap;
     }));
     const rest = LANGUAGE_CODES.filter((c) => !codes.includes(c));
     other.replaceChildren(option("", "Other language…"), ...rest.map((c) => option(c, languageLabel(c))));
@@ -141,6 +190,20 @@ export function mountPointingWords(box: HTMLElement, settings: Settings, save: (
     reset.hidden = !edited;
     const count = parsePointingWords(area.value).length;
     hint.textContent = `${languageName(active)}: ${count} word${count === 1 ? "" : "s"}${edited ? ", edited" : ""}. Separate them with commas or spaces. Case and punctuation are ignored, accents are not; end an entry with * to match every word that starts with it.`;
+  }
+
+  // Closing drops the tab; an edited list goes with it (otherwise the tab would come back with it).
+  function closeTab(code: string): void {
+    const at = opened.indexOf(code);
+    if (at >= 0) opened.splice(at, 1);
+    if (code in settings.pointingWords) {
+      const next = { ...settings.pointingWords };
+      delete next[code];
+      settings.pointingWords = next;
+      save();
+    }
+    if (code === active) { active = ""; area.blur(); }
+    render();
   }
 
   other.onchange = () => {

@@ -99,10 +99,6 @@ const setHistory = (state: unknown) => {
 };
 ipcRenderer.on("page:history-state", (_e, state: unknown) => setHistory(state));
 const historyNav = installHistoryNav({ go: (dir, via) => ipcRenderer.send("page:history", dir, via), can: (dir: NavDir) => history[dir] });
-// DEBUG-HISTORY (temporary)
-for (const type of ["mousedown", "mouseup", "auxclick"]) window.addEventListener(type, (e) => { const m = e as MouseEvent; if (m.button !== 0) ipcRenderer.send("history:debug", `${type} button ${m.button}`); }, true);
-window.addEventListener("wheel", (e) => { if (e.deltaX) ipcRenderer.send("history:debug", `wheel dx ${e.deltaX} dy ${e.deltaY} mode ${e.deltaMode}`); }, { capture: true, passive: true });
-window.addEventListener("keydown", (e) => { if (e.metaKey || e.ctrlKey || e.altKey) ipcRenderer.send("history:debug", `keydown ${e.key} meta ${e.metaKey} ctrl ${e.ctrlKey} alt ${e.altKey}`); }, true);
 // Opened by a swipe just now: the wheel events still coming are that swipe's momentum, not a new one.
 void ipcRenderer.invoke("page:history-state").then((state: { swipedAgo?: unknown } | null) => {
   setHistory(state);

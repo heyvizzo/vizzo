@@ -36,7 +36,7 @@ marker, 🗨 central.
 [0:24] USER (on red)  "Also change the label to 'Start free'."         → T1 followup (queued); T1 focused
 [0:30] USER (footer)  "Make the footer links a lighter grey."          → NEW T3, ◌; T3 focused
 [0:47] T1 done; not focused, T3 running → 💬T1 "An earlier task on the red button finished. Want me to tell you about it?" ⦿
-[0:52] USER "Does the hero image load lazily?"                         → central 🗨
+[0:52] USER "What does this page do?"                                  → central 🗨
 [1:02] T3 done; focused → 💬T3 full result, ●
 [1:10] USER "Tell me about the red button."                           → tell T1 → 💬T1 full result, ●
 [1:25] click T1 marker → panel (history, files) → Delete → confirm → thread removed

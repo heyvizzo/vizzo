@@ -336,9 +336,10 @@ describe("routeTurn, threads mode", () => {
   it("the system prompt is unchanged; the turn's message carries the rules, the pointed element, the threads and the format", async () => {
     const { sent: s } = await runT({ intent: "task", estimate_seconds: 60, target: "t1", relation: "followup", tell: null, say: "Sure.", question: "q" });
     expect(s.spec.system).not.toMatch(/thread/i);
-    expect(s.user).toContain("What the user SAYS wins over the cursor");
+    expect(s.user).toContain("What the user names takes precedence over incidental cursor position");
     expect(s.user).toContain("Pointed element this turn: the 'Get started' button.");
-    expect(s.user).toContain("Only a spoken turn with none of these can move to another existing thread");
+    expect(s.user).toContain("“Does the hero image load lazily?” while pointing at the hero image belongs to the image");
+    expect(s.user).toContain("“What does this page do?” stays central");
     expect(s.user).not.toContain("The user typed this on the clicked element");
     expect(s.user).toContain("- t1: the 'Get started' button (running, under the cursor): Making it bigger with rounder corners.");
     expect(s.user).toContain("- t2: the footer (pending, on another page): Lighter grey links.");
@@ -359,13 +360,13 @@ describe("routeTurn, threads mode", () => {
     expect(s.user).toContain('The user typed this on the clicked element and did not speak. The marker stays on that click: target is "new" or that element\'s thread id. Do not target a different thread and do not use "central".');
   });
 
-  it("a message box turn tells the router it stays central", async () => {
+  it("a message box turn can name a thread without pointing", async () => {
     const { sent: s } = await runT(
       { intent: "task", estimate_seconds: 60, target: "t1", relation: "followup", tell: null, say: "Sure.", question: "q" },
       { chat: true, anchorLabel: undefined },
     );
     expect(s.user).toContain("Pointed element this turn: none.");
-    expect(s.user).toContain(`The user typed this in the conversation's message box and is not pointing at anything. It stays in the conversation: target is "central"`);
+    expect(s.user).toContain(`The user typed this in the main message box without pointing. If the request refers to a listed element, use its thread id.`);
     expect(s.user).not.toContain("The user typed this on the clicked element");
   });
 

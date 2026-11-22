@@ -308,9 +308,8 @@ export type ClientMsg =
    * text: a typed comment (shared/comment.ts): the turn's words, instead of transcribing audio.
    */
   /**
-   * The turn's focus, where a typed (or dictated) message stays: threadId, the thread whose panel is open on the page
-   * (the turn goes to it instead of being routed); chat, the conversation's message box (the turn stays in the
-   * conversation). Neither: routed by what was said and pointed at.
+   * threadId pins a turn to the open thread panel. chat identifies the main message box, where a turn can name
+   * a thread without pointing. Other turns use the page interaction and the user's words.
    */
   | { type: "turn.start"; turnId: string; config: RunConfig; tPress: number; fixtureId?: string; pageUrl?: string; text?: string; threadId?: string; chat?: boolean; annotation?: DrawingAnnotation }
   | { type: "cursor.samples"; turnId: string; samples: CursorSample[] }
@@ -334,7 +333,7 @@ export type ClientMsg =
   | { type: "thread.continue"; requestId?: string; threadId: string; turnId?: string; config?: RunConfig }
   /** Element threads: the user opened a thread's panel (it becomes the focused thread; its result counts as told). */
   | { type: "thread.focus"; threadId: string }
-  /** Element threads: the panel's "Always use the smart model" checkbox (ThreadInfo.alwaysSmart). */
+  /** Change the open thread's smart-model routing preference (ThreadInfo.alwaysSmart). */
   | { type: "thread.smart"; threadId: string; on: boolean }
   /**
    * Stop a task that's still working (its × in the conversation or in the "N tasks running" list; or Esc three

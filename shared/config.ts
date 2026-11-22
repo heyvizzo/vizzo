@@ -2,29 +2,25 @@ import { LANGUAGE_CODES } from "./languages.ts";
 
 /** "pipeline" = the voice assistant (Scribe → router → TTS); "cursor-only" = speech-to-text + pointing, no LLM or TTS (dictating into a comment). */
 export type Approach = "pipeline" | "cursor-only";
-/**
- * ElevenLabs (API), OpenAI tts-1 (API), Fish Audio Drama 3 (API, `drama-3`), or on-device (free): "macos"
- * (AVSpeechSynthesizer, tools/mactts), "kokoro" (Kokoro-82M ONNX) and "piper" (Piper; both via
- * tools/localtts, `npm run setup:local-tts`).
- */
-export type TtsModel = "eleven_v4_turbo" | "eleven_flash_v2_5" | "openai_tts_1" | "fish_drama_3" | "macos" | "kokoro" | "piper";
 /** On-device TTS models: not billed. */
-export const LOCAL_TTS_MODELS = ["macos", "kokoro", "piper"] as const;
+export const LOCAL_TTS_MODELS = ["macos", "kokoro", "piper", "zonos3-mini"] as const;
+export type TtsModel = "eleven_v4_turbo" | "eleven_flash_v2_5" | "openai_tts_1" | "fish_drama_3" | (typeof LOCAL_TTS_MODELS)[number];
 export const isLocalTts = (m: TtsModel): m is (typeof LOCAL_TTS_MODELS)[number] => (LOCAL_TTS_MODELS as readonly string[]).includes(m);
 export const TTS_LABELS: Record<TtsModel, string> = {
   eleven_v4_turbo: "ElevenLabs v4 Turbo", eleven_flash_v2_5: "ElevenLabs Flash v2.5", openai_tts_1: "OpenAI tts-1",
   fish_drama_3: "Fish Audio Drama 3",
-  macos: "macOS TTS", kokoro: "Kokoro", piper: "Piper",
+  macos: "macOS TTS", kokoro: "Kokoro", piper: "Piper", "zonos3-mini": "ZONOS3-Mini",
 };
 /**
  * Speech-to-text for the pipeline and cursor-only approaches. Scribe streams partials while you talk;
  * the OpenRouter models get the whole clip on release (batch) and return word timestamps. The on-device
- * ones (free; server/adapters/localStt.ts, `npm run setup:local-stt`) all return word timestamps too:
- * Apple SpeechTranscriber streams partials, Parakeet and Moonshine re-transcribe the clip while you talk,
- * WhisperKit is batch.
+ * ones (free; server/adapters/localStt.ts, `npm run setup:local-stt`) also return word timestamps
+ * except for Rumble 2 Flash. Apple SpeechTranscriber streams partials, Parakeet and Moonshine re-transcribe
+ * the clip while you talk, and WhisperKit and Rumble 2 Flash run in batch.
  */
+export const LOCAL_STT_MODELS = ["local_parakeet", "local_apple", "local_whisperkit", "local_moonshine", "local_rumble-2-flash"] as const;
 export type SttModel = "scribe_v2" | "openrouter_whisper_large_v3" | "openrouter_fish_transcribe_1" | "openrouter_nemotron_asr"
-  | "local_parakeet" | "local_apple" | "local_whisperkit" | "local_moonshine";
+  | (typeof LOCAL_STT_MODELS)[number];
 export const STT_LABELS: Record<SttModel, string> = {
   scribe_v2: "ElevenLabs Scribe v2 Realtime",
   openrouter_whisper_large_v3: "Whisper large v3 (OpenRouter)",
@@ -34,9 +30,8 @@ export const STT_LABELS: Record<SttModel, string> = {
   local_apple: "Apple SpeechTranscriber (on-device)",
   local_whisperkit: "WhisperKit large-v3 turbo (on-device)",
   local_moonshine: "Moonshine medium (on-device)",
+  "local_rumble-2-flash": "Rumble 2 Flash (on-device)",
 };
-/** On-device STT models: not billed. */
-export const LOCAL_STT_MODELS = ["local_parakeet", "local_apple", "local_whisperkit", "local_moonshine"] as const;
 export const isLocalStt = (m: SttModel): m is (typeof LOCAL_STT_MODELS)[number] => (LOCAL_STT_MODELS as readonly string[]).includes(m);
 /** OpenRouter model id behind each OpenRouter STT option. */
 export const STT_OPENROUTER_MODEL: Partial<Record<SttModel, string>> = {
@@ -48,7 +43,9 @@ export const STT_OPENROUTER_MODEL: Partial<Record<SttModel, string>> = {
  * How each STT model deals with languages (live check, 2026-11-11, on German, Spanish, French, Japanese and Romanian
  * clips with nothing pinned; docs/API-NOTES.md):
  * - "auto": it says which language it heard (a code: Whisper on OpenRouter, Fish Transcribe, WhisperKit), so the
- *   choice is Auto or one language.
+ *   choice is Auto or one language. `limit`: it can also detect among the languages the user speaks (two or more),
+ *   so a short clip isn't heard as a language they don't speak (Rumble masks its language name to them; WhisperKit
+ *   transcribes in each and keeps the most confident; tools/localstt/server.py, server/adapters/localStt.ts).
  * - "multi": it transcribes whatever it hears but doesn't say which language that was (Scribe's realtime API returns
  *   null, Nemotron the word "auto", Parakeet nothing), so the user says which languages they speak (one or more).
  * - "single": it needs to be told one language (Apple) or only has one (Moonshine).
@@ -56,7 +53,7 @@ export const STT_OPENROUTER_MODEL: Partial<Record<SttModel, string>> = {
  * Parakeet's are the 25 European ones of its model card.
  */
 export type SttLanguageMode = "auto" | "multi" | "single";
-export const STT_LANGUAGE_SUPPORT: Record<SttModel, { mode: SttLanguageMode; languages?: readonly string[] }> = {
+export const STT_LANGUAGE_SUPPORT: Record<SttModel, { mode: SttLanguageMode; languages?: readonly string[]; limit?: true }> = {
   scribe_v2: { mode: "multi" },
   openrouter_whisper_large_v3: { mode: "auto" },
   openrouter_fish_transcribe_1: { mode: "auto" },
@@ -66,8 +63,14 @@ export const STT_LANGUAGE_SUPPORT: Record<SttModel, { mode: SttLanguageMode; lan
     languages: ["en", "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk"],
   },
   local_apple: { mode: "single", languages: ["en", "zh", "fr", "de", "it", "ja", "ko", "pt", "es"] },
-  local_whisperkit: { mode: "auto" },
+  local_whisperkit: { mode: "auto", limit: true },
   local_moonshine: { mode: "single", languages: ["en"] },
+  "local_rumble-2-flash": {
+    mode: "auto",
+    limit: true,
+    // Languages in the checkpoint's forced-language list that Vizzo offers. Auto covers the full model.
+    languages: ["ar", "cs", "da", "de", "el", "en", "es", "fa", "fi", "fr", "hi", "hu", "id", "it", "ja", "ko", "ms", "nl", "pl", "pt", "ro", "ru", "sv", "th", "tl", "tr", "vi", "zh"],
+  },
 };
 /**
  * What went wrong in use (chat logs, 2026-10-14..17, and the live check): Fish Transcribe ignores a pinned language
@@ -86,7 +89,7 @@ export function sttLanguageOptions(model: SttModel): readonly string[] {
 }
 /**
  * A model's language selection made valid: known languages it offers, without repeats. "auto" models: none (Auto) or
- * one. "multi": at least one. "single": exactly one. `legacy`: the setting from before the per-model pickers
+ * one, or (one that can `limit`) two or more to detect among. "multi": at least one. "single": exactly one. `legacy`: the setting from before the per-model pickers
  * ("auto" was English + Romanian), used when the model has no selection yet; without either, English.
  */
 export function sttLanguagesFor(model: SttModel, selection: readonly string[] | undefined, legacy?: string): string[] {
@@ -94,7 +97,7 @@ export function sttLanguagesFor(model: SttModel, selection: readonly string[] | 
   const offered = sttLanguageOptions(model);
   const from = selection ?? (mode === "auto" && (legacy === undefined || legacy === "auto") ? [] : legacy === undefined ? ["en"] : legacy === "auto" ? ["en", "ro"] : [legacy]);
   const picked = [...new Set(from)].filter((c) => offered.includes(c));
-  if (mode === "auto") return picked.slice(0, 1);
+  if (mode === "auto") return STT_LANGUAGE_SUPPORT[model].limit ? picked : picked.slice(0, 1);
   const first = picked[0] ?? offered[0] ?? "en";
   return mode === "single" ? [first] : picked.length ? picked : [first];
 }
@@ -375,6 +378,13 @@ export function llmOf(config: Partial<RunConfig>): Record<LlmTier, LlmChoice> {
 export function turnLanguages(config: Pick<RunConfig, "language" | "languages">): string[] {
   if (config.languages) return config.languages.filter((c) => typeof c === "string" && c);
   return !config.language || config.language === "auto" ? ["en", "ro"] : [config.language];
+}
+
+/** What a turn tells its speech engine: the pinned language, or the chosen ones (two or more) to detect among. */
+export function sttLanguageOpts(config: Pick<RunConfig, "language" | "languages">): { language?: string; languages?: string[] } {
+  if (config.language && config.language !== "auto") return { language: config.language };
+  const languages = config.languages?.filter((c) => typeof c === "string" && c) ?? [];
+  return languages.length > 1 ? { languages } : {};
 }
 
 /** The solver time limit (Settings → Models → Turns): whole minutes in this range. */

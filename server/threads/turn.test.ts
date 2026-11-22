@@ -27,7 +27,7 @@ describe("planThread", () => {
   it("a spoken click on an element that already has a thread uses that marker", () => {
     const store = resetThreadStore();
     const existing = store.create(RED, "the red button", "task");
-    const plan = planThread(task({ kind: "central" }), threads({ clicked: true, matched: existing.threadId }), store);
+    const plan = planThread(task({ kind: "central" }), threads({ clicked: true }), store);
     expect(plan).toEqual({ threadId: existing.threadId, relation: "followup" });
     expect(store.list()).toHaveLength(1);
   });
@@ -75,19 +75,19 @@ describe("planThread", () => {
     const other = store.create({ ...RED, selector: "#blue", domPath: "body > #blue" }, "the blue button", "task");
     const plan = planThread(
       task({ kind: "thread", threadId: other.threadId, relation: "correction" }),
-      threads({ typed: true, matched: here.threadId }),
+      threads({ typed: true }),
       store,
     );
     expect(plan).toEqual({ threadId: here.threadId, relation: "followup" });
     expect(store.list()).toHaveLength(2);
   });
 
-  it("message box: always stays in the central conversation, even when a thread is named", () => {
+  it("message box: can address a named thread without pointing", () => {
     const store = resetThreadStore();
     const red = store.create(RED, "the red button", "task");
     const box = (over: Partial<TurnThreads> = {}): TurnThreads => ({ anchor: null, briefs: [], chat: true, ...over });
-    expect(planThread(task({ kind: "thread", threadId: red.threadId, relation: "correction" }), box(), store)).toBeNull();
-    expect(planThread({ intent: "answer", estimateS: null, tell: red.threadId }, box(), store)).toBeNull();
+    expect(planThread(task({ kind: "thread", threadId: red.threadId, relation: "correction" }), box(), store)).toEqual({ threadId: red.threadId, relation: "correction" });
+    expect(planThread({ intent: "answer", estimateS: null, tell: red.threadId }, box(), store)).toEqual({ threadId: red.threadId, relation: "tell" });
     expect(planThread(task({ kind: "new" }), box(), store)).toBeNull();
     expect(planThread(task({ kind: "central" }), box(), store)).toBeNull();
     expect(store.list()).toHaveLength(1);
@@ -99,6 +99,15 @@ describe("planThread", () => {
     const tt = prepareThreads({ words: [], pointing: [], rests: [], samples: [], pageUrl: RED.pageUrl }, store, undefined, { chat: true });
     expect(tt).toMatchObject({ anchor: null, chat: true });
     expect(tt.briefs).toEqual([expect.objectContaining({ threadId: red.threadId, onCurrentPage: true, underCursor: false })]);
+  });
+
+  it("a question and a change on the same hovered element share a thread even if both decisions request new", () => {
+    const store = resetThreadStore();
+    const tt = threads();
+    const first = planThread({ intent: "question", estimateS: 5, target: { kind: "new" } }, tt, store);
+    expect(first?.relation).toBe("new");
+    expect(planThread(task({ kind: "new" }), tt, store)).toEqual({ threadId: first!.threadId, relation: "followup" });
+    expect(store.list()).toHaveLength(1);
   });
 
   it("pointing without a click can still go to the central conversation", () => {

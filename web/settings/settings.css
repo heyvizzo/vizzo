@@ -246,6 +246,14 @@ label.flash { animation: flash 1.6s ease-out; border-radius: 8px; }
 .lang-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
 .lang-tab { height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
 .lang-tab[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+/* A tab that can be closed has the chips' × inside its border, shown on hover (or keyboard focus). */
+.lang-tab-wrap { display: inline-flex; }
+.lang-tab-wrap:has(.lang-tab-close) { align-items: center; border: 1px solid var(--line); border-radius: 6px; }
+.lang-tab-wrap:has(.lang-tab-close):has(.lang-tab[aria-selected="true"]) { border-color: var(--accent); color: var(--accent); }
+.lang-tab-wrap:has(.lang-tab-close) .lang-tab { height: 26px; padding-right: 4px; border: 0; }
+.lang-tab-close { height: 26px; padding: 0 10px 0 0; border: 0; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; opacity: 0; }
+.lang-tab-wrap:hover .lang-tab-close, .lang-tab-close:focus-visible { opacity: 1; }
+.lang-tab-close:hover { color: var(--text); }
 .lang-edited { color: var(--muted); font-size: 11px; }
 .lang-other { width: auto; height: 28px; margin-left: auto; }
 .lang-words { width: 100%; min-height: 84px; padding: 8px; resize: vertical; font: inherit; line-height: 1.5; box-sizing: border-box; }

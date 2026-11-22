@@ -267,7 +267,7 @@ export function formatPointingForPrompt(targets: PointingTarget[], opts: { selec
     const selector = opts.selectors ? best.sample?.elementPath : null;
     lines.push(selector ? `${line}\n   selector: ${selector}` : line);
   }
-  return lines.length ? lines.join("\n") : "Pointing: none (the user was not pointing at anything we could resolve)";
+  return lines.length ? lines.join("\n") : "Pointing: none (no word-timed pointing targets)";
 }
 
 // ── Router ───────────────────────────────────────────────────────────────────
@@ -342,7 +342,7 @@ export function threadsBlock(
   threads: readonly ThreadBrief[], anchorLabel?: string, extra: { clicked?: boolean; typed?: boolean; chat?: boolean; panel?: string } = {},
 ): string {
   const where = extra.chat
-    ? [`The user typed this in the conversation's message box and is not pointing at anything. It stays in the conversation: target is "central", even when it is about a thread (answer from the threads below, or use \`tell\` to read a thread's finished result). Never a thread id and never "new".`]
+    ? [`The user typed this in the main message box without pointing. If the request refers to a listed element, use its thread id. For a question or change about one element with no matching thread, return intent "clarify", target "central" and ask the user to point at that element. This includes a clearly named element such as the hero image: its name alone gives you no place to put its marker. Only delegate in the main conversation when the subject is broader than one element.`]
     : extra.typed
     ? [`The user typed this on the clicked element and did not speak. The marker stays on that click: target is "new" or that element's thread id. Do not target a different thread and do not use "central".`]
     : [

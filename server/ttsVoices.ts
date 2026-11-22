@@ -4,6 +4,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { TTS1_VOICES } from "./adapters/openaiTts.ts";
 import { SPEECH_ROOT } from "./paths.ts";
+import { languageName } from "../shared/languages.ts";
 
 const PIPER_DIR = `${SPEECH_ROOT}.models/piper/`;
 
@@ -72,10 +73,26 @@ export const KOKORO_VOICES: VoiceOption[] = [
   { id: "bm_george", label: "George (UK male)", lang: "en-GB" },
 ];
 
+/** The installed MLX checkpoint's preset index maps names to files such as Jett_en-energetic_M_1.embedding.npz. */
+export function zonos3Voices(dir = `${SPEECH_ROOT}.models/zonos3-mini`): VoiceOption[] {
+  if (!existsSync(`${dir}/voices.json`)) return [];
+  try {
+    const voices: Record<string, string> = JSON.parse(readFileSync(`${dir}/voices.json`, "utf8"));
+    const presets = Object.entries(voices).flatMap(([id, file]) => {
+      if (!existsSync(`${dir}/voices/${file}`)) return [];
+      const [name, locale] = file.split("_");
+      const lang = locale?.split("-")[0] ?? "";
+      return [{ id, label: `${name} (${languageName(lang)})`, lang }];
+    });
+    return presets.length ? [{ id: "auto", label: "Automatic (by language)", lang: "", default: true }, ...presets] : [];
+  } catch { return []; }
+}
+
 export function ttsVoices(): Record<string, VoiceOption[]> {
   return {
     piper: piperVoices(),
     kokoro: KOKORO_VOICES,
+    "zonos3-mini": zonos3Voices(),
     openai_tts_1: TTS1_VOICES.map((v) => ({ id: v, label: v, lang: "en", ...(v === "coral" ? { default: true } : {}) })),
   };
 }

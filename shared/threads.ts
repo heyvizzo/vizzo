@@ -99,7 +99,7 @@ export interface ThreadInfo {
   /** The thread's last spoken line asked the user something (a reminder or a question): its bubble stays up. */
   awaitingReply: boolean;
   /**
-   * The panel's "Always use the smart model": what's said or typed in its panel is always the smart model's job. A
+   * Route future messages in this panel to the smart model. A
    * spoken turn still goes through the router (forced: it only speaks the ack); a typed one goes straight to the thread.
    */
   alwaysSmart?: boolean;

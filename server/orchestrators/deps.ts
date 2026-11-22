@@ -9,7 +9,7 @@ import { openFishTts } from "../adapters/fishTts.ts";
 import type { OpenScribe, OpenTts } from "../adapters/types.ts";
 import { isLocalStt, isLocalTts, STT_OPENROUTER_MODEL } from "../../shared/config.ts";
 
-/** ElevenLabs, OpenAI tts-1, Fish Audio Drama 3, or an on-device engine (macOS / Kokoro / Piper), by model. */
+/** ElevenLabs, OpenAI tts-1, Fish Audio Drama 3, or an on-device engine, by model. */
 const openTts: OpenTts = (o) =>
   isLocalTts(o.model) ? openLocalTts(o.model)(o)
     : o.model === "openai_tts_1" ? openOpenAiTts(o)

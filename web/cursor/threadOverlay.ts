@@ -7,11 +7,11 @@ import { drawingPreviewOpen } from "./drawingPreview.ts";
 // Elements are re-resolved on scroll, resize, DOM mutation (HMR included): selector → role + text → the anchor's
 // last bounds (drawn faded). The conversation orb stands for the page as a whole: the central conversation's bubbles
 // come from it and its panel shows the conversation. It sits fixed in the viewport, bottom center until dragged.
-import { displayTitle, type ThreadAnchor, type ThreadInfo, type ThreadMessage, type ThreadSay } from "../../shared/threads.ts";
+import { displayTitle, type ThreadAnchor, type ThreadInfo, type ThreadMessage } from "../../shared/threads.ts";
 import { stripVoiceCues } from "../../shared/cues.ts";
 import type { CursorSample } from "../../shared/protocol.ts";
 import type { FormHub } from "./inlineForm.ts";
-import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageChangesStatus, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageThreadAction, PageThreadDeletePreview, PageThreads } from "./pageBridge.ts";
+import type { BubbleConfirm, ConvoEntry, HeldComment, OrbPos, OrbState, PageChangesStatus, PageConfirmAction, PageHeldAction, PageOrbAction, PagePanelAction, PageSay, PageThreadAction, PageThreadDeletePreview, PageThreads } from "./pageBridge.ts";
 import { mountPlasmaOrb, PLASMA_ORB_CSS, type PlasmaState } from "./plasmaOrb.ts";
 import { ORB_ASKING_COLORS, ORB_COLORS, stateColors, stateColorVars, toneOfCss, type StateColor, type Tone } from "./colors.ts";
 import type { HarnessSessionInfo } from "../../shared/harnessSession.ts";
@@ -123,6 +123,11 @@ ${MARKDOWN_CSS}
 .th-session-row .session-info { flex: 1; padding: 0; }
 .th-session-row > :not(.session-info) { margin-top: 2px; }
 .th-title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.th-panel.working :is(.th-title, .th-session-row .session-info) { color: var(--ui-accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .th-panel.working :is(.th-title, .th-session-row .session-info) { animation: th-tag-pulse var(--st-beat) ease-in-out infinite; }
+  @keyframes th-tag-pulse { 50% { opacity: .7; } }
+}
 .th-state { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--ui-line); color: var(--ui-muted); }
 .th-state[data-state="running"], .th-state[data-state="speaking"] { color: var(--st-working); border-color: color-mix(in srgb, var(--st-working-to) 45%, transparent); }
 .th-state[data-state="pending"], .th-state[data-state="idle"] { color: var(--st-done); border-color: color-mix(in srgb, var(--st-done-to) 40%, transparent); }
@@ -138,10 +143,10 @@ ${MARKDOWN_CSS}
 .th-panel .th-trash:hover { color: var(--ui-err-text); }
 .th-panel .th-stop { color: var(--ui-err-text); }
 .th-panel .th-stop:hover { background: var(--ui-hover); }
-.th-panel .th-commit { padding: 3px 5px; border: 0; background: transparent; color: var(--ui-accent); }
+.th-panel .th-commit { display: flex; align-items: center; gap: 4px; padding: 3px 5px; border: 0; background: transparent; color: var(--ui-accent); font-variant-numeric: tabular-nums; }
+.th-commit svg { flex: none; }
 .th-panel .th-commit:not(:disabled):hover { background: var(--ui-hover); }
 .th-panel .th-commit:disabled { color: var(--ui-muted); }
-.th-summary { padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); }
 .th-body { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--ui-line); padding-top: 8px; }
 .th-msg { border-left: 2px solid var(--ui-line); padding-left: 8px; }
 .th-msg.role-user { border-left-color: color-mix(in srgb, var(--ui-accent) 50%, transparent); }
@@ -149,6 +154,12 @@ ${MARKDOWN_CSS}
 .th-msg.role-system { border-left-color: color-mix(in srgb, var(--ui-warn) 50%, transparent); }
 .th-msg.kind-error { border-left-color: var(--ui-err); }
 .th-meta { font: 10.5px ui-monospace, monospace; color: var(--ui-muted); }
+.th-msg.th-job-result, .th-bubble.th-job-result { border-left: 3px solid var(--ui-ok); }
+.th-job-result .th-meta { margin-bottom: 3px; color: var(--ui-ok); }
+.th-job-result details, .th-bubble .th-job-open { margin-top: 5px; }
+.th-job-question { margin: 4px 0; color: var(--ui-muted); overflow-wrap: anywhere; }
+.th-bubble .th-job-open { display: block; padding: 2px 0; border: 0; background: transparent; color: var(--ui-accent); font: inherit; font-size: 12px; cursor: pointer; }
+.th-job-open:hover { text-decoration: underline; }
 .th-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .th-text.md { white-space: normal; }
 .th-msg details summary { cursor: pointer; color: var(--ui-accent); font-size: 12px; }
@@ -162,7 +173,7 @@ ${MARKDOWN_CSS}
 .th-panel .th-held button { font-size: 11px; padding: 2px 8px; }
 .th-compose { padding: 8px 12px; border-top: 1px solid var(--ui-line); }
 .th-compose[inert] { opacity: .6; }
-.th-smart { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); cursor: pointer; }
+.th-smart { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; color: var(--ui-muted); cursor: pointer; }
 .th-smart input { margin: 0; accent-color: var(--ui-accent); cursor: pointer; }
 .th-foot { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--ui-line); }
 .th-foot .th-confirm { font-size: 12px; }
@@ -219,7 +230,7 @@ export interface ThreadOverlay {
   setThreads(update: PageThreads): void;
   showDeletePreview(result: PageThreadDeletePreview): void;
   setChangesStatus(status: PageChangesStatus, enabled: boolean): void;
-  bubble(say: ThreadSay, ended: boolean, confirm?: BubbleConfirm): void;
+  bubble(say: PageSay, ended: boolean, confirm?: BubbleConfirm): void;
   provisional(turnId: string, anchor?: ThreadAnchor): void;
   clearProvisional(turnId: string): void;
   /** Open a thread's panel and scroll its element into view (from the sidebar's list). */
@@ -305,7 +316,7 @@ interface MarkerView { thread: ThreadInfo; el: Element | null; btn: HTMLButtonEl
 /** `collapsed`: shrunk into its marker (hovering the marker grows it back out). `leave`: the pending collapse. */
 /** `asking`: it holds a question (Yes / No): it stays out until answered. */
 interface BubbleView {
-  say: ThreadSay; div: HTMLElement; home: { x: number; y: number };
+  say: PageSay; div: HTMLElement; home: { x: number; y: number };
   collapsed: boolean; leave: ReturnType<typeof setTimeout> | null; asking: boolean;
 }
 
@@ -363,9 +374,9 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const m = markers.get(id);
     if (m) opts.external.open(id, geometry(m), opts.sampleAt(m.x - scrollX, m.y - scrollY, m.el)?.sample);
   }
-  function openCentral() {
+  function openCentral(resultId?: string) {
     if (externalId) opts.external?.close(externalId);
-    panels.central();
+    panels.central(resultId);
   }
   function geometry(m: MarkerView): MarkerGeometry {
     return { x: m.x - scrollX, y: m.y - scrollY, radius: MARKER / 2, vw: innerWidth, vh: innerHeight,
@@ -672,9 +683,12 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
    * (threadId null) come from the orb. With `confirm` it's a question instead (BubbleConfirm): it stays out, with
    * Yes / No under the text, until answered or replaced.
    */
-  function bubble(say: ThreadSay, _ended: boolean, confirm?: BubbleConfirm): void {
+  function bubble(say: PageSay, ended: boolean, confirm?: BubbleConfirm): void {
     let b = bubbles.get(say.sayId);
+    if (b && say.jobLabel) return; // its audio notice started after the result was shown
     if (!b) {
+      // A previous line can finish draining after a newer result has taken its place.
+      if (ended && bubbleOf(say.threadId)) return;
       // One bubble per thread: a new line replaces the previous one.
       for (const [id, other] of bubbles) if (other.say.threadId === say.threadId) removeBubble(id);
       const div = h("div", "th-bubble");
@@ -691,6 +705,15 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     const newLine = !say.text.startsWith(b.say.text);
     b.say = say;
     b.div.replaceChildren(stripVoiceCues(say.text));
+    if (say.jobLabel) {
+      b.div.classList.add("th-job-result");
+      b.div.prepend(h("div", "th-meta", say.jobLabel));
+      const details = h("button", "th-job-open", "Task details");
+      details.type = "button";
+      details.setAttribute("aria-haspopup", "dialog");
+      details.onclick = () => openCentral(say.sayId);
+      b.div.append(details);
+    }
     b.asking = !!confirm;
     b.div.classList.toggle("asking", b.asking);
     // The question and its Yes / No on one line.
@@ -818,7 +841,12 @@ export function createThreadOverlay(opts: ThreadOverlayOpts): ThreadOverlay {
     clearProvisional: (turnId) => { if (prov?.turnId === turnId) clearProv(); },
     open,
     setOrb,
-    setConversation: panels.setConversation, setHeld: panels.setHeld, setDetails: panels.setDetails,
+    setConversation(entries, session) {
+      panels.setConversation(entries, session);
+      const current = bubbleOf(null);
+      if (current?.say.jobLabel && !entries.some(e => e.id === current.say.sayId)) removeBubble(current.say.sayId);
+    },
+    setHeld: panels.setHeld, setDetails: panels.setDetails,
     setSession: panels.setSession, setFullAnswers: panels.setFullAnswers,
     isOrb(node) {
       if (orb.btn.contains(node)) return true;

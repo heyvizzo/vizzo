@@ -95,6 +95,22 @@ describe("pipeline (B) with element threads", () => {
     expect(t!.costItems).toBeUndefined(); // the turn's own record carries the cost
   });
 
+  it("records a clarifying question about an identified element in a new thread", async () => {
+    const s = setup({ intent: "clarify", target: { kind: "new" } });
+    await run(s);
+    const [thread] = store.list();
+    expect(thread).toMatchObject({ awaitingReply: true });
+    expect(s.decision()?.threadId).toBe(thread!.threadId);
+    expect(thread!.messages.map((m) => m.kind)).toEqual(["request", "result"]);
+  });
+
+  it("leaves no marker for an empty clarification on a hovered element", async () => {
+    const s = setup({ intent: "clarify", target: { kind: "new" }, silent: true });
+    const r = await run(s);
+    expect(r.transcript).toBe("");
+    expect(store.list()).toEqual([]);
+  });
+
   it("new + long task: ack only; the run goes on and its result is spoken on the floor", async () => {
     const s = setup({ target: { kind: "new" }, intent: "task", estimateS: 120 });
     const r = await run(s);
@@ -183,7 +199,7 @@ describe("pipeline (B) with element threads", () => {
     expect(store.info(other.threadId)!.messages).toEqual([]);
   });
 
-  it("message box: stays in the central conversation, even when the router names a thread", async () => {
+  it("message box: sends feedback to the named thread without using the cursor", async () => {
     const red = store.create(RED, "the red button", "task");
     const s = setup({ target: { kind: "thread", threadId: red.threadId, relation: "followup" }, intent: "task", estimateS: 30 });
     s.ctx.typedText = "make the red button bigger";
@@ -193,19 +209,19 @@ describe("pipeline (B) with element threads", () => {
     expect(s.routed[0]).toMatchObject({ chat: true });
     expect(s.routed[0]!.typed).toBeUndefined();
     expect(s.routed[0]!.clicked).toBeUndefined();
-    expect(s.decision()?.threadId).toBeUndefined();
-    expect(store.info(red.threadId)!.messages).toEqual([]);
+    expect(s.decision()?.threadId).toBe(red.threadId);
+    expect(store.info(red.threadId)!.messages[0]).toMatchObject({ kind: "followup", text: "make the red button bigger" });
     expect(store.list()).toHaveLength(1);
   });
 
-  it("message box: a tell reads the thread's result in the conversation", async () => {
+  it("message box: a tell retrieves the result from its named thread", async () => {
     const t = store.create(RED, "the red button", "task");
     store.addMessage(t.threadId, { turnId: "t0", role: "assistant", kind: "result", text: "It's bigger now." }, (x) => { x.state = "pending"; x.unread = true; });
     const s = setup({ tell: t.threadId });
     s.ctx.typedText = "what happened with the red button?";
     s.ctx.chat = true;
     const r = await run(s);
-    expect(s.decision()?.threadId).toBeUndefined();
+    expect(s.decision()?.threadId).toBe(t.threadId);
     expect(r.voiceText).toBe("It's bigger now.");
     expect(store.info(t.threadId)).toMatchObject({ state: "idle", unread: false });
   });

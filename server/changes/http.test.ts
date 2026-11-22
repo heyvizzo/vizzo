@@ -172,7 +172,7 @@ it("validates HTTP shapes, reviews and exact diff scope, and broadcasts readines
   const scanned = await repo.review();
   const { id } = scanned.components[0]!;
   const selection = { project: repo.project, generation: scanned.generation, components: [id] };
-  expect(await repo.status()).toEqual({ kind: "ready", project: repo.project, generation: scanned.generation, changedFiles: 1, ownedThreadIds: ["A"] });
+  expect(await repo.status()).toEqual({ kind: "ready", project: repo.project, generation: scanned.generation, changedFiles: 1, ownedThreadIds: ["A"], threadFileCounts: { A: 1 } });
   await expect.poll(() => updates.filter(({ type }) => type.startsWith("changes."))).toEqual([
     { type: "changes.status", status: { kind: "loading" } },
     { type: "changes.updated", project: repo.project, generation: scanned.generation },
@@ -605,6 +605,7 @@ it("places a tied component in the first displayed writer's job in a scoped revi
   expect(view.groups.map(({ writer }) => writer.id)).toEqual(["A", "B"]);
   expect(view.groups[0]!.tied).toEqual(view.groups[1]!.tied);
   expect(view.groups[0]!.tied).toHaveLength(1);
+  expect(await repo.status()).toMatchObject({ changedFiles: 3, threadFileCounts: { A: 2, B: 2 } });
   const result = await repo.post("/commit", { project: repo.project, generation: view.generation,
     components: view.components.map(({ id }) => id), message: "Commit in displayed order", separately: true, scopeThreadId: "B" });
   const body = await result.json();

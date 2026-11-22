@@ -22,11 +22,11 @@ import { createPlayer, type Player } from "../audio/player.ts";
 import { bindPushToTalk, isPttKey, isTypingTarget } from "../audio/ptt.ts";
 import { hotkeyLabel, hotkeys, setHotkeys } from "../../shared/hotkeys.ts";
 import { mountAlwaysListen, type AlwaysListenHandle } from "./alwaysListen.ts";
-import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageHeldAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type CommentState, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type PageCmd, type PageCommentAction, type RemotePage } from "../cursor/pageBridge.ts";
+import { createRemotePage, isPageCommentAction, isPageConfirmAction, isPageHeldAction, isPageOrbAction, isPagePanelAction, isPageThreadAction, type CommentState, type ConvoEntry, type OrbPos, type OrbState, type PageBridge, type PageCmd, type PageCommentAction, type PageSay, type RemotePage } from "../cursor/pageBridge.ts";
 import { typedSpanMs } from "../../shared/comment.ts";
 import { createFormHub, INLINE_FORM_CSS } from "../cursor/inlineForm.ts";
 import { themeCss } from "../../shared/theme.ts";
-import { STATE_LABEL } from "../cursor/threadOverlay.ts";
+import { STATE_LABEL, deleteConfirmation } from "../cursor/threadOverlay.ts";
 import { stateColorVars } from "../cursor/colors.ts";
 import { annotateTranscript, clickVerb, describeRef, relTime } from "../../shared/pointing.ts";
 import { hasSpokenWords } from "../../shared/speech.ts";
@@ -632,6 +632,8 @@ function createJobCard(info: JobInfo): JobCard {
   row.dataset.turn = info.turnId;
   row.append(marker, stop);
   const root = el("div", "job");
+  root.id = `job-details-${info.jobId}`;
+  marker.setAttribute("aria-controls", root.id);
   root.dataset.turn = info.turnId;
   root.hidden = true;
   const head = el("div", "job-head");
@@ -670,6 +672,7 @@ function createJobCard(info: JobInfo): JobCard {
 function upsertJob(info: JobInfo): void {
   if (droppedJobs.has(info.jobId)) return;
   let c = jobs.get(info.jobId);
+  const arriving = info.state === "done" && c?.info.state !== "done";
   if (!c) {
     c = createJobCard(info);
     jobs.set(info.jobId, c);
@@ -682,9 +685,33 @@ function upsertJob(info: JobInfo): void {
   c.info = { ...c.info, ...info };
   settleStopConfirm();
   renderJob(c);
+  if (arriving) appendJobResult(c);
   renderJobsPill();
   orbChanged();
   refreshTurnCost(info.turnId);
+}
+
+/** Promote the existing card once. Later updates (including the cost of speech) edit it in place. */
+function appendJobResult(c: JobCard): void {
+  const bot = el("div", "bubble bot");
+  c.row.classList.add("job-result");
+  bot.append(c.head, c.spoken, c.marker);
+  c.row.replaceChildren(bot);
+  stampTime(c.row);
+  c.detail.open = !c.detail.hidden;
+  messages.append(c.row, c.root);
+  c.row.scrollIntoView({ block: "nearest" });
+  // Make the details available even if the user opens the orb bubble before the next batched update.
+  sendConversation(true);
+  showJobBubble(c);
+}
+
+function showJobBubble(c: JobCard): void {
+  if (pendingDelete?.reset) return;
+  pageBubble({
+    sayId: `job:${c.info.jobId}`, threadId: null, needsReply: false,
+    text: c.spoken.textContent ?? "", jobLabel: c.head.textContent ?? "Background task",
+  }, false);
 }
 
 function renderJob(c: JobCard): void {
@@ -697,7 +724,8 @@ function renderJob(c: JobCard): void {
   c.cardStop.hidden = j.state !== "running";
   const status = j.state === "running" ? `${fmtElapsed(performance.now() - c.tStart)}…` : j.state === "failed" || j.state === "stopped" ? j.state : j.costUsd !== undefined ? fmtUsd(j.costUsd) : "";
   const isCost = j.state === "done" && j.costUsd !== undefined;
-  c.marker.replaceChildren(el("span", "job-marker-q", `${j.intent === "question" ? "Question" : "Task"}: ${markerLabel(j.question)}`), el("span", isCost ? "job-marker-status cost-text" : "job-marker-status", status));
+  const markerText = j.state === "done" ? "Task details" : `${j.intent === "question" ? "Question" : "Task"}: ${markerLabel(j.question)}`;
+  c.marker.replaceChildren(el("span", "job-marker-q", markerText), el("span", isCost ? "job-marker-status cost-text" : "job-marker-status", status));
   c.head.textContent = jobHeadline(j, performance.now() - c.tStart);
   c.question.textContent = j.question ? `“${j.question}”` : "";
   c.question.hidden = !j.question;
@@ -883,6 +911,9 @@ sock.onAudio((pcm) => {
 });
 
 function onNotice(msg: Extract<ServerMsg, { type: "notice" }>): void {
+  // Speech can start on a new page, or after another reply has occupied the orb.
+  const c = jobs.get(msg.jobId);
+  if (msg.state === "start" && c?.info.state === "done" && !stoppedNotices.has(msg.jobId)) showJobBubble(c);
   noticeAudio(msg.jobId, msg.state, "Reading out a background result…");
 }
 
@@ -914,7 +945,6 @@ function stopNotice(tellServer = true): void {
 // ── element threads ────────────────────────────────
 const threads = new Map<string, ThreadInfo>();
 const deletePreviews = new Map<string, (result: ThreadDeletePreview[] | Error) => void>();
-const previewingDeletes = new Set<string>();
 const continuingThreads = new Map<string, string>();
 let pendingDelete: { requestId: string; waiting: Set<string>; reset: boolean } | null = null;
 let receivedThreads = false;
@@ -1093,23 +1123,6 @@ function threadRemovalConfirmed(threadId: string): void {
   void sendHeld();
 }
 
-/** The sidebar's × follows the server preview's automatic mode. */
-async function deleteThread(threadId: string): Promise<void> {
-  if (pendingDelete || previewingDeletes.has(threadId)) return;
-  previewingDeletes.add(threadId);
-  renderThreadList();
-  const revision = sourceControlRevision;
-  try {
-    const [preview] = await previewDelete([threadId]);
-    if (revision === sourceControlRevision && preview && threads.has(threadId)) submitDelete("thread.delete", [{ threadId, mode: preview.state === "complete" ? preview.defaultMode : "keep" }]);
-  } catch (error) {
-    if (revision === sourceControlRevision) setStatus((error as Error).message, true);
-  } finally {
-    previewingDeletes.delete(threadId);
-    renderThreadList();
-  }
-}
-
 function renderThreadList(): void {
   const groups = groupThreads(threads.values(), pageUrl);
   $("threads").hidden = groups.length === 0;
@@ -1154,9 +1167,9 @@ function renderThreadList(): void {
       b.onclick = () => openThread(t);
       const x = el("button", "thread-del", "×");
       x.type = "button";
-      x.disabled = !!pendingDelete || previewingDeletes.has(t.threadId) || !sock.isOpen;
-      x.title = pendingDelete?.waiting.has(t.threadId) ? "Deleting this thread…" : previewingDeletes.has(t.threadId)
-        ? "Checking thread changes…" : !sock.isOpen ? "Server not connected" : "Delete this thread";
+      x.dataset.threadId = t.threadId;
+      x.disabled = !!pendingDelete || !sock.isOpen;
+      x.title = pendingDelete?.waiting.has(t.threadId) ? "Deleting this thread…" : !sock.isOpen ? "Server not connected" : "Delete this thread";
       x.setAttribute("aria-label", `Delete thread: ${t.title}`);
       x.onclick = () => void deleteThread(t.threadId);
       const row = el("div", "thread-row");
@@ -1264,6 +1277,7 @@ function onThreadSay(msg: Extract<ServerMsg, { type: "thread.say" }>): void {
 function addSayBubble(say: ThreadSay, t: ThreadInfo | undefined): void {
   $("empty").hidden = true;
   const root = el("div", "turn say");
+  root.dataset.say = say.sayId;
   const bot = el("div", "bubble bot");
   if (t) {
     const who = el("button", "who link", `${displayTitle(t.title)} · ${pageLabel(t.pageUrl)}`);
@@ -1508,15 +1522,16 @@ function conversationEntries(): ConvoEntry[] {
       const err = c.err.hidden ? "" : c.err.textContent ?? "";
       out.push({
         session: c.info.session,
-        resumeContext: c.info.question,
-        id: `job:${c.info.jobId}`, user: null, who: c.head.textContent ?? "Background task", badges: [],
+        backgroundJob: { question: c.info.question, state: c.info.state },
+        id: c.info.state === "done" ? `job:${c.info.jobId}` : `job-activity:${c.info.jobId}`,
+        user: null, who: c.head.textContent ?? "Background task", badges: [],
         assistant: spoken || err || (c.question.hidden ? "" : c.question.textContent ?? ""),
         ...(c.detail.hidden ? {} : { detail: c.detailText }),
       });
     } else if (n.classList.contains("say")) {
       const bot = n.querySelector(".bubble.bot");
       if (!bot) continue;
-      out.push({ id: `say:${out.length}`, user: null, who: bot.querySelector(".who")?.textContent ?? undefined, assistant: ownText(bot), badges: [] });
+      out.push({ id: `say:${(n as HTMLElement).dataset.say}`, user: null, who: bot.querySelector(".who")?.textContent ?? undefined, assistant: ownText(bot), badges: [] });
     } else if (n.classList.contains("turn")) {
       const id = (n as HTMLElement).dataset.turn;
       const v = id ? views.get(id) : undefined;
@@ -1815,7 +1830,8 @@ function settleStopConfirm(): void {
   const job = ref.kind === "job" ? jobs.get(ref.jobId)?.info : undefined;
   const th = ref.kind === "thread" ? threads.get(ref.threadId) : undefined;
   const failed = job ? job.state === "failed" : th?.state === "failed";
-  const text = failed ? "That task failed." : job ? spokenOf(job.spoken ?? "") : th?.summary ?? "";
+  // A completed job publishes its own expandable bubble.
+  const text = failed ? "That task failed." : th?.summary;
   if (text) pageBubble({ sayId: `result:${c.confirmId}`, threadId: c.task.from, text, needsReply: false }, false);
   if (!turnBusy()) setStatus(readyStatus());
 }
@@ -1824,7 +1840,7 @@ function settleStopConfirm(): void {
  * A spoken line's bubble on the page. While a question is up on the same marker, an earlier line's end is dropped
  * (it would bring that line's bubble back over the question), and a new line replaces the question: no answer then.
  */
-function pageBubble(say: ThreadSay, ended: boolean): void {
+function pageBubble(say: PageSay, ended: boolean): void {
   const c = stopConfirm;
   if (c && say.threadId === c.task.from) {
     if (ended) return;
@@ -2062,7 +2078,7 @@ function onDictationMsg(msg: ServerMsg): void {
 /**
  * The bubble's Send: run the comment as a turn now, or add it to the list (Instant off, or now isn't a good time).
  * `threadId`: from that thread's panel: the turn is that thread's (sent now, never queued), shown in the panel only.
- * `chat`: from the message box: sent now, never queued, pointing at nothing; it stays in the conversation. False: not sent (the status says why).
+ * `chat`: from the message box: sent now with no pointer sample; it can name an element thread. False: not sent (the status says why).
  */
 function sendComment(text: string, sample: CursorSample | null, threadId?: string, annotation?: DrawingAnnotation, chat = false): boolean {
   if (pendingDelete?.reset || (threadId && pendingDelete?.waiting.has(threadId))) return false;
@@ -2227,7 +2243,7 @@ bridge.onComment?.((a, source = "page") => {
 
 // ── message box ────────────────────────────────────
 // The conversation's own form (web/cursor/inlineForm.ts, as in a thread's panel): type, or dictate with the mic or
-// the talk key while it has focus. It points at nothing, and what's sent from it stays in the conversation.
+// the talk key while it has focus. It has no pointer sample; a reference to a known element can go to its thread.
 {
   const style = document.createElement("style");
   style.textContent = `${themeCss({ scope: "#compose", prefix: "ui-", dataTheme: false })}\n${INLINE_FORM_CSS}`;
@@ -2815,7 +2831,7 @@ function deleteBatchLines(previews: ThreadDeletePreview[], committed: number, re
   return lines;
 }
 
-let batchConfirm: { box: HTMLElement; anchor: () => HTMLButtonElement | undefined; page?: string } | null = null;
+let batchConfirm: { box: HTMLElement; anchor: () => HTMLButtonElement | undefined; page?: string; thread?: string } | null = null;
 
 function closeDeleteConfirm(restoreFocus = false): void {
   const dialog = batchConfirm;
@@ -2829,7 +2845,87 @@ function refreshDeleteConfirm(): void {
   if (!dialog) return;
   closeDeleteConfirm(true);
   const button = dialog.anchor();
-  if (!settings.gitSourceControl && button) void openDeleteConfirm(button, dialog.page);
+  if (!settings.gitSourceControl && button) void (dialog.thread ? deleteThread(dialog.thread) : openDeleteConfirm(button, dialog.page));
+}
+
+/** Escape closes a delete confirmation; Tab cycles through its buttons. */
+function trapDeleteConfirm(box: HTMLElement, actions: HTMLElement): void {
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDeleteConfirm(true);
+    } else if (e.key === "Tab") {
+      const buttons = [...actions.querySelectorAll("button")];
+      const first = buttons[0], last = buttons.at(-1);
+      if (document.activeElement === (e.shiftKey ? first : last)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first)?.focus();
+      }
+    }
+  });
+}
+
+const threadDeleteButton = (threadId: string) =>
+  [...$("threads-list").querySelectorAll<HTMLButtonElement>(".thread-del")].find((b) => b.dataset.threadId === threadId);
+
+/** The sidebar's ×: the same choices as the panel's trash button, never a silent commit. */
+async function deleteThread(threadId: string): Promise<void> {
+  const anchor = () => threadDeleteButton(threadId);
+  if (batchConfirm?.thread === threadId) return closeDeleteConfirm(true);
+  closeDeleteConfirm();
+  const thread = threads.get(threadId);
+  if (pendingDelete || !thread) return;
+
+  const title = `Delete “${displayTitle(thread.title)}”?`;
+  const box = el("div", "reset-confirm thread-delete-confirm");
+  box.setAttribute("role", "alertdialog");
+  box.setAttribute("aria-label", title);
+  box.setAttribute("aria-describedby", "thread-delete-description");
+  const description = el("div");
+  description.id = "thread-delete-description";
+  description.setAttribute("aria-live", "polite");
+  if (settings.gitSourceControl) description.append(el("p", "", "Checking thread changes…"));
+  const cancel = el("button", "", "Cancel");
+  cancel.type = "button";
+  cancel.onclick = () => closeDeleteConfirm(true);
+  const actions = el("div", "reset-confirm-actions");
+  actions.append(cancel);
+  trapDeleteConfirm(box, actions);
+  box.append(el("strong", "", title), description, actions);
+  $("threads-clear").parentElement!.after(box);
+  box.scrollIntoView({ block: "nearest" });
+  const dialog = { box, anchor, thread: threadId };
+  batchConfirm = dialog;
+  cancel.focus();
+
+  try {
+    const [preview] = await previewDelete([threadId]);
+    if (batchConfirm !== dialog || !preview) return;
+    const choice = deleteConfirmation(preview);
+    // A complete thread whose changes can't be committed on their own only offers Keep, as the batch dialogs do.
+    const choices = choice.actions.filter(({ mode }) => mode !== "commit" || preview.willCommit !== false);
+    description.replaceChildren(el("p", "", choice.text));
+    // The panel lists the default first; here it sits last, as the danger button.
+    choices.reverse().forEach(({ label, mode }, i) => {
+      const button = el("button", i === choices.length - 1 ? "danger" : mode === "keep" ? "keep-uncommitted" : "", label);
+      button.type = "button";
+      button.onclick = () => {
+        if (batchConfirm !== dialog) return;
+        closeDeleteConfirm(true);
+        if (!threads.has(threadId)) return;
+        // Work that started after the preview can't be committed: ask again.
+        if (mode === "commit" && (threads.get(threadId)?.state === "running" || localThreadWorking(threadId))) {
+          void deleteThread(threadId);
+          return;
+        }
+        submitDelete("thread.delete", [{ threadId, mode }]);
+      };
+      actions.append(button);
+    });
+  } catch (error) {
+    if (batchConfirm === dialog) description.replaceChildren(el("p", "", (error as Error).message));
+  }
 }
 
 async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep: ReadonlySet<string> = new Set()): Promise<void> {
@@ -2859,23 +2955,13 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep:
   if (ids.length && settings.gitSourceControl) description.append(el("p", "", "Checking thread changes…"));
   const cancel = el("button", "", "Cancel");
   const ok = el("button", "danger", reset ? "Clear conversation" : "Delete threads");
-  cancel.type = ok.type = "button";
+  // Shown only when the default would commit something: the same deletion, with every thread's changes left in the working tree.
+  const keepAll = el("button", "keep-uncommitted", reset ? "Clear, keep uncommitted" : "Delete, keep uncommitted");
+  cancel.type = ok.type = keepAll.type = "button";
   cancel.onclick = () => closeDeleteConfirm(true);
-  box.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      closeDeleteConfirm(true);
-    } else if (e.key === "Tab") {
-      const last = ok.isConnected ? ok : cancel;
-      if (document.activeElement === (e.shiftKey ? cancel : last)) {
-        e.preventDefault();
-        (e.shiftKey ? last : cancel).focus();
-      }
-    }
-  });
   const actions = el("div", "reset-confirm-actions");
   actions.append(cancel);
+  trapDeleteConfirm(box, actions);
   box.append(el("strong", "", title), description, actions);
   (reset ? button : $("threads-clear").parentElement!).after(box);
   const dialog = { box, anchor, page };
@@ -2891,20 +2977,25 @@ async function openDeleteConfirm(button: HTMLButtonElement, page?: string, keep:
     });
     const committed = choices.filter((c) => c.mode === "commit").length;
     description.replaceChildren(...deleteBatchLines(previews, committed, reset, page !== undefined, tasks).map((l) => el("p", "", l)));
-    ok.onclick = () => {
+    const confirm = (keepEverything: boolean) => {
       if (batchConfirm !== dialog) return;
+      const chosen = keepEverything ? choices.map((c): ThreadDeleteChoice => ({ ...c, mode: "keep" })) : choices;
       const current = scope();
       const next = anchor();
-      const nowWorking = choices.filter(({ threadId, mode }) => mode === "commit"
+      const nowWorking = chosen.filter(({ threadId, mode }) => mode === "commit"
         && (threads.get(threadId)?.state === "running" || localThreadWorking(threadId)));
       closeDeleteConfirm(true);
       if (nowWorking.length || current.length !== ids.length || current.some((id) => !ids.includes(id)) || runningJobs() !== tasks) {
-        const stillKeep = new Set([...choices.filter(({ mode }) => mode === "keep"), ...nowWorking].map(({ threadId }) => threadId));
+        // A refreshed dialog keeps every thread already chosen to stay uncommitted, including all of them after Keep.
+        const stillKeep = new Set([...chosen.filter(({ mode }) => mode === "keep"), ...nowWorking].map(({ threadId }) => threadId));
         if (next) void openDeleteConfirm(next, page, stillKeep);
         return;
       }
-      submitDelete(reset ? "conversation.reset" : "threads.delete", choices);
+      submitDelete(reset ? "conversation.reset" : "threads.delete", chosen);
     };
+    ok.onclick = () => confirm(false);
+    keepAll.onclick = () => confirm(true);
+    if (committed) actions.append(keepAll);
     actions.append(ok);
   } catch (error) {
     if (batchConfirm === dialog) description.replaceChildren(el("p", "", (error as Error).message));

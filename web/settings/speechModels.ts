@@ -38,6 +38,7 @@ export const STT_ROWS: readonly ModelRow[] = [
   stt("local_apple", "device", "Apple SpeechTranscriber", "macOS", "Streams while you talk. macOS downloads each language's model on first use."),
   stt("local_whisperkit", "device", "WhisperKit large-v3 turbo", "Core ML", "Gets the whole clip on release. Installs whisperkit-cli with Homebrew; the first load compiles the model (a few minutes)."),
   stt("local_moonshine", "device", "Moonshine medium", "ONNX", "Re-transcribes while you talk. English only."),
+  stt("local_rumble-2-flash", "device", "Rumble 2 Flash", "Transformers", "Transcribes on release and detects 40+ languages. Word-timed pointing is unavailable. Requires Apple silicon and macOS 14 or later."),
 ];
 
 export const TTS_ROWS: readonly ModelRow[] = [
@@ -48,6 +49,7 @@ export const TTS_ROWS: readonly ModelRow[] = [
   tts("macos", "device", "macOS voices", "AVSpeechSynthesizer", "The system's own voices."),
   tts("kokoro", "device", "Kokoro-82M", "ONNX", "English voices; Romanian uses an Italian voice."),
   tts("piper", "device", "Piper", "ONNX", "English voices; Romanian uses mihai."),
+  tts("zonos3-mini", "device", "ZONOS3-Mini", "MLX", "Multilingual speech with 27 preset voices. Requires Apple silicon and macOS 14 or later."),
 ];
 
 export interface RowContext {

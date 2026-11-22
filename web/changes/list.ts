@@ -1,4 +1,4 @@
-import type { ChangeComponent, ChangeDiff, ChangeFile, ChangeGroup, ChangeHunk, ChangeWriter } from "../../shared/changes.ts";
+import { changedFileCount, groupComponents, type ChangeComponent, type ChangeDiff, type ChangeFile, type ChangeGroup, type ChangeHunk, type ChangeWriter } from "../../shared/changes.ts";
 import { changesApi, ChangesError } from "./api.ts";
 import type { ChangesReview } from "./review.ts";
 
@@ -47,6 +47,7 @@ export class ChangesList {
   private reasons = 0;
   private diffs = new Map<string, Promise<ChangeDiff>>();
   private writerNames = new Map<string, string>();
+  private cardTicks = new Map<HTMLInputElement, readonly string[]>();
 
   constructor(
     private readonly root: HTMLElement,
@@ -64,6 +65,7 @@ export class ChangesList {
     const focusKey = (document.activeElement as HTMLElement | null)?.dataset.focusKey;
     const { project, view, scope, scopedGroup, components } = this.review;
     this.root.replaceChildren();
+    this.cardTicks.clear();
     this.reasons = 0;
     const snapshot = JSON.stringify([project, view?.generation]);
     if (snapshot !== this.snapshot) {
@@ -107,22 +109,41 @@ export class ChangesList {
       tick.checked = this.review.selected.has(id);
       tick.disabled = busy || !this.review.components.get(id)?.selectable;
     }
+    for (const [tick, ids] of this.cardTicks) this.syncCardTick(tick, ids, busy);
   }
 
-  private card(title: string, components: readonly ChangeComponent[], state?: string): HTMLElement {
+  private syncCardTick(tick: HTMLInputElement, ids: readonly string[], busy = false): void {
+    const state = this.review.selectManyState(ids);
+    tick.checked = state.checked;
+    tick.indeterminate = state.indeterminate;
+    tick.disabled = busy || !state.available;
+  }
+
+  private card(title: string, components: readonly ChangeComponent[], state?: string, key = title): HTMLElement {
     const card = element("section", "card");
     const header = element("header", "group-head");
-    const count = new Set(components.flatMap(component => component.files.map(file => file.path))).size;
-    header.append(element("h2", undefined, title), element("span", "hint", filesLabel(count)));
+    const count = changedFileCount(components);
+    const ids = components.map(component => component.id);
+    const tick = element("input");
+    tick.type = "checkbox";
+    tick.dataset.focusKey = JSON.stringify(["card", key]);
+    tick.setAttribute("aria-label", `Select all files in ${title}`);
+    this.syncCardTick(tick, ids);
+    tick.addEventListener("change", () => {
+      this.review.toggleMany(ids, tick.checked);
+      this.selectionChanged();
+    });
+    this.cardTicks.set(tick, ids);
+    header.append(tick, element("h2", undefined, title), element("span", "hint", filesLabel(count)));
     if (state) header.append(element("p", "hint group-state", state));
     card.append(header);
     return card;
   }
 
   private group(group: ChangeGroup, openFiles: ReadonlySet<string>): HTMLElement {
-    const components = [...group.own, ...group.tied].flatMap(id => this.review.components.get(id) ?? []);
+    const components = groupComponents(group, this.review.components);
     const state = [group.reason || groupStates[group.state], group.incomplete ? "Incomplete work" : ""].filter(Boolean).join(" · ");
-    const card = this.card(group.title, components, state);
+    const card = this.card(group.title, components, state, writerKey(group.writer));
     card.setAttribute("aria-label", `${writerLabels[group.writer.kind]}: ${group.title}`);
     for (const component of components) card.append(this.component(component, group, group.title, openFiles));
     return card;

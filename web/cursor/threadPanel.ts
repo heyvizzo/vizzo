@@ -13,6 +13,10 @@ import { PANEL_GAP, PANEL_HEIGHT, PANEL_WIDTH, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT
 /** The panel header's delete button. */
 const ICON_TRASH = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.5 4.5h11M6.5 4.5V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M4 4.5l.7 8.6a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.6M6.8 7v4.5M9.2 7v4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ICON_STOP = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1.5" fill="currentColor"/></svg>`;
+const ICON_GIT_BRANCH = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M6 7.5v9M6 15c7 0 12-2 12-7.5"/>
+  <circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/>
+</svg>`;
 /**
  * A marker's look: its thread's state, or "asking" when the thread's last reply asked you something, or when the app
  * was closed mid-run (interrupted: it waits for Resume).
@@ -256,7 +260,7 @@ export function createThreadPanels(opts: PanelActions & {
   }
 
   /** The orb's panel: the conversation as the sidebar shows it. */
-  function openCentral(saved?: PanelSnapshot): void {
+  function openCentral(resultId?: string, saved?: PanelSnapshot): void {
     closePanel();
     const root = h("div", "th-panel");
     root.setAttribute("role", "dialog");
@@ -264,9 +268,14 @@ export function createThreadPanels(opts: PanelActions & {
     layer.append(root);
     panelDrag(root);
     panel = { threadId: null, root, resize: panelResizeHandles(root), offset: saved?.offset ?? null, form: null, confirming: null, openDetails: new Set(saved?.details), seen: new Set(), goal: null, view: { sx: 0, sy: 0, vw: viewport().vw, vh: viewport().vh } };
+    if (resultId) panel.openDetails.add(resultId);
     renderPanel();
     opts.changed();
-    if (!saved) root.querySelector<HTMLButtonElement>(".th-close")?.focus({ preventScroll: true });
+    if (!saved) {
+      const summary = resultId && root.querySelector<HTMLElement>(`[data-key="${CSS.escape(resultId)}"] summary`);
+      if (summary) summary.focus();
+      else root.querySelector<HTMLButtonElement>(".th-close")?.focus({ preventScroll: true });
+    }
   }
 
   function placePanel(): void {
@@ -438,18 +447,22 @@ export function createThreadPanels(opts: PanelActions & {
       const bot = h("div", "th-msg role-assistant");
       bot.append(h("div", "th-meta", [e.who ?? "Assistant", ...(e.user === null ? e.badges : [])].join(" · ")));
       if (e.assistant) bot.append(assistantText(e.assistant));
-      if (e.detail && fullAnswers) {
+      const result = e.backgroundJob?.state === "done" ? e.backgroundJob : undefined;
+      if (result) bot.classList.add("th-job-result");
+      if (result || (e.detail && fullAnswers)) {
         const d = h("details");
         d.open = openDetails.has(e.id);
         d.addEventListener("toggle", () => { if (d.open) openDetails.add(e.id); else openDetails.delete(e.id); });
-        d.append(h("summary", undefined, "Full answer"), fullAnswer(e.detail));
+        d.append(h("summary", undefined, result ? "Task details" : "Full answer"));
+        if (result) d.append(h("div", "th-job-question", result.question));
+        if (e.detail && fullAnswers) d.append(fullAnswer(e.detail));
         bot.append(d);
       }
       row.append(bot);
     }
     if (e.session && opts.continueSession) {
       row.append(sessionActions(e.session, copyNativeSession, async (info) => {
-        await opts.continueSession!(info.id!, e.resumeContext ?? e.user ?? undefined);
+        await opts.continueSession!(info.id!, e.backgroundJob?.question ?? e.user ?? undefined);
         panel?.root.querySelector("textarea")?.focus();
       }, true, showSession));
     }
@@ -475,8 +488,11 @@ export function createThreadPanels(opts: PanelActions & {
     const controls: HTMLElement[] = [];
     const look = t ? markerLook(t) : opts.orbState();
     const isDeleting = t ? deleting.has(t.threadId) : false;
+    const working = t?.state === "running" && !isDeleting;
+    p.root.classList.toggle("working", working);
+    p.root.ariaDescription = working ? "Working" : null;
     const chip = isDeleting ? "deleting…" : look === "asking" ? askingLabel(t) : look === "running" ? "working" : look === "speaking" ? "speaking" : look === "failed" ? "failed" : t ? STATE_LABEL[t.state] : "";
-    if (chip) {
+    if (chip && !working) {
       const state = h("span", "th-state", chip);
       state.dataset.state = look;
       controls.push(state);
@@ -493,13 +509,16 @@ export function createThreadPanels(opts: PanelActions & {
         stop.onclick = () => { opts.send({ type: "thread.stop", threadId: t.threadId }); p.form?.focus(); };
         controls.push(stop);
       }
-      if (changesStatus && t.state !== "queued") {
-        const reason = commitDisabledReason(t.threadId, changesStatus);
-        const commit = h("button", "th-commit", "Commit");
+      const info = threadCommitInfo(t.threadId, changesStatus);
+      if (info && t.state !== "queued") {
+        const commit = h("button", "th-commit");
+        commit.innerHTML = ICON_GIT_BRANCH;
         commit.type = "button";
-        commit.disabled = reason !== null || isDeleting;
-        commit.dataset.tip = reason ?? "Review this thread's changes";
-        if (reason !== null) commit.setAttribute("aria-label", `Commit unavailable. ${reason}`);
+        commit.disabled = info.reason !== undefined || isDeleting;
+        if (info.count !== undefined) commit.append(String(info.count));
+        const files = `${info.count} changed file${info.count === 1 ? "" : "s"}`;
+        commit.dataset.tip = info.reason ?? `Review this thread's changes (${files})`;
+        commit.setAttribute("aria-label", info.reason ? `Commit unavailable. ${info.reason}` : `Commit, ${files}`);
         commit.onclick = (event) => {
           if (event.isTrusted && !commit.disabled) opts.send({ type: "thread.commit", threadId: t.threadId });
         };
@@ -572,29 +591,38 @@ export function createThreadPanels(opts: PanelActions & {
 
     // The delete confirmation, right below the header's trash button.
     const foot = p.confirming && renderDeleteConfirm(t.threadId, p.confirming);
-    // "Always use the smart model": the router only speaks for it (a spoken turn), a typed one goes straight to it.
-    const smart = h("label", "th-smart");
-    if (t.state !== "queued") {
-      const box = h("input");
-      box.type = "checkbox";
-      box.checked = !!t.alwaysSmart;
-      box.onchange = () => opts.send({ type: "thread.smart", threadId: t.threadId, on: box.checked });
-      smart.dataset.tip = "Everything you say or type here is done by the smart model. Spoken requests still get a quick spoken reply first.";
-      smart.append(box, "Always use the smart model");
-    }
     // The form stays in place (moving it would take the focus and the caret from it).
     const form = p.form!;
     const compose = form.root.parentElement ?? h("div", "th-compose");
     if (!compose.isConnected) { compose.append(form.root); p.root.append(compose); }
+    updateSmartRouting(compose, t);
     compose.inert = isDeleting;
     for (const c of [...p.root.children]) if (c !== compose && c !== p.resize) c.remove();
-    compose.before(head, ...(session ? [session] : []), ...(foot ? [foot] : []), ...(t.summary ? [h("div", "th-summary", stripVoiceCues(t.summary))] : []), body);
-    if (smart.childElementCount) compose.after(smart);
+    compose.before(head, ...(session ? [session] : []), ...(foot ? [foot] : []), body);
     if (!p.resize.isConnected) p.root.append(p.resize);
     if (deleteChoice && foot) (foot.querySelector<HTMLButtonElement>(`[data-choice="${deleteChoice}"]:not(:disabled)`)
       ?? foot.querySelector<HTMLButtonElement>("[data-choice=cancel]"))?.focus({ preventScroll: true });
     scrollBody(p, body, scroll, firstRender, fresh);
     placePanel();
+  }
+
+  function updateSmartRouting(compose: HTMLElement, t: ThreadInfo): void {
+    let box = compose.querySelector<HTMLInputElement>(".th-smart input");
+    if (t.state === "queued") {
+      box?.closest("label")?.remove();
+      return;
+    }
+    if (!box) {
+      const smart = h("label", "th-smart");
+      const input = h("input");
+      input.type = "checkbox";
+      input.onchange = () => opts.send({ type: "thread.smart", threadId: t.threadId, on: input.checked });
+      smart.dataset.tip = "The smart model handles follow-ups in this thread. Spoken requests still get a quick spoken reply first.";
+      smart.append(input, "Route next messages to the smart model");
+      compose.prepend(smart);
+      box = input;
+    }
+    box.checked = !!t.alwaysSmart;
   }
 
   /** Keeps the body's scroll across a re-render; scrolls to a message that just arrived. */
@@ -654,9 +682,11 @@ export function createThreadPanels(opts: PanelActions & {
     if (panel?.threadId) renderPanel();
   }
 
-  function commitDisabledReason(threadId: string, status: NonNullable<PageChangesStatus>): string | null {
-    if (status.kind === "unavailable") return status.reason;
-    return status.ownedThreadIds.includes(threadId) ? null : "This thread has no uncommitted owned changes";
+  function threadCommitInfo(threadId: string, status: PageChangesStatus): { count?: number; reason?: string } | null {
+    if (!status) return null;
+    if (status.kind === "unavailable") return { reason: status.reason };
+    const count = Object.hasOwn(status.threadFileCounts, threadId) ? status.threadFileCounts[threadId]! : 0;
+    return count ? { count } : { count, reason: "This thread has no uncommitted owned changes" };
   }
 
   function setChangesStatus(status: PageChangesStatus, enabled: boolean): void {
@@ -672,8 +702,9 @@ export function createThreadPanels(opts: PanelActions & {
       renderPanel();
       return;
     }
-    if ((before ? commitDisabledReason(threadId, before) : undefined)
-      !== (changesStatus ? commitDisabledReason(threadId, changesStatus) : undefined)) renderPanel();
+    const previous = threadCommitInfo(threadId, before);
+    const current = threadCommitInfo(threadId, changesStatus);
+    if (previous?.count !== current?.count || previous?.reason !== current?.reason) renderPanel();
   }
 
   function setThreadActions({ deleting: deletingIds, continuing: continuingIds, connected: online }: PageThreads): void {
@@ -714,7 +745,7 @@ export function createThreadPanels(opts: PanelActions & {
     restore(saved: PanelSnapshot) {
       if (panel || (saved.threadId !== null && !opts.thread(saved.threadId))) return;
       if (saved.size) panelSizes.set(saved.threadId, saved.size);
-      if (saved.threadId === null) openCentral(saved);
+      if (saved.threadId === null) openCentral(undefined, saved);
       else openPanel(saved.threadId, saved);
       const body = layer.querySelector(".th-panel .th-body");
       if (body) body.scrollTop = saved.scroll;

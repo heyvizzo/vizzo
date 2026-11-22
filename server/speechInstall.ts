@@ -14,14 +14,14 @@ import { join } from "node:path";
 import type { InstallState } from "../shared/protocol.ts";
 import { APP_ROOT, SPEECH_ROOT } from "./paths.ts";
 import { PIPER_CATALOG } from "./ttsVoices.ts";
-import { LOCAL_TTS_FILES, stopLocalTts, type LocalEngine } from "./adapters/localTts.ts";
-import { WHISPERKIT_MODEL, stopLocalStt, whisperKitCli, type LocalSttEngine } from "./adapters/localStt.ts";
+import { LOCAL_TTS_FILES, TTS_VENVS, stopLocalTts, type LocalEngine } from "./adapters/localTts.ts";
+import { RUMBLE_MODEL_FILES, RUMBLE_VENV, WHISPERKIT_MODEL, stopLocalStt, whisperKitCli, type LocalSttEngine } from "./adapters/localStt.ts";
 
 const MB = 1024 * 1024;
 const SENTINEL = ".installing";
 
 type Kind = "tts" | "stt";
-type Venv = ".venv-tts" | ".venv-stt";
+type Venv = (typeof TTS_VENVS)[keyof typeof TTS_VENVS] | ".venv-stt" | typeof RUMBLE_VENV;
 
 export interface EngineSpec {
   kind: Kind;
@@ -45,15 +45,17 @@ export interface EngineSpec {
 
 export const ENGINE_SPECS: readonly EngineSpec[] = [
   { kind: "tts", engine: "macos", builtin: true },
-  { kind: "tts", engine: "kokoro", venv: ".venv-tts", dir: "kokoro", needs: LOCAL_TTS_FILES.kokoro, modelBytes: 337 * MB },
-  { kind: "tts", engine: "piper", venv: ".venv-tts", dir: "piper", needs: LOCAL_TTS_FILES.piper, modelBytes: 121 * MB, voices: PIPER_CATALOG },
+  { kind: "tts", engine: "kokoro", venv: TTS_VENVS.kokoro, dir: "kokoro", needs: LOCAL_TTS_FILES.kokoro, modelBytes: 337 * MB },
+  { kind: "tts", engine: "piper", venv: TTS_VENVS.piper, dir: "piper", needs: LOCAL_TTS_FILES.piper, modelBytes: 121 * MB, voices: PIPER_CATALOG },
+  { kind: "tts", engine: "zonos3-mini", venv: TTS_VENVS["zonos3-mini"], dir: "zonos3-mini", needs: LOCAL_TTS_FILES["zonos3-mini"], modelBytes: 1300 * MB },
   { kind: "stt", engine: "parakeet", venv: ".venv-stt", dir: "parakeet", needs: ["parakeet"], modelBytes: 2355 * MB },
   { kind: "stt", engine: "apple", builtin: true },
   { kind: "stt", engine: "whisperkit", dir: "whisperkit", needs: [WHISPERKIT_MODEL], modelBytes: 1536 * MB, tool: "whisperkit-cli", finishing: "Compiling for the Neural Engine (a few minutes)" },
   { kind: "stt", engine: "moonshine", venv: ".venv-stt", dir: "moonshine", needs: ["moonshine"], modelBytes: 412 * MB },
+  { kind: "stt", engine: "rumble-2-flash", venv: RUMBLE_VENV, dir: "rumble-2-flash", needs: RUMBLE_MODEL_FILES, modelBytes: 980 * MB },
 ];
 /** The Python envs' usual size (added to the download size while the env isn't there). */
-const VENV_BYTES: Record<Venv, number> = { ".venv-tts": 173 * MB, ".venv-stt": 614 * MB };
+const VENV_BYTES: Record<Venv, number> = { ".venv-tts": 173 * MB, ".venv-stt": 614 * MB, ".venv-zonos3": 200 * MB, [RUMBLE_VENV]: 200 * MB };
 
 export interface InstallerOptions {
   /** Where the envs and .models/ go (trailing slash; default SPEECH_ROOT). */

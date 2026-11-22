@@ -66,6 +66,26 @@ describe("Changes review", () => {
     expect(review.selection).toBeUndefined();
   });
 
+  it("selects and clears one thread's eligible components without touching other threads", () => {
+    const review = new ChangesReview();
+    review.apply("project", view);
+    const threadA = ["own", "blocked", "dependent", "mixed", "shared"];
+    expect(review.selectManyState(threadA)).toEqual({ checked: false, indeterminate: false, available: true });
+
+    review.toggle("job", true);
+    review.toggleMany(threadA, true);
+    expect(review.selection).toBeUndefined(); // "dependent" still needs "other"
+    expect([...review.selected].sort()).toEqual(["dependent", "job", "mixed", "own", "shared"]);
+    expect(review.selectManyState(threadA)).toEqual({ checked: true, indeterminate: false, available: true });
+    expect(review.selectManyState(["job", "shared"])).toMatchObject({ checked: true });
+
+    review.toggle("own", false);
+    expect(review.selectManyState(threadA)).toMatchObject({ checked: false, indeterminate: true });
+    review.toggleMany(threadA, false);
+    expect([...review.selected]).toEqual(["job"]);
+    expect(review.selectManyState(["blocked"])).toEqual({ checked: false, indeterminate: false, available: false });
+  });
+
   it("never extends a bulk selection to new, replaced, or newly eligible IDs on refresh", () => {
     const review = new ChangesReview();
     review.apply("project", view);

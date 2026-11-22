@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Local TTS models (offline): Kokoro-82M (ONNX) and Piper (en_US lessac + ro_RO mihai voices; more on demand).
-# Creates .venv-tts (Python 3.12 via uv) and downloads models into .models/{kokoro,piper}. Idempotent.
-#   npm run setup:local-tts [kokoro] [piper] [piper/<voice id>…]
+# Local TTS models (offline): Kokoro and Piper share .venv-tts; ZONOS3-Mini uses MLX in .venv-zonos3.
+# Models and voices go under .models/, one folder per engine.
+#   npm run setup:local-tts [kokoro] [piper] [piper/<voice id>…] [zonos3-mini]
 # No argument: Kokoro and Piper. Settings → Install runs it for one engine, and picking a Piper voice that isn't
 # downloaded runs it with piper/<voice id> (e.g. piper/en_US-ryan-high; the ids are server/ttsVoices.ts PIPER_CATALOG).
 set -euo pipefail
@@ -34,6 +34,28 @@ P=https://huggingface.co/rhasspy/piper-voices/resolve/main
 if want kokoro; then
   fetch "$K/kokoro-v1.0.onnx" .models/kokoro/kokoro-v1.0.onnx
   fetch "$K/voices-v1.0.bin" .models/kokoro/voices-v1.0.bin
+fi
+if want zonos3-mini; then
+  if [[ "$(uname -sm)" != "Darwin arm64" ]] || (( $(sw_vers -productVersion | cut -d. -f1) < 14 )); then
+    echo "ZONOS3-Mini requires Apple silicon and macOS 14 or later." >&2
+    exit 1
+  fi
+  ensure_uv
+  echo "Setting up Python for ZONOS3-Mini"
+  [ -x .venv-zonos3/bin/python ] || uv venv .venv-zonos3 --python 3.12
+  uv pip install --python .venv-zonos3/bin/python --quiet mlx-audio==0.6.6 'soxr>=1,<2'
+  echo "Downloading ZONOS3-Mini and preset voices"
+  .venv-zonos3/bin/python -I - <<'PY'
+from huggingface_hub import hf_hub_download, snapshot_download
+
+repo = "mlx-community/ZONOS3-Mini"
+revision = "c3b1320037be83fdbe57586bd6678573de1789f4"
+directory = ".models/zonos3-mini"
+snapshot_download(repo, revision=revision, local_dir=directory,
+                  allow_patterns=["config.json", "model.safetensors", "tokenizer.json", "codec/*", "voices/*.npz"])
+# Publish the index last so interrupted installs never offer a partial set of presets.
+hf_hub_download(repo, "voices.json", revision=revision, local_dir=directory)
+PY
 fi
 # Piper: English (lessac medium) and its only Romanian voice; any other voice by its id (lang_REGION-name-quality),
 # which maps onto the voices repo's folders: en_US-ryan-high → en/en_US/ryan/high/en_US-ryan-high.

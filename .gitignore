@@ -7,7 +7,9 @@ results/
 out/
 .claude/
 .venv-tts/
+.venv-zonos3/
 .venv-stt/
+.venv-rumble/
 .models/
 
 # npm run dist

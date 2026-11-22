@@ -147,8 +147,8 @@ describe("sttLanguageWarning", () => {
     expect(sttLanguageWarning("scribe_v2", ["de", "ja"])).toBeUndefined();
     expect(sttLanguageWarning("openrouter_nemotron_asr", ["en"])).toBeUndefined();
   });
-  it("points Romanian at Scribe", () => {
-    expect(sttLanguageWarning("openrouter_nemotron_asr", ["en", "ro"])).toBe("NVIDIA Nemotron 3.5 ASR (OpenRouter) doesn't transcribe Romanian reliably. Romanian works with ElevenLabs Scribe v2 Realtime, Parakeet TDT 0.6B v3 (on-device), WhisperKit large-v3 turbo (on-device).");
+  it("lists models that support Romanian", () => {
+    expect(sttLanguageWarning("openrouter_nemotron_asr", ["en", "ro"])).toBe("NVIDIA Nemotron 3.5 ASR (OpenRouter) doesn't transcribe Romanian reliably. Romanian works with ElevenLabs Scribe v2 Realtime, Parakeet TDT 0.6B v3 (on-device), WhisperKit large-v3 turbo (on-device), Rumble 2 Flash (on-device).");
   });
   it("says Fish ignores the setting", () => {
     expect(sttLanguageWarning("openrouter_fish_transcribe_1", ["en"])).toMatch(/ignores the language chosen/);

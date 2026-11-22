@@ -44,7 +44,7 @@ const thread = {
     label: "Target", text: "Target", role: null, tag: "button", bounds: { x: 350, y: 250, width: 70, height: 30 },
   },
 };
-const ready = { kind: "ready", project: "first", generation: 1, changedFiles: 3, ownedThreadIds: [threadId] };
+const ready = { kind: "ready", project: "first", generation: 1, changedFiles: 3, ownedThreadIds: [threadId], threadFileCounts: { [threadId]: 2 } };
 const oldGit = { kind: "unavailable", reason: "Source control requires Git 2.41 or later" };
 const lifecycle = [];
 const received = [];
@@ -73,7 +73,7 @@ utilityProcess.fork = (_module, _args, options) => {
       case "project":
         changesRequest = message.changesRequest;
         publish(message.dir === second
-          ? { kind: "ready", project: "second", generation: 2, changedFiles: 1, ownedThreadIds: [] }
+          ? { kind: "ready", project: "second", generation: 2, changedFiles: 1, ownedThreadIds: [], threadFileCounts: {} }
           : { kind: "non-repository", reason: "The project folder is not in a Git worktree" });
         break;
     }
@@ -176,6 +176,7 @@ async function run() {
   const bar = (code) => toolbar.executeJavaScript(code);
   const panel = await until(() => byUrl("/shell/thread-panel.html"), "native thread panel");
   const commitButton = () => panelNode(panel, ".th-panel .th-commit");
+  const commitCount = () => inspect(panel, ".th-panel .th-commit", "function() { return this.textContent.trim(); }");
   const commitDisabled = () => inspect(panel, ".th-panel .th-commit", "function() { return this.disabled; }");
   panel.debugger.attach("1.3");
   await until(() => sidebar.executeJavaScript('document.querySelectorAll(".thread-item").length === 1'), "thread snapshot");
@@ -184,6 +185,9 @@ async function run() {
   assert.equal(chatSettings().gitSourceControl, undefined, "the fixture starts without a saved Git preference");
   await until(() => bar('document.querySelector("#changes-count").textContent === "3"'), "default-on Git shows the current project's file count");
   await until(commitButton, "default-on Git shows the owned thread's Commit button");
+  assert.equal(await commitCount(), "2", "the panel counts only files associated with its thread");
+  publish({ ...ready, generation: 2, threadFileCounts: { [threadId]: 1 } });
+  await until(async () => await commitCount() === "1", "the counter refreshes while Commit stays enabled");
   await sidebar.executeJavaScript('shell.openSettings("preferences")');
   const preferences = await until(() => byUrl("/settings.html#preferences"), "Settings Preferences");
   const prefs = (code) => preferences.executeJavaScript(code);
@@ -273,6 +277,7 @@ async function run() {
   publish({ ...ready, changedFiles: 99 }, 0);
   await until(() => bar('document.querySelector("#changes-count").textContent === "1"'), "project switch replaces status");
   await until(async () => await evaluate("location.hash") === "" && await commitDisabled(), "old project's scope clears and its Commit becomes disabled");
+  assert.equal(await commitCount(), "0");
   assert.deepEqual(await inspect(panel, ".th-panel textarea", `function() {
     return { text: this.value, start: this.selectionStart, end: this.selectionEnd, focused: this.getRootNode().activeElement === this };
   }`), { text: "A draft", start: 2, end: 5, focused: true });
@@ -306,6 +311,7 @@ async function run() {
   await until(() => bar('!document.querySelector("#changes").hidden'), "outdated Git shows the unavailable button");
   assert.match(await bar('document.querySelector("#changes").getAttribute("aria-label")'), /requires Git 2\.41 or later/);
   await until(commitDisabled, "outdated Git disables thread Commit");
+  assert.equal(await commitCount(), "", "no file count is shown when Git is unavailable");
   assert.match(await inspect(panel, ".th-panel .th-commit", 'function() { return this.getAttribute("aria-label"); }'), /requires Git 2\.41 or later/);
   publish(ready);
   await until(() => bar('!document.querySelector("#changes").hidden'), "Git is ready for live toggle");

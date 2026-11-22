@@ -14,13 +14,14 @@ let chat, page, vite, sockets, peer, pageReady = false;
 const errors = [], received = [];
 const thread = {
   threadId: 'thread-stop', pageUrl: 'data:text/html', title: 'the button', state: 'idle', intent: 'task',
-  summary: '', unread: false, awaitingReply: false, createdAt: 0, lastInteractionAt: 0,
+  summary: 'Earlier answer.', unread: false, awaitingReply: false, createdAt: 0, lastInteractionAt: 0,
+  session: { provider: 'codex', id: 'test-session', resumeCommand: 'codex resume test-session' },
   anchor: { pageUrl: 'data:text/html', selector: '#target', domPath: 'body > #target', dataSource: null, label: 'Target', text: 'Target', role: null, tag: 'button', bounds: { x: 400, y: 200, width: 100, height: 40 } },
   messages: [{ id: 'm1', turnId: null, at: 0, role: 'assistant', kind: 'result', text: 'Earlier answer.' }],
 };
 const other = { ...thread, threadId: 'other-thread', state: 'running', title: 'another task', anchor: { ...thread.anchor, selector: '#other', domPath: 'body > #other', text: 'Other' } };
 ipcMain.on('hotkeys:get', e => { e.returnValue = null; });
-ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false }); });
+ipcMain.on('chat-settings:get', e => { e.returnValue = JSON.stringify({ instant: true, alwaysListen: false, showSolverSession: true }); });
 ipcMain.handle('attention:get', () => null);
 ipcMain.handle('project:get', () => null);
 ipcMain.handle('page:url', () => thread.pageUrl);
@@ -131,13 +132,27 @@ async function main() {
   page.webContents.send('page:open-thread', thread.threadId);
   await until(() => node('.th-panel'), 'thread opens');
   assert.equal(await stopVisible(), false, 'idle thread has no Stop button');
+  assert.equal(await inspect('.th-panel .th-body .th-text', 'function(){return this.textContent}'), thread.summary);
+  assert.equal(await inspect('.th-panel', 'function(){return this.textContent.split("Earlier answer.").length - 1}'), 1, 'last message appears only in history');
+  assert.equal(await inspect('.th-smart', 'function(){return this.textContent}'), 'Route next messages to the smart model');
+  assert(await inspect('.th-compose', 'function(){return this.querySelector(".th-smart").getBoundingClientRect().bottom <= this.querySelector("textarea").getBoundingClientRect().top}'), 'routing control is above the input');
+  await click('.th-smart input');
+  await until(() => received.some(m => m.type === 'thread.smart' && m.threadId === thread.threadId && m.on), 'routing control targets the open thread');
 
   // No decision or solver exists yet: Stop must still cancel the mistakenly sent turn.
   await draft('Mistaken request');
   await click('.th-panel .if-send');
   await until(() => starts().length === 1, 'first request sends');
   await until(stopVisible, 'Stop appears before routing finishes');
-  assert.equal(await inspect('.th-panel .th-stop', 'function(){return this.previousElementSibling.classList.contains("th-state") && this.nextElementSibling.classList.contains("th-trash")}'), true, 'Stop sits between the working label and the trash icon');
+  assert.equal(await node('.th-panel .th-state'), null, 'the working chip is gone');
+  assert(await node('.th-session-row .th-stop + .th-trash'), 'Stop sits next to Delete');
+  const tagAnimations = () => inspect('.th-panel', 'function(){return [".th-title", ".th-session-row .session-info"].map(s => getComputedStyle(this.querySelector(s)).animationName)}');
+  const motion = value => cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+  await motion('no-preference');
+  assert.deepEqual(await tagAnimations(), ['th-tag-pulse', 'th-tag-pulse']);
+  await motion('reduce');
+  assert.deepEqual(await tagAnimations(), ['none', 'none']);
+  await motion('no-preference');
   assert.equal(await node('.if-form .if-stop'), null, 'composer has no Stop button');
   await draft('Corrected request');
   const artifacts = path.join(root, 'results', 'thread-stop-smoke');
@@ -161,6 +176,7 @@ async function main() {
   await click('.th-panel .th-stop');
   await until(() => stops().length === 2, 'background solver stopped');
   await until(async () => !(await stopVisible()), 'Stop hides when work ends');
+  assert.deepEqual(await tagAnimations(), ['none', 'none'], 'title and harness stop pulsing together');
   assert.equal((await fieldState()).value, 'Another correction');
   assert(await node('.th-panel .th-trash'), 'thread panel stays open');
   assert.equal(received.some(m => m.type === 'thread.delete'), false, 'Stop keeps the thread');
